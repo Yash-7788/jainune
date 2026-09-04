@@ -1,0 +1,51 @@
+from typing import List
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Runtime
+    environment: str = "development"
+    debug: bool = False
+    app_version: str = "1.0.0"
+    allowed_origins: List[str] = ["http://localhost:3000", "jainune://"]
+
+    # Database
+    database_url: str
+    database_pool_min_size: int = 5
+    database_pool_max_size: int = 25
+    database_statement_timeout_ms: int = 2000
+
+    # Redis
+    redis_url: str
+    redis_pool_max_connections: int = 50
+
+    # JWT / Auth
+    jwt_algorithm: str = "RS256"
+    jwt_private_key_path: str = "/etc/secrets/jwt_rsa.key"
+    jwt_public_key_path: str = "/etc/secrets/jwt_rsa.pub"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 30
+    otp_pepper_secret: str
+
+    # AWS S3
+    aws_region: str = "ap-south-1"
+    aws_access_key_id: str
+    aws_secret_access_key: str
+    aws_s3_quarantine_bucket: str = "jainune-media-quarantine"
+    aws_s3_production_bucket: str = "jainune-media-production"
+    cdn_public_base_url: str = "https://cdn.jainune.com"
+
+    # MSG91
+    msg91_auth_key: str
+    msg91_otp_template_id: str
+
+    # Razorpay
+    razorpay_key_id: str
+    razorpay_key_secret: str
+    razorpay_webhook_secret: str
+
+
+settings = Settings()
