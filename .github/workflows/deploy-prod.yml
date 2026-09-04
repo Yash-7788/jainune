@@ -1,0 +1,8 @@
+# Production deployment placeholder
+name: Deploy Production
+on: workflow_dispatch
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploy placeholder"
