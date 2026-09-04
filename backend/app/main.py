@@ -84,6 +84,7 @@ async def health():
 
 
 # ── Routers (registered after all imports to avoid circular deps) ─────────────
-from app.routers import auth  # noqa: E402
+from app.routers import auth, onboarding  # noqa: E402
 
 app.include_router(auth.router, prefix="/v1")
+app.include_router(onboarding.router, prefix="/v1")
