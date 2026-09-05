@@ -27,13 +27,22 @@ DBDep = Annotated[asyncpg.Pool, Depends(get_db)]
 RedisDep = Annotated[aioredis.Redis, Depends(get_redis_client)]
 
 
+class UserSession(dict):
+    """Dictionary supporting attribute access (e.g. user.id and user['id'])."""
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'UserSession' object has no attribute '{name}'")
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
     db: asyncpg.Pool = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis_client),
-) -> dict:
+) -> UserSession:
     payload = await validate_access_token(credentials, redis)
     user_id = payload["sub"]
 
@@ -57,7 +66,7 @@ async def get_current_user(
             detail="User account not found or suspended.",
         )
 
-    user_dict = dict(row)
+    user_dict = UserSession(row)
     user_dict["user_id"] = row["id"]
     return user_dict
 

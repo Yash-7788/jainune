@@ -47,6 +47,7 @@ from app.models.schemas.user import (
     Step21ConsentBody,
     Step22CompleteBody,
 )
+from app.services.location_verifier import verify_location_zone
 
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 
@@ -326,21 +327,32 @@ async def step11_location(
     Stores raw GPS as a PostGIS geometry point. The trg_snap_user_location
     trigger immediately snaps it to the Geohash-6 centroid before commit.
     The application never stores or returns raw coordinates.
+    Gated to active operational launch zones (Mumbai MMR, Pune, Bengaluru).
     """
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
+
+    is_allowed, zone = verify_location_zone(body.latitude, body.longitude)
+    if not is_allowed or not zone:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Jainune is currently active in Mumbai MMR, Pune, and Bengaluru. We'll be in your city soon! 🚀",
+        )
+
     async with db.acquire() as conn:
         # ST_MakePoint(lon, lat) per PostGIS convention; SRID 4326
         await conn.execute(
             """
             UPDATE users
             SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
+                location_zone = $3,
                 onboarding_step = 11,
                 updated_at = NOW()
-            WHERE id = $3
+            WHERE id = $4
             """,
             body.longitude,
             body.latitude,
+            zone["id"],
             current_user.id,
         )
     return _status(11, False, "Set local discovery radius on step 12.")
