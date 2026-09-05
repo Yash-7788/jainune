@@ -354,6 +354,14 @@ async def send_message(
         }),
     )
 
+    # Dispatch FCM push notification to recipient
+    try:
+        from app.workers.notification_worker import notify_new_message
+        preview_text = msg.content[:80] if msg.content else "Sent a media attachment"
+        notify_new_message.delay(str(chat_id), str(user_id), preview_text)
+    except Exception:
+        pass
+
     return msg
 
 

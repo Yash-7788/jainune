@@ -282,6 +282,12 @@ async def _run_pipeline(
                 SELECT 1 FROM interactions i
                 WHERE i.actor_id = $8 AND i.target_id = u.id
             )
+            -- Exclude blocked users (either direction)
+            AND NOT EXISTS (
+                SELECT 1 FROM user_blocks ub
+                WHERE (ub.blocker_id = $8 AND ub.blocked_id = u.id)
+                   OR (ub.blocker_id = u.id AND ub.blocked_id = $8)
+            )
         ORDER BY b.revealed_preference_vector <=> $2::vector ASC
         LIMIT 200
     )
@@ -477,6 +483,11 @@ async def fetch_daily_compatible(
                   SELECT 1 FROM interactions i
                   WHERE i.actor_id = $1 AND i.target_id = u.id
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks ub
+                  WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                     OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
+              )
             ORDER BY b.revealed_preference_vector <=>
                 (SELECT revealed_preference_vector FROM user_behavior_vectors WHERE user_id = $1)
             ASC
@@ -505,3 +516,48 @@ async def fetch_daily_compatible(
         "compatibility_rationale": "Highest reciprocal behavioral affinity in your region.",
         "pairing_algorithm": "brre_fallback",
     }
+
+
+class CorePeopleFinder:
+    """OOP adapter for batch background workers."""
+
+    async def rank_candidates(
+        self,
+        requester: dict,
+        pool_users: list[dict],
+        top_k: int = 50,
+        conn: asyncpg.Connection | None = None,
+    ) -> list[dict]:
+        """
+        Rank candidate users from pool_users for requester based on cultural,
+        geographical, and reciprocal affinity constraints.
+        """
+        req_id = requester["id"]
+        req_gender = requester.get("show_me", "everyone")
+        req_diet = requester.get("dietary_strictness")
+        req_sect = requester.get("community_sect")
+
+        ranked = []
+        for cand in pool_users:
+            cid = cand["id"]
+            if cid == req_id:
+                continue
+            if req_gender in ("men", "man") and cand.get("gender") not in ("men", "man"):
+                continue
+            if req_gender in ("women", "woman") and cand.get("gender") not in ("women", "woman"):
+                continue
+            if req_diet == "pure_jain" and cand.get("dietary_strictness") not in ("pure_jain", "vegan"):
+                continue
+
+            score = 0
+            if cand.get("dietary_strictness") == req_diet:
+                score += 30
+            if cand.get("community_sect") == req_sect:
+                score += 25
+            if cand.get("eats_onion_garlic") == requester.get("eats_onion_garlic"):
+                score += 15
+
+            ranked.append((score, cand))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in ranked[:top_k]]

@@ -108,15 +108,33 @@ async def websocket_chat(
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id FROM chats
-            WHERE id = $1
-              AND (participant_1_id = $2 OR participant_2_id = $2)
+            SELECT c.id, c.is_unmatched,
+                   CASE WHEN c.participant_1_id = $2 THEN c.participant_2_id ELSE c.participant_1_id END AS other_id
+            FROM chats c
+            WHERE c.id = $1
+              AND (c.participant_1_id = $2 OR c.participant_2_id = $2)
             """,
             chat_id, user_id,
         )
-    if not row:
-        await websocket.close(code=4003, reason="Not a participant in this chat.")
-        return
+        if not row:
+            await websocket.close(code=4003, reason="Not a participant in this chat.")
+            return
+
+        if row.get("is_unmatched"):
+            await websocket.close(code=4003, reason="Chat has been unmatched and closed.")
+            return
+
+        blocked = await conn.fetchval(
+            """
+            SELECT 1 FROM user_blocks
+            WHERE (blocker_id = $1 AND blocked_id = $2)
+               OR (blocker_id = $2 AND blocked_id = $1)
+            """,
+            user_id, row["other_id"],
+        )
+        if blocked:
+            await websocket.close(code=4003, reason="Communication blocked.")
+            return
 
     # ── 4. Redis pub/sub subscription ────────────────────────────────────────
     pubsub = redis.pubsub()

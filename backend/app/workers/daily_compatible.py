@@ -75,7 +75,7 @@ async def _run_async() -> None:
                 paryushan_mode, eats_root_vegetables, eats_onion_garlic
             FROM users
             WHERE account_status = 'active'
-              AND onboarding_complete = TRUE
+              AND onboarding_completed = TRUE
               AND location IS NOT NULL
             """
         )

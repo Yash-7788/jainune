@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 import asyncpg
@@ -53,9 +54,9 @@ async def get_current_user(
                    dietary_strictness, eats_root_vegetables, eats_onion_garlic,
                    community_sect, city, state, max_distance_km,
                    open_to_relocation, subscription_tier, account_status,
-                   paryushan_mode, is_photo_verified
+                   paryushan_mode, is_photo_verified, suspend_until, deleted_at
             FROM users
-            WHERE id = $1 AND account_status != 'banned'
+            WHERE id = $1
             """,
             uuid.UUID(user_id),
         )
@@ -63,7 +64,26 @@ async def get_current_user(
     if not row:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account not found or suspended.",
+            detail="User account not found.",
+        )
+
+    if row.get("deleted_at") is not None or row.get("account_status") == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account has been deleted.",
+        )
+
+    if row.get("account_status") == "banned":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account has been permanently banned.",
+        )
+
+    suspend_until = row.get("suspend_until")
+    if suspend_until and suspend_until > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User account is temporarily suspended until {suspend_until.isoformat()}.",
         )
 
     user_dict = UserSession(row)

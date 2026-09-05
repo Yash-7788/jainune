@@ -273,7 +273,7 @@ async def get_public_profile(
                 u.is_photo_verified,
                 ARRAY(
                     SELECT m.cdn_url
-                    FROM media m
+                    FROM user_media m
                     WHERE m.user_id = u.id
                       AND m.media_type = 'photo'
                       AND m.status = 'approved'
@@ -407,3 +407,119 @@ async def award_badge(
         raise HTTPException(status_code=400, detail=str(exc))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# User blocking & account pause
+# ---------------------------------------------------------------------------
+
+
+class BlockUserBody(BaseModel):
+    reason: Optional[str] = Field(None, max_length=128)
+
+
+@router.post("/{user_id}/block", status_code=status.HTTP_200_OK)
+async def block_user(
+    user_id: UUID,
+    body: Optional[BlockUserBody] = None,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Block a user: terminates active matches/chats and excludes from feed."""
+    blocker_id = current_user["user_id"]
+    if str(blocker_id) == str(user_id):
+        raise HTTPException(status_code=400, detail="Cannot block yourself")
+
+    reason = body.reason if body else None
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO user_blocks (blocker_id, blocked_id, reason)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (blocker_id, blocked_id) DO UPDATE
+                   SET reason = EXCLUDED.reason, created_at = NOW()
+                """,
+                blocker_id, user_id, reason,
+            )
+            # Terminate mutual match if active
+            await conn.execute(
+                """
+                UPDATE matches
+                SET status = 'unmatched', updated_at = NOW()
+                WHERE (user_id_1 = $1 AND user_id_2 = $2)
+                   OR (user_id_1 = $2 AND user_id_2 = $1)
+                """,
+                blocker_id, user_id,
+            )
+            await conn.execute(
+                """
+                UPDATE chats
+                SET is_unmatched = TRUE, updated_at = NOW()
+                WHERE (participant_1_id = $1 AND participant_2_id = $2)
+                   OR (participant_1_id = $2 AND participant_2_id = $1)
+                """,
+                blocker_id, user_id,
+            )
+
+    from app.core.redis import get_redis
+    try:
+        r = get_redis()
+        await r.delete(f"feed:cache:{blocker_id}")
+        await r.delete(f"feed:cache:{user_id}")
+    except Exception:
+        pass
+
+    return {"success": True, "message": "User blocked and matches removed."}
+
+
+@router.delete("/{user_id}/block", status_code=status.HTTP_200_OK)
+async def unblock_user(
+    user_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Unblock a user."""
+    blocker_id = current_user["user_id"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2",
+            blocker_id, user_id,
+        )
+    return {"success": True, "message": "User unblocked."}
+
+
+@router.get("/me/blocks", status_code=status.HTTP_200_OK)
+async def list_blocked_users(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """List all blocked users."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT blocked_id, reason, created_at FROM user_blocks WHERE blocker_id = $1 ORDER BY created_at DESC",
+            current_user["user_id"],
+        )
+    return {"blocked_users": [dict(r) for r in rows]}
+
+
+@router.post("/me/pause", status_code=status.HTTP_200_OK)
+async def pause_account(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Pause profile from discovery feed."""
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_paused = TRUE, updated_at = NOW() WHERE id = $1", current_user["user_id"])
+    return {"success": True, "is_paused": True, "message": "Profile paused from discovery feed."}
+
+
+@router.post("/me/unpause", status_code=status.HTTP_200_OK)
+async def unpause_account(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Unpause profile to resume discovery feed."""
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_paused = FALSE, updated_at = NOW() WHERE id = $1", current_user["user_id"])
+    return {"success": True, "is_paused": False, "message": "Profile unpaused."}

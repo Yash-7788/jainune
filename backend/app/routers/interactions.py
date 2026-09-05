@@ -177,6 +177,7 @@ async def record_interaction_action(
         # ── Check for mutual match ────────────────────────────────────────────
         match_created = False
         chat_id = None
+        match_id_to_notify = None
 
         if body.action in ("like", "super_connect"):
             mutual = await conn.fetchrow(
@@ -223,6 +224,7 @@ async def record_interaction_action(
 
                 match_created = True
                 chat_id = chat_row["id"]
+                match_id_to_notify = match_row["id"]
 
                 # Update match with chat_id
                 await conn.execute(
@@ -237,6 +239,20 @@ async def record_interaction_action(
         await _update_behavior_vector_ema(actor_id, target_id, body.action, db)
     except Exception:
         pass  # Never fail the request over vector update
+
+    # Dispatch push notifications asynchronously
+    if match_created and match_id_to_notify:
+        try:
+            from app.workers.notification_worker import notify_new_match
+            notify_new_match.delay(str(match_id_to_notify))
+        except Exception:
+            pass
+    elif body.action in ("like", "super_connect"):
+        try:
+            from app.workers.notification_worker import notify_new_like
+            notify_new_like.delay(str(target_id), current_user.get("first_name", "Someone"))
+        except Exception:
+            pass
 
     # Invalidate feed caches for both users on match
     if match_created:

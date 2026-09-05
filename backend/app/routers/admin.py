@@ -162,7 +162,7 @@ async def get_user_detail(
                 u.*,
                 (SELECT COUNT(*) FROM reports WHERE reported_id = u.id) AS report_count,
                 (SELECT COUNT(*) FROM dignity_badges WHERE to_user_id = u.id) AS badge_count,
-                (SELECT COUNT(*) FROM media WHERE user_id = u.id AND status = 'approved') AS media_count
+                (SELECT COUNT(*) FROM user_media WHERE user_id = u.id AND status = 'approved') AS media_count
             FROM users u
             WHERE u.id = $1
             """,
@@ -377,7 +377,7 @@ async def list_pending_media(
                 m.id, m.user_id, m.media_type, m.cdn_url,
                 m.status, m.created_at,
                 u.first_name, u.phone_number
-            FROM media m
+            FROM user_media m
             JOIN users u ON u.id = m.user_id
             WHERE m.status = 'pending'
             ORDER BY m.created_at ASC
@@ -399,7 +399,7 @@ async def approve_media(
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
-            UPDATE media
+            UPDATE user_media
                SET status      = 'approved',
                    reviewed_by = $1,
                    reviewed_at = NOW()
@@ -423,7 +423,7 @@ async def reject_media(
     """Manually reject a media item with a reason."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id FROM media WHERE id = $1",
+            "SELECT user_id FROM user_media WHERE id = $1",
             media_id,
         )
         if row is None:
@@ -431,7 +431,7 @@ async def reject_media(
 
         await conn.execute(
             """
-            UPDATE media
+            UPDATE user_media
                SET status         = 'rejected',
                    rejection_reason = $1,
                    reviewed_by    = $2,
@@ -472,7 +472,7 @@ async def get_dashboard_stats(
                 (SELECT COUNT(*) FROM users WHERE subscription_tier = 'gold')  AS gold_subscribers,
                 (SELECT COUNT(*) FROM users WHERE subscription_tier = 'platinum') AS platinum_subscribers,
                 (SELECT COUNT(*) FROM reports WHERE resolved = FALSE)          AS open_reports,
-                (SELECT COUNT(*) FROM media WHERE status = 'pending')          AS pending_media,
+                (SELECT COUNT(*) FROM user_media WHERE status = 'pending')          AS pending_media,
                 (SELECT COUNT(*) FROM matches WHERE created_at > NOW() - INTERVAL '24h') AS matches_24h
             """
         )
