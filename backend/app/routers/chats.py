@@ -175,7 +175,8 @@ async def get_messages(
             rows = await conn.fetch(
                 """
                 SELECT id, chat_id, sender_id, message_type, content,
-                       media_url, is_read, created_at
+                       media_url, is_read, created_at,
+                       is_moderated, moderation_type, moderation_disclaimer
                 FROM messages
                 WHERE chat_id = $1 AND created_at < $2
                 ORDER BY created_at DESC
@@ -187,7 +188,8 @@ async def get_messages(
             rows = await conn.fetch(
                 """
                 SELECT id, chat_id, sender_id, message_type, content,
-                       media_url, is_read, created_at
+                       media_url, is_read, created_at,
+                       is_moderated, moderation_type, moderation_disclaimer
                 FROM messages
                 WHERE chat_id = $1
                 ORDER BY created_at DESC
@@ -210,6 +212,9 @@ async def get_messages(
             media_url=r["media_url"],
             is_read=r["is_read"],
             created_at=r["created_at"],
+            is_moderated=r.get("is_moderated", False),
+            moderation_type=r.get("moderation_type"),
+            moderation_disclaimer=r.get("moderation_disclaimer"),
         )
         for r in rows
     ]
@@ -237,6 +242,7 @@ async def send_message(
     """
     Inserts message into DB, then publishes to Redis pub/sub channel
     `chat:{chat_id}` so the WebSocket handler fans it out to both participants.
+    Applies Roblox-style chat safety filters and moderation.
     """
     user_id = uuid.UUID(str(current_user["id"]))
     chat = await _assert_participant(chat_id, user_id, db)
@@ -257,18 +263,61 @@ async def send_message(
 
     body.validate_content()
 
+    from app.services.chat_safety_filter import filter_chat_content
+
+    # Check user subscription status
+    async with db.acquire() as conn:
+        user_sub = await conn.fetchrow(
+            "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+            user_id,
+        )
+
+    is_subscribed = False
+    if user_sub:
+        tier = user_sub.get("subscription_tier") or "free"
+        valid_until = user_sub.get("subscription_valid_until")
+        if tier in ("gold", "platinum") and valid_until and valid_until > datetime.now(timezone.utc):
+            is_subscribed = True
+
+    # Filter content if text message
+    final_content = body.content
+    is_moderated = False
+    mod_type = None
+    mod_disclaimer = None
+
+    if body.message_type == "text" and body.content:
+        mod_result = await filter_chat_content(
+            content=body.content,
+            chat_id=chat_id,
+            user_id=user_id,
+            redis=redis,
+            is_subscribed=is_subscribed,
+            user_disclaimer_approved=body.user_disclaimer_approved,
+        )
+        final_content = mod_result.content
+        is_moderated = mod_result.is_moderated
+        mod_type = mod_result.moderation_type
+        mod_disclaimer = mod_result.moderation_disclaimer
+
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO messages (chat_id, sender_id, message_type, content, media_url)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at
+            INSERT INTO messages (
+                chat_id, sender_id, message_type, content, media_url,
+                is_moderated, moderation_type, moderation_disclaimer
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                      is_moderated, moderation_type, moderation_disclaimer
             """,
             chat_id,
             user_id,
             body.message_type,
-            body.content,
+            final_content,
             body.media_url,
+            is_moderated,
+            mod_type,
+            mod_disclaimer,
         )
 
     msg = ChatMessage(
@@ -280,6 +329,9 @@ async def send_message(
         media_url=row["media_url"],
         is_read=row["is_read"],
         created_at=row["created_at"],
+        is_moderated=row["is_moderated"],
+        moderation_type=row["moderation_type"],
+        moderation_disclaimer=row["moderation_disclaimer"],
     )
 
     # Publish to Redis pub/sub for WebSocket fan-out
@@ -295,6 +347,9 @@ async def send_message(
                 "content": msg.content,
                 "media_url": msg.media_url,
                 "created_at": msg.created_at.isoformat(),
+                "is_moderated": msg.is_moderated,
+                "moderation_type": msg.moderation_type,
+                "moderation_disclaimer": msg.moderation_disclaimer,
             },
         }),
     )

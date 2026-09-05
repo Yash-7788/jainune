@@ -29,12 +29,16 @@ class ChatMessage(BaseModel):
     media_url: Optional[str] = None
     is_read: bool = False
     created_at: datetime
+    is_moderated: bool = False
+    moderation_type: Optional[str] = None
+    moderation_disclaimer: Optional[str] = None
 
 
 class SendMessageRequest(BaseModel):
     message_type: str = "text"
     content: Optional[str] = None
     media_url: Optional[str] = None
+    user_disclaimer_approved: bool = False
 
     def validate_content(self) -> None:
         if self.message_type == "text" and not self.content:
