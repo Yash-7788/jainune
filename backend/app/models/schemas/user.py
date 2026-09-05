@@ -183,6 +183,8 @@ class Step11LocationBody(BaseModel):
 
     latitude: float = Field(..., ge=-90.0, le=90.0)
     longitude: float = Field(..., ge=-180.0, le=180.0)
+    is_mocked: bool = Field(False, description="Device mock location or developer option flag")
+    accuracy_meters: Optional[float] = Field(None, description="GPS horizontal accuracy in meters")
 
 
 class Step12DistanceBody(BaseModel):

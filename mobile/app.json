@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Jainune",
+    "slug": "jainune",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "jsEngine": "hermes",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D0F14"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.jainune.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Jainune uses your approximate location to connect you with nearby verified Jain singles in your region.",
+        "NSMicrophoneUsageDescription": "Jainune requires microphone access to record your 7-second voice snapshot and audio sparks.",
+        "NSCameraUsageDescription": "Jainune requires camera access for selfie verification.",
+        "NSPhotoLibraryUsageDescription": "Jainune needs access to your gallery to upload profile photos."
+      }
+    },
+    "android": {
+      "package": "com.jainune.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D0F14"
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA",
+        "RECORD_AUDIO"
+      ],
+      "allowBackup": false
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Jainune needs your location to connect you with verified Jain singles in Mumbai MMR, Pune, and Bengaluru."
+        }
+      ]
+    ]
+  }
+}

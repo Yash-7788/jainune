@@ -20,6 +20,7 @@ from app.main import ok
 from app.services.location_verifier import (
     LAUNCH_ZONES,
     save_city_waitlist,
+    verify_location_anti_spoofing,
     verify_location_zone,
 )
 
@@ -31,6 +32,8 @@ class VerifyLocationRequest(BaseModel):
     longitude: float = Field(..., ge=-180.0, le=180.0)
     phone_number: Optional[str] = Field(None, max_length=16)
     city_hint: Optional[str] = Field(None, max_length=128)
+    is_mocked: bool = Field(False, description="Device mock location or developer option flag")
+    accuracy_meters: Optional[float] = Field(None, description="GPS horizontal accuracy in meters")
 
 
 class LocationZoneResponse(BaseModel):
@@ -49,9 +52,23 @@ async def verify_location(
 ) -> dict:
     """
     Called by mobile app after location permission is granted:
+    - Verifies anti-spoofing (mock provider, coordinate anomalies).
     - If coordinates are inside Mumbai MMR, Pune PCMC, or Bengaluru: returns allowed=True.
     - If outside: returns allowed=False and automatically logs entry to location_waitlist.
     """
+    # 1. Anti-spoofing & integrity gate
+    valid_gps, spoof_error = verify_location_anti_spoofing(
+        lat=body.latitude,
+        lon=body.longitude,
+        is_mocked=body.is_mocked,
+        accuracy_meters=body.accuracy_meters,
+    )
+    if not valid_gps:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=spoof_error or "GPS location verification failed.",
+        )
+
     is_allowed, zone = verify_location_zone(body.latitude, body.longitude)
 
     if is_allowed and zone:

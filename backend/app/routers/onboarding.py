@@ -47,7 +47,10 @@ from app.models.schemas.user import (
     Step21ConsentBody,
     Step22CompleteBody,
 )
-from app.services.location_verifier import verify_location_zone
+from app.services.location_verifier import (
+    verify_location_anti_spoofing,
+    verify_location_zone,
+)
 
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 
@@ -331,6 +334,18 @@ async def step11_location(
     """
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
+
+    valid_gps, spoof_error = verify_location_anti_spoofing(
+        lat=body.latitude,
+        lon=body.longitude,
+        is_mocked=body.is_mocked,
+        accuracy_meters=body.accuracy_meters,
+    )
+    if not valid_gps:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=spoof_error or "GPS location verification failed.",
+        )
 
     is_allowed, zone = verify_location_zone(body.latitude, body.longitude)
     if not is_allowed or not zone:
