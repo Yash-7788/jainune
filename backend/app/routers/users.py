@@ -46,6 +46,7 @@ class UpdateProfileBody(BaseModel):
     looking_for: Optional[str] = Field(
         None, pattern="^(marriage|long_term|figuring_out)$"
     )
+    model_config = {"extra": "forbid"}
 
 
 # ---------------------------------------------------------------------------

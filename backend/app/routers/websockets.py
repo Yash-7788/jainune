@@ -72,7 +72,15 @@ async def websocket_chat(
     db = get_pool()
     redis = get_redis()
 
-    # ── 1. Accept ────────────────────────────────────────────────────────────
+    # ── 1. Origin validation & Accept ─────────────────────────────────────────
+    from app.core.config import settings
+    origin = websocket.headers.get("origin")
+    if origin:
+        allowed = settings.allowed_origins + ["jainune://", "localhost", "127.0.0.1"]
+        if not any(a in origin for a in allowed):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Origin not allowed.")
+            return
+
     await websocket.accept()
 
     # ── 2. Ticket / JWT validation ───────────────────────────────────────────
