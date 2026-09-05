@@ -44,3 +44,26 @@ class AccessTokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     expires_in: int
+
+
+class EmailOTPRequestBody(BaseModel):
+    email: str = Field(..., max_length=255)
+    turnstile_token: str | None = None
+
+
+class EmailOTPVerifyBody(BaseModel):
+    email: str = Field(..., max_length=255)
+    otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class GoogleAuthBody(BaseModel):
+    id_token: str = Field(..., min_length=10)
+    turnstile_token: str | None = None
+
+
+class AppleAuthBody(BaseModel):
+    id_token: str = Field(..., min_length=10)
+    first_name: str | None = Field(None, max_length=64)
+    last_name: str | None = Field(None, max_length=64)
+    turnstile_token: str | None = None
+

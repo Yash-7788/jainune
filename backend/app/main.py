@@ -80,14 +80,20 @@ def err(code: str, message: str, details: list | None = None) -> dict:
     }
 
 
-# ── Global exception handler ──────────────────────────────────────────────────
+# ── Global exception handlers ──────────────────────────────────────────────────
+from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from app.core.errors import (
+    http_exception_handler,
+    validation_exception_handler,
+    unhandled_exception_handler,
+)
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content=err("INTERNAL_ERROR", "An unexpected error occurred."),
-    )
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

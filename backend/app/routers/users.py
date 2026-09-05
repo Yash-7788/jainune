@@ -14,10 +14,11 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
+from app.core.redis import get_redis
 from app.core.security import get_current_user
 from app.models.schemas.payment import SubscriptionStatusResponse, SubscriptionTier
 from app.models.schemas.user import UserProfileResponse
@@ -214,32 +215,43 @@ async def set_fcm_token(
     return {"success": True, "message": "FCM token registered"}
 
 
-@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/me", status_code=status.HTTP_200_OK)
 async def delete_my_account(
+    hard_delete: bool = Query(True, description="When True, immediately and permanently purges all user rows, media from S3, and Redis caches to free memory and disk."),
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis = Depends(get_redis),
 ):
     """
-    Soft-delete: sets account_status='deleted', blanks PII fields.
-    Hard deletion runs via a scheduled worker after 30-day retention window.
+    Account deletion endpoint:
+    - hard_delete=True (default): Physically deletes all user records across all tables,
+      deletes uploaded photos/voice notes from Amazon S3, and purges Redis feed & quota caches.
+    - hard_delete=False: Anonymizes PII and marks account_status='deleted'.
     """
+    from app.services.account_service import purge_user_account, soft_delete_user_account
+
+    user_id = current_user["user_id"]
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE users
-               SET account_status   = 'deleted',
-                   first_name       = 'Deleted User',
-                   phone_number     = 'DELETED_' || id::text,
-                   bio              = NULL,
-                   job_title        = NULL,
-                   company          = NULL,
-                   education        = NULL,
-                   deleted_at       = NOW(),
-                   updated_at       = NOW()
-             WHERE id = $1
-            """,
-            current_user["user_id"],
-        )
+        if hard_delete:
+            result = await purge_user_account(user_id, conn, redis)
+            return {
+                "success": True,
+                "data": {
+                    "message": "Your account, personal data, and uploaded media have been permanently deleted.",
+                    "status": "purged",
+                },
+                "error": None,
+            }
+        else:
+            result = await soft_delete_user_account(user_id, conn, redis)
+            return {
+                "success": True,
+                "data": {
+                    "message": "Your account has been deactivated and scheduled for removal.",
+                    "status": "deactivated",
+                },
+                "error": None,
+            }
 
 
 @router.get("/{user_id}/public")
