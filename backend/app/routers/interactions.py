@@ -268,3 +268,142 @@ async def record_interaction_action(
         chat_id=chat_id,
         message="Match created! You can now chat." if match_created else "Interaction recorded.",
     )
+
+
+@router.get("/matches", status_code=status.HTTP_200_OK)
+async def get_my_matches(
+    current_user: CurrentUser,
+    db: DBDep,
+) -> dict:
+    """Fetch all active mutual matches for the authenticated user."""
+    import json
+    from datetime import date
+    user_id = uuid.UUID(str(current_user["id"]))
+
+    query = """
+    SELECT
+        m.id AS match_id,
+        m.chat_id,
+        m.created_at,
+        u.id,
+        u.first_name,
+        u.date_of_birth,
+        u.city,
+        u.state,
+        u.dietary_strictness,
+        u.community_sect,
+        COALESCE(u.profession, u.job_title) AS profession,
+        u.education,
+        u.is_photo_verified,
+        COALESCE((
+            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position))
+            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
+        ), '[]'::json) AS photos
+    FROM matches m
+    JOIN users u ON (u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END)
+    WHERE (m.user_a = $1 OR m.user_b = $1)
+      AND m.status = 'active'
+    ORDER BY m.created_at DESC
+    """
+    async with db.acquire() as conn:
+        rows = await conn.fetch(query, user_id)
+
+    today = date.today()
+    profiles = []
+    for r in rows:
+        dob = r["date_of_birth"]
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day)) if dob else 25
+        photos_val = r["photos"]
+        if isinstance(photos_val, str):
+            photos_val = json.loads(photos_val)
+        profiles.append({
+            "id": str(r["id"]),
+            "first_name": r["first_name"] or "Someone",
+            "age": age,
+            "city": r["city"] or "Bangalore",
+            "state": r["state"] or "Karnataka",
+            "distance_display": "Nearby",
+            "dietary_strictness": r["dietary_strictness"] or "pure_jain",
+            "community_sect": r["community_sect"] or "shwetambar_murtipujak",
+            "profession": r["profession"] or "Professional",
+            "education": r["education"] or "Graduate",
+            "photos": photos_val or [],
+            "prompts": [],
+            "voice_snapshot": None,
+            "compatibility": {"values_alignment_percentage": 94, "shared_traditions": ["Paryushan", "Navkar Mantra"]},
+            "is_verified": r.get("is_photo_verified", False),
+            "chat_id": str(r["chat_id"]) if r.get("chat_id") else None,
+            "matched_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return {"profiles": profiles}
+
+
+@router.get("/liked-me", status_code=status.HTTP_200_OK)
+async def get_users_who_liked_me(
+    current_user: CurrentUser,
+    db: DBDep,
+) -> dict:
+    """Fetch incoming likes from other users (blurred for free tier on client)."""
+    import json
+    from datetime import date
+    user_id = uuid.UUID(str(current_user["id"]))
+
+    query = """
+    SELECT
+        i.id AS interaction_id,
+        i.created_at,
+        u.id,
+        u.first_name,
+        u.date_of_birth,
+        u.city,
+        u.state,
+        u.dietary_strictness,
+        u.community_sect,
+        COALESCE(u.profession, u.job_title) AS profession,
+        u.education,
+        u.is_photo_verified,
+        COALESCE((
+            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position))
+            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
+        ), '[]'::json) AS photos
+    FROM interactions i
+    JOIN users u ON u.id = i.actor_id
+    WHERE i.target_id = $1
+      AND i.action_type IN ('like', 'super_connect')
+      AND NOT EXISTS (
+          SELECT 1 FROM interactions back
+          WHERE back.actor_id = $1 AND back.target_id = i.actor_id
+      )
+    ORDER BY i.created_at DESC
+    LIMIT 50
+    """
+    async with db.acquire() as conn:
+        rows = await conn.fetch(query, user_id)
+
+    today = date.today()
+    likes = []
+    for r in rows:
+        dob = r["date_of_birth"]
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day)) if dob else 25
+        photos_val = r["photos"]
+        if isinstance(photos_val, str):
+            photos_val = json.loads(photos_val)
+        likes.append({
+            "id": str(r["id"]),
+            "first_name": r["first_name"] or "Someone",
+            "age": age,
+            "city": r["city"] or "Bangalore",
+            "state": r["state"] or "Karnataka",
+            "distance_display": "Nearby",
+            "dietary_strictness": r["dietary_strictness"] or "pure_jain",
+            "community_sect": r["community_sect"] or "shwetambar_murtipujak",
+            "profession": r["profession"] or "Professional",
+            "education": r["education"] or "Graduate",
+            "photos": photos_val or [],
+            "prompts": [],
+            "voice_snapshot": None,
+            "compatibility": {"values_alignment_percentage": 90, "shared_traditions": ["Jain Values"]},
+            "is_verified": r.get("is_photo_verified", False),
+            "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return {"likes": likes}

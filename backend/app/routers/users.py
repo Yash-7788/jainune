@@ -47,6 +47,13 @@ class UpdateProfileBody(BaseModel):
     looking_for: Optional[str] = Field(
         None, pattern="^(marriage|long_term|figuring_out)$"
     )
+    city: Optional[str] = Field(None, max_length=64)
+    state: Optional[str] = Field(None, max_length=64)
+    community_sect: Optional[str] = Field(None, max_length=64)
+    dietary_strictness: Optional[str] = Field(None, max_length=64)
+    eats_root_vegetables: Optional[bool] = None
+    eats_onion_garlic: Optional[bool] = None
+    paryushan_mode: Optional[bool] = None
     fcm_token: Optional[str] = Field(None, max_length=256)
     model_config = {"extra": "forbid"}
 

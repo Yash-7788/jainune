@@ -11,6 +11,7 @@
  */
 
 import { Platform, NativeModules } from "react-native";
+import { clearTokens } from "../api/client";
 
 export interface IntegrityCheckResult {
   isSecure: boolean;
@@ -224,13 +225,22 @@ async function verifyApkSignatureIntegrity(): Promise<boolean> {
  * Emergency lock & memory wipe: triggered if critical integrity violations detected.
  */
 export function terminateCompromisedSession(violations: string[]): void {
-  // 1. Purge all in-memory keys
+  // 1. Unconditionally wipe secure store credentials in JS layer
+  try {
+    clearTokens().catch(() => {});
+  } catch {}
+
+  // 2. Purge all in-memory keys
   if (NativeModules.JainuneSecurityModule?.emergencyPurgeStorage) {
-    NativeModules.JainuneSecurityModule.emergencyPurgeStorage();
+    try {
+      NativeModules.JainuneSecurityModule.emergencyPurgeStorage();
+    } catch {}
   }
 
-  // 2. Halt execution
+  // 3. Halt execution
   if (NativeModules.JainuneSecurityModule?.exitApp) {
-    NativeModules.JainuneSecurityModule.exitApp();
+    try {
+      NativeModules.JainuneSecurityModule.exitApp();
+    } catch {}
   }
 }

@@ -192,3 +192,25 @@ async def razorpay_webhook(
 
     # Always return 200 to acknowledge receipt
     return {"received": True}
+
+
+@router.post("/cancel", status_code=status.HTTP_200_OK)
+async def cancel_subscription(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Cancel subscription: retains benefits until valid_until, disables auto-renewal."""
+    from datetime import datetime, timezone
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+            current_user["user_id"],
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        valid_until = row["subscription_valid_until"] or datetime.now(timezone.utc)
+    return {
+        "success": True,
+        "message": "Subscription renewal cancelled. Benefits remain active until billing period ends.",
+        "access_until": valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until),
+    }

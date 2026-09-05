@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Network Security Configuration — Jainune
+  Implements SECURITY.md §9.3 (SSL/TLS Certificate Pinning)
+
+  Pins the SHA-256 SPKI fingerprints of api.jainune.com.
+  Defeats MITM proxies: Burp Suite, Charles Proxy, mitmproxy, Frida SSL-unpinning.
+
+  Primary pin:   k20YWfohKw3kUj5t5K65soVIyzxPCQFvMQkxZpmGsoo=
+  Backup pin:    WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=
+  (Backup pin prevents lockout during certificate renewal)
+
+  HOW TO REGENERATE PINS (run on your prod server):
+    openssl s_client -connect api.jainune.com:443 -servername api.jainune.com 2>/dev/null \
+      | openssl x509 -pubkey -noout \
+      | openssl pkey -pubin -outform DER \
+      | openssl dgst -sha256 -binary \
+      | openssl enc -base64
+-->
+<network-security-config>
+
+  <!-- Production domain — full pinning, no user CAs, no system CAs override -->
+  <domain-config cleartextTrafficPermitted="false">
+    <domain includeSubdomains="true">api.jainune.com</domain>
+    <domain includeSubdomains="true">jainune.com</domain>
+
+    <pin-set expiration="2027-09-01">
+      <!-- Primary SPKI pin — api.jainune.com production TLS certificate -->
+      <pin digest="SHA-256">k20YWfohKw3kUj5t5K65soVIyzxPCQFvMQkxZpmGsoo=</pin>
+      <!-- Backup pin — disaster recovery / renewal certificate -->
+      <pin digest="SHA-256">WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=</pin>
+    </pin-set>
+
+    <!-- Only trust system CA bundle — reject all user-installed CAs (Burp/Charles certs) -->
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </domain-config>
+
+  <!-- AWS S3 presigned upload — no pinning needed, short-lived URLs -->
+  <domain-config cleartextTrafficPermitted="false">
+    <domain includeSubdomains="true">s3.ap-south-1.amazonaws.com</domain>
+    <domain includeSubdomains="true">jainune-media-quarantine.s3.ap-south-1.amazonaws.com</domain>
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </domain-config>
+
+  <!-- Razorpay payment gateway -->
+  <domain-config cleartextTrafficPermitted="false">
+    <domain includeSubdomains="true">api.razorpay.com</domain>
+    <domain includeSubdomains="true">checkout.razorpay.com</domain>
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </domain-config>
+
+  <!-- Global base config — block ALL plaintext HTTP everywhere -->
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors>
+      <certificates src="system" />
+      <!-- Explicitly NO user certificates — defeats Burp/Charles MITM -->
+    </trust-anchors>
+  </base-config>
+
+</network-security-config>

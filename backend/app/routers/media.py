@@ -169,6 +169,27 @@ async def request_upload(
     )
 
 
+@router.get(
+    "/presign-upload",
+    response_model=UploadRequestResponse,
+    summary="Presign upload GET adapter for mobile compatibility",
+)
+async def presign_upload_get(
+    current_user: CurrentUser,
+    db: DBDep,
+    type: str = Query("photo", pattern="^(photo|voice)$"),
+) -> UploadRequestResponse:
+    ct = "image/jpeg" if type == "photo" else "audio/mp4"
+    size = 2 * 1024 * 1024 if type == "photo" else 1024 * 1024
+    body = UploadRequestBody(
+        media_type=type,
+        content_type=ct,
+        file_size_bytes=size,
+        position=0,
+    )
+    return await request_upload(body, current_user, db)
+
+
 @router.post(
     "/upload/confirm",
     status_code=status.HTTP_202_ACCEPTED,

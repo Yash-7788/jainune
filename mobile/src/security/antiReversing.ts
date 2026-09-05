@@ -21,12 +21,17 @@ export const SPKI_PINS = [
 ];
 
 /**
- * Activates OS-level screenshot and screen recording blocking (FLAG_SECURE).
+ * Activates OS-level screenshot and screen recording blocking (FLAG_SECURE on Android,
+ * UIScreen.capturedDidChange blanking view on iOS).
  */
 export function enableScreenCaptureProtection(): void {
   if (Platform.OS === "android") {
     if (NativeModules.JainuneSecurityModule?.enableFlagSecure) {
       NativeModules.JainuneSecurityModule.enableFlagSecure();
+    }
+  } else if (Platform.OS === "ios") {
+    if (NativeModules.JainuneSecurityModule?.enableScreenRecordingProtection) {
+      NativeModules.JainuneSecurityModule.enableScreenRecordingProtection();
     }
   }
 }
