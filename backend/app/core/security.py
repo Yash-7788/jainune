@@ -157,3 +157,32 @@ async def sliding_window_rate_limit(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded.",
         )
+
+
+async def validate_access_token_raw(
+    token: str,
+    redis: aioredis.Redis | None = None,
+) -> dict:
+    """
+    Validate a raw JWT string (used by WebSocket endpoints where Bearer
+    header is not available and the token arrives as a query parameter).
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            _RSA_PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer="jainune-api",
+            audience="jainune-client",
+            options={"require": ["exp", "iss", "aud", "jti", "sub"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise ValueError(f"Invalid token: {exc}") from exc
+
+    if redis is not None:
+        jti = payload["jti"]
+        if await redis.exists(f"token:blacklist:{jti}"):
+            raise ValueError("Token has been revoked.")
+
+    return payload
+
