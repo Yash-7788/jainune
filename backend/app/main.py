@@ -85,7 +85,8 @@ async def health():
 
 # ── Routers (registered after all imports to avoid circular deps) ─────────────
 from app.routers import auth, onboarding, feed, interactions, telemetry  # noqa: E402
-from app.routers import chats, websockets, media  # noqa: E402
+from app.routers import chats, websockets, media                          # noqa: E402
+from app.routers import users, subscriptions, arcade, admin               # noqa: E402
 
 app.include_router(auth.router, prefix="/v1")
 app.include_router(onboarding.router, prefix="/v1")
@@ -95,3 +96,7 @@ app.include_router(telemetry.router)
 app.include_router(chats.router)
 app.include_router(websockets.router)
 app.include_router(media.router)
+app.include_router(users.router)
+app.include_router(subscriptions.router)
+app.include_router(arcade.router)
+app.include_router(admin.router)
