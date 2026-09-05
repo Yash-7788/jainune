@@ -70,7 +70,7 @@ def reap_ephemeral_media() -> None:
             rows = await conn.fetch(
                 """
                 SELECT id, s3_key
-                FROM media
+                FROM user_media
                 WHERE status IN ('rejected', 'pending')
                   AND created_at < NOW() - INTERVAL '1 hour'
                   AND s3_purged = FALSE
@@ -88,7 +88,7 @@ def reap_ephemeral_media() -> None:
                         Key=row["s3_key"],
                     )
                     await conn.execute(
-                        "UPDATE media SET s3_purged = TRUE WHERE id = $1",
+                        "UPDATE user_media SET s3_purged = TRUE WHERE id = $1",
                         row["id"],
                     )
                     purged += 1
@@ -159,7 +159,7 @@ def reap_stale_matches() -> None:
                 UPDATE matches
                    SET status     = 'expired',
                        expired_at = NOW()
-                 WHERE status = 'matched'
+                 WHERE status IN ('active', 'matched')
                    AND last_message_at < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                 RETURNING id
                 """
@@ -171,7 +171,7 @@ def reap_stale_matches() -> None:
             warn_ids = await conn.fetch(
                 f"""
                 SELECT id FROM matches
-                WHERE status = 'matched'
+                WHERE status IN ('active', 'matched')
                   AND expiry_warned = FALSE
                   AND last_message_at < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                                                 + INTERVAL '{EXPIRY_WARN_HOURS} hours'
@@ -229,12 +229,12 @@ def purge_deleted_users() -> None:
             # Delete S3 objects first (no cascade for external storage)
             s3 = _s3_client()
             media_keys = await conn.fetch(
-                "SELECT s3_key, bucket FROM media WHERE user_id = ANY($1::uuid[])",
+                "SELECT s3_key FROM user_media WHERE user_id = ANY($1::uuid[])",
                 ids,
             )
             for mk in media_keys:
                 try:
-                    s3.delete_object(Bucket=mk["bucket"], Key=mk["s3_key"])
+                    s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=mk["s3_key"])
                 except Exception as exc:
                     log.warning("S3 purge error for key %s: %s", mk["s3_key"], exc)
 

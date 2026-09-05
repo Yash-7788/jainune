@@ -16,9 +16,22 @@ class SubscriptionTier(str, Enum):
     free = "free"
     gold = "gold"
     platinum = "platinum"
+    jainune_plus = "jainune_plus"
 
 
 class PlanId(str, Enum):
+    # Jainune+ flagship tiers (SUBSCRIPTION_SPEC.md)
+    jainune_plus_monthly = "jainune_plus_monthly"
+    jainune_plus_quarterly = "jainune_plus_quarterly"
+    jainune_plus_semiannual = "jainune_plus_semiannual"
+    jainune_plus_annual = "jainune_plus_annual"
+
+    # Standalone 2-digit Serendipity Arcade micro-transactions
+    arcade_wheel_spin = "arcade_wheel_spin"
+    arcade_dice_roll = "arcade_dice_roll"
+    arcade_3_pack = "arcade_3_pack"
+
+    # Legacy tier compatibility
     gold_monthly = "gold_monthly"
     gold_quarterly = "gold_quarterly"
     platinum_monthly = "platinum_monthly"

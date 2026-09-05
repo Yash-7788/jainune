@@ -189,9 +189,11 @@ async def award_badge(
         connected = await conn.fetchval(
             """
             SELECT id FROM matches
-            WHERE (user_a_id = $1 AND user_b_id = $2)
-               OR (user_a_id = $2 AND user_b_id = $1)
-              AND status = 'matched'
+            WHERE ((user_a = $1 AND user_b = $2)
+                OR (user_a = $2 AND user_b = $1)
+                OR (user_a_id = $1 AND user_b_id = $2)
+                OR (user_a_id = $2 AND user_b_id = $1))
+              AND status IN ('active', 'matched', 'closed')
             """,
             from_user_id,
             to_user_id,

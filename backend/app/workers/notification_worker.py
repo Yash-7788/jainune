@@ -105,13 +105,13 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
                 SELECT
                     sender.first_name AS sender_name,
                     recipient.fcm_token AS recipient_token
-                FROM chat_threads ct
+                FROM chats c
                 JOIN users sender    ON sender.id = $2
                 JOIN users recipient ON recipient.id = CASE
-                    WHEN ct.user_a_id = $2 THEN ct.user_b_id
-                    ELSE ct.user_a_id
+                    WHEN c.participant_1_id = $2 THEN c.participant_2_id
+                    ELSE c.participant_1_id
                 END
-                WHERE ct.id = $1
+                WHERE c.id = $1
                 """,
                 chat_id,
                 sender_id,

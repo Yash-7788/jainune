@@ -22,8 +22,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import razorpay
-import asyncpg
+try:
+    import razorpay
+except ImportError:
+    razorpay = None
+
+try:
+    import asyncpg
+except ImportError:
+    asyncpg = None
 
 from app.core.config import settings
 
@@ -34,35 +41,99 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
+    # Jainune+ flagship passes (SUBSCRIPTION_SPEC.md §3.1)
+    "jainune_plus_monthly": {
+        "tier": "jainune_plus",
+        "amount": 49900,
+        "currency": "INR",
+        "validity_days": 30,
+        "type": "subscription",
+    },
+    "jainune_plus_quarterly": {
+        "tier": "jainune_plus",
+        "amount": 99900,
+        "currency": "INR",
+        "validity_days": 90,
+        "type": "subscription",
+    },
+    "jainune_plus_semiannual": {
+        "tier": "jainune_plus",
+        "amount": 169900,
+        "currency": "INR",
+        "validity_days": 180,
+        "type": "subscription",
+    },
+    "jainune_plus_annual": {
+        "tier": "jainune_plus",
+        "amount": 279900,
+        "currency": "INR",
+        "validity_days": 365,
+        "type": "subscription",
+    },
+    # Standalone 2-digit Serendipity Arcade micro-transactions (SUBSCRIPTION_SPEC.md §4)
+    "arcade_wheel_spin": {
+        "tier": None,
+        "amount": 2900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "arcade",
+        "spins": 1,
+        "dice_rolls": 0,
+    },
+    "arcade_dice_roll": {
+        "tier": None,
+        "amount": 1900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "arcade",
+        "spins": 0,
+        "dice_rolls": 1,
+    },
+    "arcade_3_pack": {
+        "tier": None,
+        "amount": 4900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "arcade",
+        "spins": 3,
+        "dice_rolls": 3,
+    },
+    # Legacy tier backwards-compatibility
     "gold_monthly": {
         "tier": "gold",
         "amount": 29900,
         "currency": "INR",
         "validity_days": 30,
+        "type": "subscription",
     },
     "gold_quarterly": {
         "tier": "gold",
         "amount": 79900,
         "currency": "INR",
         "validity_days": 90,
+        "type": "subscription",
     },
     "platinum_monthly": {
         "tier": "platinum",
         "amount": 59900,
         "currency": "INR",
         "validity_days": 30,
+        "type": "subscription",
     },
     "platinum_quarterly": {
         "tier": "platinum",
         "amount": 149900,
         "currency": "INR",
         "validity_days": 90,
+        "type": "subscription",
     },
 }
 
 
-def _rzp_client() -> razorpay.Client:
+def _rzp_client() -> Any:
     """Return authenticated Razorpay client."""
+    if razorpay is None:
+        raise RuntimeError("razorpay package is not installed")
     return razorpay.Client(
         auth=(settings.razorpay_key_id, settings.razorpay_key_secret)
     )
@@ -163,9 +234,10 @@ async def process_payment_captured(
     Handle payment.captured webhook event.
 
     1. Look up payment_intent by order_id.
-    2. Derive subscription tier and validity from plan.
-    3. Update users table: subscription_tier, subscription_valid_until.
-    4. Mark intent as captured.
+    2. Route by plan type:
+       - subscription: update users.subscription_tier and subscription_valid_until.
+       - arcade: credit user_arcade_wallet and record arcade_transactions.
+    3. Mark intent as captured.
     """
     payment = event.get("payload", {}).get("payment", {}).get("entity", {})
     order_id: str = payment.get("order_id", "")
@@ -193,46 +265,86 @@ async def process_payment_captured(
             log.error("Unknown plan %s for order_id=%s", intent["plan_id"], order_id)
             return
 
-        valid_until = datetime.now(tz=timezone.utc) + timedelta(days=plan["validity_days"])
+        plan_type = plan.get("type", "subscription")
 
         async with conn.transaction():
-            await conn.execute(
-                """
-                UPDATE users
-                   SET subscription_tier       = $1,
-                       subscription_valid_until = $2,
-                       updated_at               = NOW()
-                 WHERE id = $3
-                """,
-                plan["tier"],
-                valid_until,
-                intent["user_id"],
-            )
+            if plan_type == "subscription":
+                valid_until = datetime.now(tz=timezone.utc) + timedelta(days=plan["validity_days"])
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier        = $1,
+                           subscription_valid_until = $2,
+                           updated_at               = NOW()
+                     WHERE id = $3
+                    """,
+                    plan["tier"],
+                    valid_until,
+                    intent["user_id"],
+                )
+                log.info(
+                    "Subscription upgraded: user=%s tier=%s until=%s",
+                    intent["user_id"],
+                    plan["tier"],
+                    valid_until,
+                )
+            elif plan_type == "arcade":
+                # Micro-transaction: credit user's arcade wallet
+                spins = plan.get("spins", 0)
+                dice_rolls = plan.get("dice_rolls", 0)
+                await conn.execute(
+                    """
+                    INSERT INTO user_arcade_wallet (user_id, available_spins, available_dice_rolls, updated_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET available_spins       = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                           available_dice_rolls  = user_arcade_wallet.available_dice_rolls + EXCLUDED.available_dice_rolls,
+                           updated_at            = NOW()
+                    """,
+                    intent["user_id"],
+                    spins,
+                    dice_rolls,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO arcade_transactions
+                        (user_id, action_type, amount_inr, spins_delta, dice_rolls_delta, razorpay_order_id, razorpay_payment_id, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'captured')
+                    """,
+                    intent["user_id"],
+                    intent["plan_id"],
+                    plan["amount"] / 100.0,
+                    spins,
+                    dice_rolls,
+                    order_id,
+                    payment_id,
+                )
+                log.info(
+                    "Arcade wallet credited: user=%s spins=+%d dice=+%d",
+                    intent["user_id"],
+                    spins,
+                    dice_rolls,
+                )
+
+            # Mark intent captured
             await conn.execute(
                 """
                 UPDATE payment_intents
-                   SET status            = 'captured',
+                   SET status              = 'captured',
                        razorpay_payment_id = $1,
-                       captured_at       = NOW()
-                 WHERE razorpay_order_id = $2
+                       captured_at         = NOW()
+                 WHERE razorpay_order_id   = $2
                 """,
                 payment_id,
                 order_id,
             )
-
-    log.info(
-        "Subscription upgraded: user=%s tier=%s until=%s",
-        intent["user_id"],
-        plan["tier"],
-        valid_until,
-    )
 
 
 async def process_refund(
     event: dict[str, Any],
     pool: asyncpg.Pool,
 ) -> None:
-    """Handle payment.refunded — downgrade user back to free."""
+    """Handle payment.refunded — isolate subscription downgrade vs arcade deduction."""
     refund = event.get("payload", {}).get("refund", {}).get("entity", {})
     payment_id: str = refund.get("payment_id", "")
 
@@ -241,21 +353,96 @@ async def process_refund(
 
     async with pool.acquire() as conn:
         intent = await conn.fetchrow(
-            "SELECT user_id FROM payment_intents WHERE razorpay_payment_id = $1",
+            "SELECT user_id, plan_id FROM payment_intents WHERE razorpay_payment_id = $1",
             payment_id,
         )
         if intent is None:
             return
 
-        await conn.execute(
-            """
-            UPDATE users
-               SET subscription_tier       = 'free',
-                   subscription_valid_until = NULL,
-                   updated_at               = NOW()
-             WHERE id = $1
-            """,
-            intent["user_id"],
-        )
+        plan = PLAN_CATALOGUE.get(intent["plan_id"], {})
+        plan_type = plan.get("type", "subscription")
 
-    log.info("Subscription revoked on refund: user=%s", intent["user_id"])
+        async with conn.transaction():
+            if plan_type == "subscription":
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier        = 'free',
+                           subscription_valid_until = NULL,
+                           updated_at               = NOW()
+                     WHERE id = $1
+                    """,
+                    intent["user_id"],
+                )
+                log.info("Subscription revoked on refund: user=%s", intent["user_id"])
+            elif plan_type == "arcade":
+                # Deduct arcade credits without touching subscription
+                spins = plan.get("spins", 0)
+                dice_rolls = plan.get("dice_rolls", 0)
+                await conn.execute(
+                    """
+                    UPDATE user_arcade_wallet
+                       SET available_spins      = GREATEST(0, available_spins - $1),
+                           available_dice_rolls = GREATEST(0, available_dice_rolls - $2),
+                           updated_at           = NOW()
+                     WHERE user_id = $3
+                    """,
+                    spins,
+                    dice_rolls,
+                    intent["user_id"],
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO arcade_transactions
+                        (user_id, action_type, amount_inr, spins_delta, dice_rolls_delta, razorpay_payment_id, status)
+                    VALUES ($1, 'refund', $2, $3, $4, $5, 'refunded')
+                    """,
+                    intent["user_id"],
+                    -(plan.get("amount", 0) / 100.0),
+                    -spins,
+                    -dice_rolls,
+                    payment_id,
+                )
+                log.info("Arcade credits revoked on refund: user=%s", intent["user_id"])
+
+            await conn.execute(
+                "UPDATE payment_intents SET status = 'refunded', updated_at = NOW() WHERE razorpay_payment_id = $1",
+                payment_id,
+            )
+
+
+async def get_effective_user_tier(
+    user_id: Any,
+    conn: asyncpg.Connection,
+) -> str:
+    """
+    Returns the real-time active subscription tier for a user.
+    If valid_until has expired, lazily auto-downgrades to 'free'.
+    """
+    row = await conn.fetchrow(
+        "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+        user_id,
+    )
+    if not row:
+        return "free"
+
+    tier = row["subscription_tier"] or "free"
+    valid_until = row["subscription_valid_until"]
+
+    if tier != "free":
+        if not valid_until or valid_until < datetime.now(tz=timezone.utc):
+            # Expired: lazy downgrade
+            await conn.execute(
+                """
+                UPDATE users
+                   SET subscription_tier        = 'free',
+                       subscription_valid_until = NULL,
+                       updated_at               = NOW()
+                 WHERE id = $1
+                """,
+                user_id,
+            )
+            return "free"
+
+    return tier
+

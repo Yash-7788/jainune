@@ -68,10 +68,30 @@ async def verify_payment(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """
-    Optional: client posts callback data for server-side HMAC check.
-    If valid, we upgrade the subscription immediately (webhook is the canonical path,
-    this is the fallback for immediate UX feedback).
+    Client posts callback data for server-side HMAC check.
+    Security protections:
+      - Validates caller is the owner of the payment_intent (anti-hijack)
+      - HMAC-SHA256 signature verification (anti-spoof)
+      - Redis distributed lock on order_id (anti-race/double-spend)
+      - Idempotent return if already captured
     """
+    # 1. Verify caller owns the order
+    async with pool.acquire() as conn:
+        intent = await conn.fetchrow(
+            "SELECT user_id, status FROM payment_intents WHERE razorpay_order_id = $1",
+            body.razorpay_order_id,
+        )
+    if intent is None:
+        raise HTTPException(status_code=404, detail="Payment order not found")
+
+    if str(intent["user_id"]) != str(current_user["user_id"]):
+        log.warning("User %s attempted to verify order %s belonging to %s", current_user["user_id"], body.razorpay_order_id, intent["user_id"])
+        raise HTTPException(status_code=403, detail="Order does not belong to the authenticated user")
+
+    if intent["status"] == "captured":
+        return {"success": True, "message": "Payment already verified.", "status": "already_captured"}
+
+    # 2. Verify HMAC signature
     valid = payment_service.verify_payment_signature(
         order_id=body.razorpay_order_id,
         payment_id=body.razorpay_payment_id,
@@ -80,22 +100,42 @@ async def verify_payment(
     if not valid:
         raise HTTPException(status_code=400, detail="Invalid payment signature")
 
-    # Simulate a captured event for the upgrade path
-    await payment_service.process_payment_captured(
-        event={
-            "payload": {
-                "payment": {
-                    "entity": {
-                        "order_id": body.razorpay_order_id,
-                        "id": body.razorpay_payment_id,
+    # 3. Redis distributed lock to prevent concurrent double-processing
+    from app.core.redis import get_redis
+    lock_key = f"lock:payment:verify:{body.razorpay_order_id}"
+    r = None
+    lock_acquired = True
+    try:
+        r = get_redis()
+        lock_acquired = await r.set(lock_key, "1", nx=True, ex=15)
+    except Exception:
+        pass  # DB transaction gate is fallback
+
+    if not lock_acquired:
+        raise HTTPException(status_code=409, detail="Payment verification is already in progress")
+
+    try:
+        await payment_service.process_payment_captured(
+            event={
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "order_id": body.razorpay_order_id,
+                            "id": body.razorpay_payment_id,
+                        }
                     }
                 }
-            }
-        },
-        pool=pool,
-    )
+            },
+            pool=pool,
+        )
+    finally:
+        if r and lock_acquired:
+            try:
+                await r.delete(lock_key)
+            except Exception:
+                pass
 
-    return {"success": True, "message": "Payment verified. Subscription upgraded."}
+    return {"success": True, "message": "Payment verified. Account upgraded."}
 
 
 # ---------------------------------------------------------------------------

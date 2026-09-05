@@ -264,3 +264,143 @@ async def create_dilemma(
         )
 
     return {"id": dilemma_id, "created": True}
+
+
+# ---------------------------------------------------------------------------
+# Serendipity Arcade: Micro-Transaction Wallet & Game Actions
+# ---------------------------------------------------------------------------
+
+
+class ArcadeWalletResponse(BaseModel):
+    user_id: UUID
+    available_spins: int
+    available_dice_rolls: int
+
+
+@router.get("/wallet", response_model=ArcadeWalletResponse)
+async def get_arcade_wallet(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Fetch current user's arcade token balance (spins and dice rolls)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT available_spins, available_dice_rolls
+            FROM user_arcade_wallet
+            WHERE user_id = $1
+            """,
+            current_user["user_id"],
+        )
+    return {
+        "user_id": current_user["user_id"],
+        "available_spins": row["available_spins"] if row else 0,
+        "available_dice_rolls": row["available_dice_rolls"] if row else 0,
+    }
+
+
+@router.post("/spin", status_code=status.HTTP_200_OK)
+async def spin_serendipity_wheel(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Consume 1 spin credit from wallet and trigger instantaneous random Bangalore pairing.
+    (SUBSCRIPTION_SPEC.md §4.2: Kinetic Wheel Spin)
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Atomic deduction
+            remaining = await conn.fetchval(
+                """
+                UPDATE user_arcade_wallet
+                   SET available_spins = available_spins - 1,
+                       updated_at = NOW()
+                 WHERE user_id = $1 AND available_spins > 0
+                RETURNING available_spins
+                """,
+                current_user["user_id"],
+            )
+            if remaining is None:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail="No spins remaining. Purchase an arcade pack to spin.",
+                )
+
+            # Record spend transaction
+            await conn.execute(
+                """
+                INSERT INTO arcade_transactions
+                    (user_id, action_type, spins_delta, status)
+                VALUES ($1, 'spend_spin', -1, 'spent')
+                """,
+                current_user["user_id"],
+            )
+
+            # Find active random candidate in same operational zone
+            candidate = await conn.fetchrow(
+                """
+                SELECT id, first_name, city
+                FROM users
+                WHERE id != $1 AND account_status = 'active'
+                ORDER BY random()
+                LIMIT 1
+                """,
+                current_user["user_id"],
+            )
+
+    return {
+        "success": True,
+        "action": "spin",
+        "remaining_spins": remaining,
+        "paired_user": dict(candidate) if candidate else None,
+        "message": "Wheel spin successful! 15-minute speed chat enabled.",
+    }
+
+
+@router.post("/roll", status_code=status.HTTP_200_OK)
+async def roll_lucky_dice(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Consume 1 dice roll credit from wallet and generate lucky match ticket.
+    (SUBSCRIPTION_SPEC.md §4.3: Lucky Match Dice Roll)
+    """
+    import random
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            remaining = await conn.fetchval(
+                """
+                UPDATE user_arcade_wallet
+                   SET available_dice_rolls = available_dice_rolls - 1,
+                       updated_at = NOW()
+                 WHERE user_id = $1 AND available_dice_rolls > 0
+                RETURNING available_dice_rolls
+                """,
+                current_user["user_id"],
+            )
+            if remaining is None:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail="No dice rolls remaining. Purchase a roll to play.",
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO arcade_transactions
+                    (user_id, action_type, dice_rolls_delta, status)
+                VALUES ($1, 'spend_roll', -1, 'spent')
+                """,
+                current_user["user_id"],
+            )
+
+    roll_outcome = [random.randint(1, 6), random.randint(1, 6)]
+    return {
+        "success": True,
+        "action": "dice_roll",
+        "dice": roll_outcome,
+        "total": sum(roll_outcome),
+        "remaining_dice_rolls": remaining,
+        "message": f"Rolled {roll_outcome[0]} and {roll_outcome[1]}! Match ticket active for 30 minutes.",
+    }

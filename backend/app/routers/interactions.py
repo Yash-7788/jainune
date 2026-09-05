@@ -123,8 +123,27 @@ async def record_interaction_action(
                 message="Interaction already recorded.",
             )
 
-        # ── Super-connect credit deduction ───────────────────────────────────
-        if body.action == "super_connect":
+        # ── Daily like limit enforcement & super-connect credit deduction ────
+        from app.services.payment_service import get_effective_user_tier
+        tier = await get_effective_user_tier(actor_id, conn)
+
+        if body.action == "like":
+            from datetime import datetime, timezone
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            like_key = f"daily_likes:{actor_id}:{today_str}"
+
+            # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
+            limit = 10 if tier == "free" else (50 if tier == "gold" else None)
+            if limit is not None:
+                current_likes = await redis.incr(like_key)
+                if current_likes == 1:
+                    await redis.expire(like_key, 86400)
+                if current_likes > limit:
+                    raise HTTPException(
+                        status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                        detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
+                    )
+        elif body.action == "super_connect":
             deducted = await conn.fetchval(
                 """
                 UPDATE users
@@ -145,7 +164,9 @@ async def record_interaction_action(
             """
             INSERT INTO interactions (actor_id, target_id, action_type, reacted_prompt_id)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (actor_id, target_id) DO NOTHING
+            ON CONFLICT (actor_id, target_id) DO UPDATE
+               SET action_type = EXCLUDED.action_type,
+                   reacted_prompt_id = EXCLUDED.reacted_prompt_id
             """,
             actor_id,
             target_id,
@@ -173,12 +194,13 @@ async def record_interaction_action(
                 u1 = uuid.UUID(pair[0])
                 u2 = uuid.UUID(pair[1])
 
-                # Upsert match row
+                # Upsert match row with dual column aliases for worker and router compatibility
                 match_row = await conn.fetchrow(
                     """
-                    INSERT INTO matches (user_id_1, user_id_2, match_type)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (user_id_1, user_id_2) DO UPDATE
+                    INSERT INTO matches
+                        (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
+                    VALUES ($1, $2, $1, $2, $1, $2, $3, 'active')
+                    ON CONFLICT (user_a, user_b) DO UPDATE
                         SET match_type = EXCLUDED.match_type
                     RETURNING id
                     """,
@@ -189,9 +211,11 @@ async def record_interaction_action(
                 # Create chat thread (idempotent on match_id)
                 chat_row = await conn.fetchrow(
                     """
-                    INSERT INTO chats (match_id, participant_1_id, participant_2_id)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (match_id) DO UPDATE SET match_id = EXCLUDED.match_id
+                    INSERT INTO chats
+                        (match_id, participant_1_id, participant_2_id, participant_a, participant_b)
+                    VALUES ($1, $2, $3, $2, $3)
+                    ON CONFLICT (match_id) DO UPDATE
+                       SET match_id = EXCLUDED.match_id
                     RETURNING id
                     """,
                     match_row["id"], u1, u2,
@@ -200,7 +224,7 @@ async def record_interaction_action(
                 match_created = True
                 chat_id = chat_row["id"]
 
-                # Update match with chat_id if column exists
+                # Update match with chat_id
                 await conn.execute(
                     "UPDATE matches SET chat_id = $1 WHERE id = $2",
                     chat_id, match_row["id"],

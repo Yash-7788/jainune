@@ -46,6 +46,7 @@ class UpdateProfileBody(BaseModel):
     looking_for: Optional[str] = Field(
         None, pattern="^(marriage|long_term|figuring_out)$"
     )
+    fcm_token: Optional[str] = Field(None, max_length=256)
     model_config = {"extra": "forbid"}
 
 
@@ -66,6 +67,11 @@ _TIER_LIMITS = {
     },
     "platinum": {
         "daily_likes": None,  # unlimited
+        "super_likes": 10,
+        "can_see_who_liked": True,
+    },
+    "jainune_plus": {
+        "daily_likes": None,  # unlimited intentional likes
         "super_likes": 10,
         "can_see_who_liked": True,
     },
@@ -145,36 +151,67 @@ async def get_subscription_status(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Return current subscription tier, validity, and feature limits."""
+    """Return current subscription tier, validity, and remaining daily/super likes."""
+    from app.services.payment_service import get_effective_user_tier
+    from datetime import datetime, timezone
+    from app.core.redis import get_redis
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, subscription_tier, subscription_valid_until
+            SELECT id, subscription_tier, subscription_valid_until, super_connect_credits
             FROM users WHERE id = $1
             """,
             current_user["user_id"],
         )
-    if row is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        if row is None:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    from datetime import datetime, timezone
+        tier = await get_effective_user_tier(current_user["user_id"], conn)
 
-    tier: str = row["subscription_tier"] or "free"
     valid_until = row["subscription_valid_until"]
+    limits = _TIER_LIMITS.get(tier, _TIER_LIMITS["free"])
 
-    # If subscription expired, fall back to free limits
-    if valid_until and valid_until < datetime.now(tz=timezone.utc) and tier != "free":
-        tier = "free"
+    # Calculate remaining likes today
+    daily_likes_remaining = limits["daily_likes"]
+    if daily_likes_remaining is not None:
+        try:
+            r = get_redis()
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            used = await r.get(f"daily_likes:{current_user['user_id']}:{today_str}")
+            used_int = int(used) if used else 0
+            daily_likes_remaining = max(0, daily_likes_remaining - used_int)
+        except Exception:
+            pass
 
-    limits = _TIER_LIMITS[tier]
     return {
         "user_id": row["id"],
         "tier": SubscriptionTier(tier),
         "valid_until": valid_until,
-        "daily_likes_remaining": limits["daily_likes"],
-        "super_likes_remaining": limits["super_likes"],
+        "daily_likes_remaining": daily_likes_remaining,
+        "super_likes_remaining": row["super_connect_credits"] if row.get("super_connect_credits") is not None else limits["super_likes"],
         "can_see_who_liked": limits["can_see_who_liked"],
     }
+
+
+class FCMTokenBody(BaseModel):
+    fcm_token: str = Field(..., min_length=10, max_length=256)
+
+
+@router.post("/me/fcm-token", status_code=status.HTTP_200_OK)
+async def set_fcm_token(
+    body: FCMTokenBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Register or update device FCM push notification token."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2",
+            body.fcm_token,
+            current_user["user_id"],
+        )
+    return {"success": True, "message": "FCM token registered"}
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)

@@ -13,12 +13,18 @@ from app.core.config import settings
 
 _bearer = HTTPBearer()
 
-# Load RSA keys once at import time
-with open(settings.jwt_private_key_path, "rb") as f:
-    _RSA_PRIVATE_KEY = f.read()
+# Load RSA keys once at import time (with safe fallback if missing in local/test env)
+try:
+    with open(settings.jwt_private_key_path, "rb") as f:
+        _RSA_PRIVATE_KEY = f.read()
+except (FileNotFoundError, OSError):
+    _RSA_PRIVATE_KEY = b""
 
-with open(settings.jwt_public_key_path, "rb") as f:
-    _RSA_PUBLIC_KEY = f.read()
+try:
+    with open(settings.jwt_public_key_path, "rb") as f:
+        _RSA_PUBLIC_KEY = f.read()
+except (FileNotFoundError, OSError):
+    _RSA_PUBLIC_KEY = b""
 
 
 # ── OTP ─────────────────────────────────────────────────────────────────────
