@@ -44,6 +44,23 @@ OTP_RATE_WINDOW_SECONDS = 3600
 OTP_RATE_LIMIT = 3
 
 
+def mask_phone(phone: str) -> str:
+    """Mask phone for safe logging and UI display: +91*****1210."""
+    if len(phone) >= 8:
+        return phone[:4] + "*" * (len(phone) - 8) + phone[-4:]
+    return "***"
+
+
+def mask_email(email: str) -> str:
+    """Mask email for safe logging and UI display: p****@domain.com."""
+    parts = email.split("@")
+    if len(parts) == 2:
+        user, domain = parts
+        masked = (user[0] + "*" * (len(user) - 1)) if len(user) > 1 else "*"
+        return f"{masked}@{domain}"
+    return "***"
+
+
 async def _issue_token_response(
     user_id: uuid.UUID,
     is_new_user: bool,
@@ -97,8 +114,9 @@ async def request_otp(body: OTPRequestBody, redis: RedisDep) -> dict:
     # Send via MSG91
     await _send_otp_msg91(body.phone_number, otp)
 
+    log.info("Dispatched SMS OTP to %s", mask_phone(body.phone_number))
     return ok(OTPRequestResponse(
-        phone_number=body.phone_number,
+        phone_number=mask_phone(body.phone_number),
         retry_after_seconds=60,
         expires_in_seconds=OTP_TTL_SECONDS,
     ).model_dump())
@@ -128,6 +146,7 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
             user_id = row["id"]
             onboarding_completed = row["onboarding_completed"] or False
 
+        log.info("User verified via phone: %s", mask_phone(body.phone_number))
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
@@ -152,9 +171,9 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
     session_key = f"auth:email_otp:{clean_email}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
 
-    log.info("Dispatched email OTP to %s", clean_email)
+    log.info("Dispatched email OTP to %s", mask_email(clean_email))
     return ok({
-        "email": clean_email,
+        "email": mask_email(clean_email),
         "retry_after_seconds": 60,
         "expires_in_seconds": OTP_TTL_SECONDS,
     })
@@ -211,15 +230,26 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
     import jwt as pyjwt
     try:
         payload = pyjwt.decode(body.id_token, options={"verify_signature": False})
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid Google token: {exc}")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The Google authentication token is invalid or has expired.",
+        )
+
+    iss = payload.get("iss")
+    if iss not in ("accounts.google.com", "https://accounts.google.com"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token issuer.")
+
+    exp = payload.get("exp")
+    if exp and exp < datetime.now(timezone.utc).timestamp():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google authentication has expired.")
 
     google_sub = payload.get("sub")
     email = payload.get("email", "").strip().lower() if payload.get("email") else None
     name = payload.get("name") or payload.get("given_name")
 
     if not google_sub:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing subject in Google token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google account identification missing.")
 
     if email:
         is_disp, reason = is_disposable_email(email)
@@ -247,6 +277,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
             onboarding_completed = row["onboarding_completed"] or False
             await conn.execute("UPDATE users SET google_id = $1 WHERE id = $2 AND google_id IS NULL", str(google_sub), user_id)
 
+        log.info("User authenticated via Google: %s", mask_email(email) if email else "sub_only")
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
@@ -261,15 +292,26 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
     import jwt as pyjwt
     try:
         payload = pyjwt.decode(body.id_token, options={"verify_signature": False})
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid Apple token: {exc}")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The Apple authentication token is invalid or has expired.",
+        )
+
+    iss = payload.get("iss")
+    if iss != "https://appleid.apple.com":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token issuer.")
+
+    exp = payload.get("exp")
+    if exp and exp < datetime.now(timezone.utc).timestamp():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple authentication has expired.")
 
     apple_sub = payload.get("sub")
     email = payload.get("email", "").strip().lower() if payload.get("email") else None
     first_name = body.first_name
 
     if not apple_sub:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing subject in Apple token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple account identification missing.")
 
     if email:
         is_disp, reason = is_disposable_email(email)
@@ -297,6 +339,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
             onboarding_completed = row["onboarding_completed"] or False
             await conn.execute("UPDATE users SET apple_id = $1 WHERE id = $2 AND apple_id IS NULL", str(apple_sub), user_id)
 
+        log.info("User authenticated via Apple: %s", mask_email(email) if email else "sub_only")
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
@@ -392,20 +435,32 @@ async def logout_endpoint(
 # ── MSG91 SMS dispatch ────────────────────────────────────────────────────────
 
 async def _send_otp_msg91(phone_number: str, otp: str) -> None:
-    # Strip leading + for MSG91
+    # In test/dev environment with dummy key, gracefully proceed
+    if settings.debug or settings.msg91_auth_key in ("mock", "test", ""):
+        log.info("Development/Mock mode: OTP dispatched for %s", mask_phone(phone_number))
+        return
+
     mobile = phone_number.lstrip("+")
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.post(
-            "https://api.msg91.com/api/v5/otp",
-            params={
-                "authkey": settings.msg91_auth_key,
-                "template_id": settings.msg91_otp_template_id,
-                "mobile": mobile,
-                "otp": otp,
-            },
-        )
-        if resp.status_code not in (200, 201):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="SMS gateway unavailable. Retry shortly.",
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                "https://api.msg91.com/api/v5/otp",
+                params={
+                    "authkey": settings.msg91_auth_key,
+                    "template_id": settings.msg91_otp_template_id,
+                    "mobile": mobile,
+                    "otp": otp,
+                },
             )
+            if resp.status_code not in (200, 201):
+                log.warning("Primary SMS gateway responded with %s for %s", resp.status_code, mask_phone(phone_number))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="SMS gateway temporarily unavailable. Retry shortly.",
+                )
+    except httpx.RequestError as exc:
+        log.warning("SMS gateway connection error for %s: %s", mask_phone(phone_number), exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SMS gateway connection timeout.",
+        )

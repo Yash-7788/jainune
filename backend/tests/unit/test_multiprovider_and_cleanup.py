@@ -179,39 +179,43 @@ class TestAccountPurgeAndMemoryFreeing(unittest.IsolatedAsyncioTestCase):
 
 class TestUserFriendlyErrorHandling(unittest.TestCase):
 
-    def test_non_technical_error_resolution(self):
-        """Technical exceptions must be converted to warm, non-technical copy."""
+    def test_non_technical_humorous_error_resolution(self):
+        """Technical exceptions must be converted to warm, witty, non-technical copy."""
         # 1. Disposable email error
-        code, msg = resolve_friendly_error(400, "Temporary or disposable email addresses are not permitted.")
+        code, title, msg = resolve_friendly_error(400, "Temporary or disposable email addresses are not permitted.")
         self.assertEqual(code, "DISPOSABLE_EMAIL_BLOCKED")
-        self.assertIn("personal or work email", msg)
+        self.assertIn("Real Connections Only", title)
+        self.assertIn("burner inboxes break Cupid's heart", msg)
         self.assertNotIn("400", msg)
 
         # 2. Bot client detected
-        code, msg = resolve_friendly_error(403, "Automated or unsupported client detected.")
+        code, title, msg = resolve_friendly_error(403, "Automated or unsupported client detected.")
         self.assertEqual(code, "CLIENT_INTEGRITY_FAILED")
-        self.assertIn("official Jainune app", msg)
+        self.assertIn("Are You a Robot", title)
+        self.assertIn("anti-bot radar", msg)
         self.assertNotIn("403", msg)
 
         # 3. Rate limiting / breather
-        code, msg = resolve_friendly_error(429, "Too many OTP requests in sliding window")
+        code, title, msg = resolve_friendly_error(429, "Too many OTP requests in sliding window")
         self.assertEqual(code, "OTP_RATE_LIMIT")
-        self.assertIn("wait a couple of minutes", msg)
+        self.assertIn("Patience, Young Cupid", title)
         self.assertNotIn("429", msg)
 
         # 4. Expired session
-        code, msg = resolve_friendly_error(401, "Invalid or expired token")
+        code, title, msg = resolve_friendly_error(401, "Invalid or expired token")
         self.assertEqual(code, "SESSION_EXPIRED")
-        self.assertIn("sign in again", msg)
+        self.assertIn("Time Flies", title)
+        self.assertIn("beauty sleep", msg)
 
         # 5. Daily connect limits
-        code, msg = resolve_friendly_error(429, "Daily like limit reached")
+        code, title, msg = resolve_friendly_error(429, "Daily like limit reached")
         self.assertEqual(code, "DAILY_LIMIT_REACHED")
-        self.assertIn("complimentary connects", msg)
+        self.assertIn("Cupid's Quiver", title)
 
         # 6. Database / 500 error
-        code, msg = resolve_friendly_error(500, "asyncpg.exceptions.UniqueViolationError: duplicate key")
+        code, title, msg = resolve_friendly_error(500, "asyncpg.exceptions.UniqueViolationError: duplicate key")
         self.assertEqual(code, "TEMPORARY_ERROR")
+        self.assertIn("Chai Break", title)
         self.assertNotIn("asyncpg", msg)
         self.assertNotIn("UniqueViolation", msg)
         self.assertNotIn("500", msg)
@@ -221,14 +225,60 @@ class TestUserFriendlyErrorHandling(unittest.TestCase):
         envelope = create_error_envelope(
             status_code=400,
             error_code="DISPOSABLE_EMAIL_BLOCKED",
+            title="Real Connections Only! 💌",
             user_message="Please use your personal email address.",
         )
         self.assertFalse(envelope["success"])
         self.assertIsNone(envelope["data"])
         self.assertEqual(envelope["error"]["code"], "DISPOSABLE_EMAIL_BLOCKED")
+        self.assertEqual(envelope["error"]["title"], "Real Connections Only! 💌")
         self.assertEqual(envelope["error"]["message"], "Please use your personal email address.")
         self.assertEqual(envelope["error"]["user_message"], "Please use your personal email address.")
         self.assertTrue(envelope["meta"]["request_id"].startswith("req_"))
+
+
+class TestInputSecuritiesAndBounds(unittest.TestCase):
+
+    def test_email_input_security_and_injection_blocks(self):
+        """Email inputs must reject injections, control chars, and enforce length bounds."""
+        from app.models.schemas.auth import EmailOTPRequestBody
+        from pydantic import ValidationError
+
+        # Rejects script injection
+        with self.assertRaises(ValidationError):
+            EmailOTPRequestBody(email="<script>alert(1)</script>@test.com")
+
+        # Rejects control characters
+        with self.assertRaises(ValidationError):
+            EmailOTPRequestBody(email="user\x00@test.com")
+
+        # Rejects oversized strings (> 254)
+        with self.assertRaises(ValidationError):
+            EmailOTPRequestBody(email="a" * 250 + "@example.com")
+
+    def test_phone_number_security_bounds(self):
+        """Phone numbers must strictly match Indian mobile format without injection."""
+        from app.models.schemas.auth import OTPRequestBody
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            OTPRequestBody(phone_number="+919820098200; DROP TABLE users;")
+
+        with self.assertRaises(ValidationError):
+            OTPRequestBody(phone_number="09820098200")
+
+    def test_oauth_id_token_security_bounds(self):
+        """OAuth tokens must enforce JWT format and length boundaries."""
+        from app.models.schemas.auth import GoogleAuthBody, AppleAuthBody
+        from pydantic import ValidationError
+
+        # Rejects non-token strings
+        with self.assertRaises(ValidationError):
+            GoogleAuthBody(id_token="malicious_payload_with_spaces and ; quotes")
+
+        # Rejects oversized token payloads (> 4096)
+        with self.assertRaises(ValidationError):
+            AppleAuthBody(id_token="header.payload." + "x" * 4100)
 
 
 if __name__ == "__main__":
