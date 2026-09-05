@@ -15,6 +15,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.interaction import InteractionActionRequest, InteractionActionResponse
 from app.services.core_people_finder import invalidate_feed_cache
@@ -100,6 +101,9 @@ async def record_interaction_action(
     """
     actor_id = uuid.UUID(str(current_user["id"]))
     target_id = body.target_id
+
+    # Anti-bot rate limit: max 60 actions per minute per user (SECURITY.md 8.1)
+    await sliding_window_rate_limit(f"ratelimit:interaction:{actor_id}", 60, 60, redis)
 
     if actor_id == target_id:
         raise HTTPException(

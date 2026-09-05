@@ -39,7 +39,7 @@ async def _assert_participant(
         row = await conn.fetchrow(
             """
             SELECT id, match_id, participant_1_id, participant_2_id,
-                   is_ephemeral, expires_at
+                   is_ephemeral, expires_at, is_unmatched
             FROM chats
             WHERE id = $1
               AND (participant_1_id = $2 OR participant_2_id = $2)
@@ -241,6 +241,12 @@ async def send_message(
     user_id = uuid.UUID(str(current_user["id"]))
     chat = await _assert_participant(chat_id, user_id, db)
 
+    if chat.get("is_unmatched"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chat thread is closed due to unmatch.",
+        )
+
     # Validate ephemeral expiry
     from datetime import datetime, timezone
     if chat.get("expires_at") and chat["expires_at"] < datetime.now(timezone.utc):
@@ -318,3 +324,46 @@ async def mark_read(
             """,
             chat_id, user_id,
         )
+
+
+@router.post(
+    "/{chat_id}/unmatch",
+    status_code=status.HTTP_200_OK,
+    summary="Unmatch connection and permanently close chat thread",
+)
+async def unmatch_chat(
+    chat_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: DBDep,
+    redis: RedisDep,
+) -> dict:
+    """
+    Unmatch protocol per SECURITY.md Section 4.2 Layer 3:
+    1. Sets chats.is_unmatched = TRUE and matches.status = 'unmatched'.
+    2. Purges both users' feed session caches in Redis.
+    3. Blocks future messaging attempts with 403 Forbidden.
+    """
+    user_id = uuid.UUID(str(current_user["id"]))
+    chat = await _assert_participant(chat_id, user_id, db)
+
+    p1 = chat["participant_1_id"]
+    p2 = chat["participant_2_id"]
+    other_id = p2 if p1 == user_id else p1
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE id = $1",
+                chat_id,
+            )
+            if chat.get("match_id"):
+                await conn.execute(
+                    "UPDATE matches SET status = 'unmatched', updated_at = NOW() WHERE id = $1",
+                    chat["match_id"],
+                )
+
+    # Invalidate feed caches immediately
+    await redis.delete(f"feed:cache:{user_id}")
+    await redis.delete(f"feed:cache:{other_id}")
+
+    return {"success": True, "message": "Successfully unmatched. Chat thread locked."}

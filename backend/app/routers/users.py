@@ -307,11 +307,24 @@ async def report_user(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """File a report against another user."""
+    from app.core.redis import get_redis
+    from app.core.security import sliding_window_rate_limit
     from app.services.dignity_engine import file_report
+
+    reporter_id = current_user["user_id"]
+
+    # Rate limit: max 5 reports per 24h per reporter (Dignity Engine abuse prevention)
+    try:
+        redis = get_redis()
+        await sliding_window_rate_limit(f"ratelimit:report:{reporter_id}", 5, 86400, redis)
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Fallback if Redis unavailable
 
     try:
         result = await file_report(
-            reporter_id=current_user["user_id"],
+            reporter_id=reporter_id,
             reported_id=user_id,
             reason=body.reason,
             detail=body.detail,

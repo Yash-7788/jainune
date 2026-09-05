@@ -3,7 +3,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
 from app.core.security import (
@@ -11,10 +12,12 @@ from app.core.security import (
     create_refresh_token,
     generate_otp,
     hash_otp,
+    revoke_token,
     sliding_window_rate_limit,
+    validate_access_token,
     verify_otp,
 )
-from app.dependencies import DBDep, RedisDep
+from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.main import err, ok
 from app.models.schemas.auth import (
     AccessTokenResponse,
@@ -26,6 +29,7 @@ from app.models.schemas.auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+_bearer = HTTPBearer()
 
 OTP_TTL_SECONDS = 180
 OTP_RATE_WINDOW_SECONDS = 3600
@@ -157,6 +161,38 @@ async def refresh_token_endpoint(body: TokenRefreshBody, db: DBDep, redis: Redis
         refresh_token=new_refresh,
         expires_in=settings.access_token_expire_minutes * 60,
     ).model_dump())
+
+
+# ── POST /v1/auth/logout ──────────────────────────────────────────────────────
+
+@router.post("/logout", summary="Logout and invalidate token session")
+async def logout_endpoint(
+    current_user: CurrentUser,
+    db: DBDep,
+    redis: RedisDep,
+    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+) -> dict:
+    """
+    Session revocation per SECURITY.md Section 2.2:
+    1. Blacklists current access token jti in Redis (<1ms lookup).
+    2. Deletes active refresh token from PostgreSQL.
+    """
+    try:
+        payload = await validate_access_token(credentials, redis)
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        if jti and exp:
+            now = datetime.now(timezone.utc).timestamp()
+            ttl = max(1, int(exp - now))
+            await revoke_token(jti, ttl, redis)
+    except Exception:
+        pass  # Token may already be partially invalid
+
+    user_id = uuid.UUID(str(current_user["id"]))
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
+    return ok({"message": "Successfully logged out. Session revoked."})
 
 
 # ── MSG91 SMS dispatch ────────────────────────────────────────────────────────

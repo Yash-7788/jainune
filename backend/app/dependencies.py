@@ -57,7 +57,9 @@ async def get_current_user(
             detail="User account not found or suspended.",
         )
 
-    return dict(row)
+    user_dict = dict(row)
+    user_dict["user_id"] = row["id"]
+    return user_dict
 
 
 CurrentUser = Annotated[dict, Depends(get_current_user)]
