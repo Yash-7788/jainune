@@ -63,7 +63,8 @@ async def verify_otp(
         )
 
     expected = hash_otp(phone_number, submitted_otp)
-    if not hmac.compare_digest(stored_hash.decode(), expected):
+    raw_hash = stored_hash.decode() if isinstance(stored_hash, bytes) else stored_hash
+    if not hmac.compare_digest(raw_hash, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid OTP code.",
@@ -185,4 +186,11 @@ async def validate_access_token_raw(
             raise ValueError("Token has been revoked.")
 
     return payload
+
+
+def __getattr__(name: str):
+    if name == "get_current_user":
+        from app.dependencies import get_current_user
+        return get_current_user
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
