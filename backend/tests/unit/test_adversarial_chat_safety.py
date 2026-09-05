@@ -2,10 +2,11 @@
 Adversarial Human-like Stress & Evasion Tests for Chat Safety Moderation.
 Simulates real attacker evasion vectors:
 - Separated / spaced / dotted keywords (s.n.a.p, i n s t a, 9 8 7 6 5 4 3 2 1 0)
+- Full app names in ANY casing combo (InStAgRaM, snapCHAT, FaceBook, WHATSAPP, TeleGram, BUMBLE)
 - Zero-width character and homoglyph injections
 - Sequential single-character/digit stealth tricks interspersed with dialogue
 - Word numbers (long series blocked; casual conversational numbers allowed)
-- Conversational false positive resistance (programs, grandmother, the road)
+- Generalized intent & idiom preservation (cooking grams, road trips, street food, two-way street)
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ class TestAdversarialChatSafety(unittest.IsolatedAsyncioTestCase):
             self.assertIn("#", res.content)
 
     async def test_03_zero_width_and_homoglyph_injections(self):
-        """Invisible chars (\u200b) and Cyrillic homoglyphs must be normalized and caught."""
+        """Invisible chars (\\u200b) and Cyrillic homoglyphs must be normalized and caught."""
         # Zero-width space inside 'snap'
         zw_msg = "my s\u200bn\u200ba\u200bp id"
         r1 = await filter_chat_content(zw_msg, self.chat_id, self.user_id, self.redis)
@@ -130,6 +131,7 @@ class TestAdversarialChatSafety(unittest.IsolatedAsyncioTestCase):
             "She had an instant reaction to the joke",
             "We took a photograph together",
             "I am in a diagram meeting right now",
+            "Life is an endless road of learning",
         ]
         for s in safe_phrases:
             res = await filter_chat_content(s, self.chat_id, self.user_id, self.redis)
@@ -163,6 +165,42 @@ class TestAdversarialChatSafety(unittest.IsolatedAsyncioTestCase):
             res = await filter_chat_content(text, self.chat_id, self.user_id, self.redis)
             self.assertEqual(res.is_moderated, expected_mod, f"Failed on dialogue turn: '{text}'")
             self.assertEqual(res.content, expected_content, f"Content mismatch on turn: '{text}'")
+
+    async def test_08_casing_variations_full_app_names(self):
+        """Full app names in ANY casing combo must be caught and masked."""
+        cases = [
+            ("Add me on InStAgRaM right now", "INSTAGRAM"),
+            ("My snapCHAT id is rahul_j99", "SNAPCHAT"),
+            ("Ping me on WHATSAPP or TeleGram", "WHATSAPP/TELEGRAM"),
+            ("Are you on FaceBook or TwItTeR?", "FACEBOOK/TWITTER"),
+            ("Lets switch to BUMBLE or TiNdEr", "BUMBLE/TINDER"),
+            ("Check my profile on sHaAdI", "SHAADI"),
+            ("Are you on HiNgE?", "HINGE"),
+        ]
+        for msg, label in cases:
+            res = await filter_chat_content(msg, self.chat_id, self.user_id, self.redis)
+            self.assertTrue(res.is_moderated, f"Failed on casing combo: '{msg}' ({label})")
+            self.assertIn("#", res.content)
+
+    async def test_09_generalized_intent_and_idiom_preservation(self):
+        """Smart intent preserves benign cooking, idioms, and travel phrases."""
+        safe_conversations = [
+            "I need 500 grams of flour for the recipe",
+            "I love cooking with 200 grams of paneer",
+            "She sent a snapshot of the temple",
+            "It was a snap decision to travel",
+            "Street food in Bangalore is delicious",
+            "The road was under construction",
+            "Life is a two-way street",
+            "We went on a road trip last weekend",
+            "I love street art in Berlin",
+            "There were street dogs outside the park",
+            "The road ahead is very clear",
+        ]
+        for msg in safe_conversations:
+            res = await filter_chat_content(msg, self.chat_id, self.user_id, self.redis)
+            self.assertFalse(res.is_moderated, f"False positive on benign message: '{msg}'")
+            self.assertEqual(res.content, msg)
 
 
 if __name__ == "__main__":
