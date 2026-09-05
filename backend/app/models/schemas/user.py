@@ -289,31 +289,50 @@ class Step22CompleteBody(BaseModel):
 
 class UserProfileResponse(BaseModel):
     id: UUID
-    phone_number: str
-    first_name: str
-    date_of_birth: Optional[date]
-    gender: Optional[str]
-    show_me: Optional[str]
-    looking_for: Optional[str]
-    city: Optional[str]
-    state: Optional[str]
-    max_distance_km: int
-    open_to_relocation: bool
-    dietary_strictness: Optional[str]
-    eats_root_vegetables: bool
-    eats_onion_garlic: bool
-    community_sect: Optional[str]
-    paryushan_mode: bool
-    job_title: Optional[str]
-    company: Optional[str]
-    education: Optional[str]
-    height_cm: Optional[int]
-    bio: Optional[str]
-    subscription_tier: str
-    is_photo_verified: bool
-    account_status: str
+    phone_number: Optional[str] = None
+    email: Optional[str] = None
+    auth_provider: str = "phone"
+    first_name: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
+    show_me: Optional[str] = None
+    looking_for: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    max_distance_km: int = 50
+    open_to_relocation: bool = False
+    dietary_strictness: Optional[str] = None
+    eats_root_vegetables: bool = False
+    eats_onion_garlic: bool = False
+    community_sect: Optional[str] = None
+    paryushan_mode: bool = False
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+    education: Optional[str] = None
+    height_cm: Optional[int] = None
+    bio: Optional[str] = None
+    subscription_tier: str = "free"
+    is_photo_verified: bool = False
+    account_status: str = "active"
+    onboarding_completed: bool = False
+    super_connect_credits: int = 0
+    photos: List[dict] = Field(default_factory=list)
+    prompts: List[dict] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+
+class UpdatePromptsBody(BaseModel):
+    prompts: List[PromptItem] = Field(..., min_length=1, max_length=3)
+
+
+class MediaPositionItem(BaseModel):
+    media_id: UUID
+    position: int = Field(..., ge=1, le=6)
+
+
+class ReorderMediaBody(BaseModel):
+    positions: List[MediaPositionItem]
 
 
 class OnboardingStatusResponse(BaseModel):

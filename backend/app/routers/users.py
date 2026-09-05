@@ -21,7 +21,7 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import get_current_user
 from app.models.schemas.payment import SubscriptionStatusResponse, SubscriptionTier
-from app.models.schemas.user import UserProfileResponse
+from app.models.schemas.user import UserProfileResponse, UpdatePromptsBody
 
 import asyncpg
 
@@ -79,15 +79,42 @@ _TIER_LIMITS = {
 }
 
 
-async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> asyncpg.Record:
+async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
     row = await conn.fetchrow(
         """
         SELECT
-            id, phone_number, first_name, date_of_birth, gender, show_me,
+            id, phone_number, email, auth_provider, first_name, date_of_birth, gender, show_me,
             looking_for, city, state, max_distance_km, open_to_relocation,
             dietary_strictness, eats_root_vegetables, eats_onion_garlic,
             community_sect, paryushan_mode, job_title, company, education,
-            height_cm, bio, subscription_tier, is_photo_verified, account_status
+            height_cm, bio, subscription_tier, is_photo_verified, account_status,
+            onboarding_completed, super_connect_credits,
+            COALESCE((
+                SELECT json_agg(
+                    json_build_object(
+                        'id', m.id,
+                        'media_type', m.media_type,
+                        'cdn_url', m.cdn_url,
+                        'position', m.position,
+                        'status', m.status,
+                        'is_processed', m.is_processed
+                    ) ORDER BY m.position
+                )
+                FROM user_media m
+                WHERE m.user_id = users.id AND m.status != 'rejected'
+            ), '[]'::json) AS photos,
+            COALESCE((
+                SELECT json_agg(
+                    json_build_object(
+                        'id', p.id,
+                        'prompt_key', p.prompt_key,
+                        'response_text', p.response_text,
+                        'position', p.position
+                    ) ORDER BY p.position
+                )
+                FROM user_prompts p
+                WHERE p.user_id = users.id
+            ), '[]'::json) AS prompts
         FROM users
         WHERE id = $1 AND account_status != 'deleted'
         """,
@@ -95,7 +122,15 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> asyncpg.Reco
     )
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return row
+    
+    data = dict(row)
+    # Parse json_agg strings if returned as string
+    import json
+    if isinstance(data.get("photos"), str):
+        data["photos"] = json.loads(data["photos"])
+    if isinstance(data.get("prompts"), str):
+        data["prompts"] = json.loads(data["prompts"])
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +145,41 @@ async def get_my_profile(
 ):
     """Return the authenticated user's full profile."""
     async with pool.acquire() as conn:
-        row = await _get_user_row(current_user["user_id"], conn)
-    return dict(row)
+        data = await _get_user_row(current_user["user_id"], conn)
+    return data
+
+
+@router.get("/me/prompts")
+async def get_my_prompts(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Fetch user's current profile prompts."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, prompt_key, response_text, position FROM user_prompts WHERE user_id = $1 ORDER BY position",
+            current_user["user_id"],
+        )
+    return {"prompts": [dict(r) for r in rows]}
+
+
+@router.put("/me/prompts")
+async def update_my_prompts(
+    body: UpdatePromptsBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Update profile prompts (1 to 3 items)."""
+    user_id = current_user["user_id"]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
+            for p in body.prompts:
+                await conn.execute(
+                    "INSERT INTO user_prompts (user_id, prompt_key, response_text, position) VALUES ($1, $2, $3, $4)",
+                    user_id, p.prompt_key, p.response_text, p.position,
+                )
+    return {"success": True, "message": "Prompts updated successfully"}
 
 
 @router.patch("/me", response_model=UserProfileResponse)

@@ -20,7 +20,10 @@ import asyncio
 import uuid
 from typing import Literal
 
-import boto3
+try:
+    import boto3
+except ImportError:
+    boto3 = None
 
 from app.core.config import settings
 from app.core.database import get_pool

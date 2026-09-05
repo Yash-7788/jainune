@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.dependencies import CurrentUser, DBDep
+from app.models.schemas.user import ReorderMediaBody
 from app.services.media_processor import enqueue_moderation
 
 router = APIRouter(prefix="/v1/media", tags=["media"])
@@ -240,3 +241,56 @@ async def get_media_status(
         cdn_url=row["cdn_url"],
         rejection_reason=row["rejection_reason"],
     )
+
+
+@router.delete(
+    "/{media_id}",
+    summary="Delete a single photo or voice note",
+)
+async def delete_media(
+    media_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: DBDep,
+) -> dict:
+    from app.services.account_service import _delete_s3_keys_sync
+    import asyncio
+
+    user_id = uuid.UUID(str(current_user["user_id"]))
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, s3_key, status FROM user_media WHERE id = $1 AND user_id = $2",
+            media_id, user_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Media item not found.")
+
+        s3_key = row["s3_key"]
+        if s3_key:
+            try:
+                await asyncio.to_thread(_delete_s3_keys_sync, [s3_key])
+            except Exception:
+                pass
+
+        await conn.execute("DELETE FROM user_media WHERE id = $1 AND user_id = $2", media_id, user_id)
+
+    return {"success": True, "message": "Media item deleted successfully."}
+
+
+@router.patch(
+    "/reorder",
+    summary="Reorder user profile photos",
+)
+async def reorder_media(
+    body: ReorderMediaBody,
+    current_user: CurrentUser,
+    db: DBDep,
+) -> dict:
+    user_id = uuid.UUID(str(current_user["user_id"]))
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            for item in body.positions:
+                await conn.execute(
+                    "UPDATE user_media SET position = $1 WHERE id = $2 AND user_id = $3",
+                    item.position, item.media_id, user_id,
+                )
+    return {"success": True, "message": "Photos reordered successfully."}
