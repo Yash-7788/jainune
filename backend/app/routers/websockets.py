@@ -26,25 +26,44 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
+import secrets
 from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import validate_access_token_raw
+from app.dependencies import CurrentUser, RedisDep
 
 router = APIRouter(tags=["websockets"])
+
+
+@router.post("/v1/ws/ticket", summary="Create single-use WebSocket authentication ticket")
+async def create_ws_ticket(
+    current_user: CurrentUser,
+    redis: RedisDep,
+) -> dict:
+    """
+    Ticket-based handshake per SECURITY.md Section 6.1.
+    Issues a single-use, 30-second cryptographically random ticket.
+    Prevents token leakage in URL access logs.
+    """
+    ticket = f"wst_{secrets.token_urlsafe(32)}"
+    ticket_key = f"ws:ticket:{ticket}"
+    await redis.set(ticket_key, str(current_user["id"]), ex=30)
+    return {"ticket": ticket, "expires_in_seconds": 30}
 
 
 @router.websocket("/v1/ws/chat/{chat_id}")
 async def websocket_chat(
     websocket: WebSocket,
     chat_id: uuid.UUID,
-    token: str = Query(..., description="JWT access token"),
+    ticket: str | None = Query(default=None, description="One-time WS ticket (preferred)"),
+    token: str | None = Query(default=None, description="JWT access token (fallback)"),
 ) -> None:
     """
     Bidirectional real-time chat over WebSocket.
 
     Lifecycle:
       1. Accept connection
-      2. Validate JWT — close 4001 on failure
+      2. Validate ticket or JWT — close 4001 on failure
       3. Verify user is a participant in chat_id — close 4003 on failure
       4. Subscribe to Redis channel `chat:{chat_id}`
       5. Run producer + consumer tasks concurrently
@@ -56,12 +75,25 @@ async def websocket_chat(
     # ── 1. Accept ────────────────────────────────────────────────────────────
     await websocket.accept()
 
-    # ── 2. JWT validation ────────────────────────────────────────────────────
+    # ── 2. Ticket / JWT validation ───────────────────────────────────────────
     try:
-        payload = await validate_access_token_raw(token, redis)
-        user_id = uuid.UUID(payload["sub"])
+        if ticket:
+            ticket_key = f"ws:ticket:{ticket}"
+            uid_val = await redis.get(ticket_key)
+            if not uid_val:
+                await websocket.close(code=4001, reason="Invalid or expired ticket.")
+                return
+            await redis.delete(ticket_key)  # Single-use guarantee
+            raw_uid = uid_val.decode() if isinstance(uid_val, bytes) else uid_val
+            user_id = uuid.UUID(raw_uid)
+        elif token:
+            payload = await validate_access_token_raw(token, redis)
+            user_id = uuid.UUID(payload["sub"])
+        else:
+            await websocket.close(code=4001, reason="Missing ticket or token.")
+            return
     except Exception:
-        await websocket.close(code=4001, reason="Invalid or expired token.")
+        await websocket.close(code=4001, reason="Invalid or expired credentials.")
         return
 
     # ── 3. Participant check ─────────────────────────────────────────────────

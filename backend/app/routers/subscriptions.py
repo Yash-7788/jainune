@@ -133,6 +133,17 @@ async def razorpay_webhook(
     log.info("Razorpay webhook received: %s", event_name)
 
     if event_name == "payment.captured":
+        payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
+        payment_id = payment_entity.get("id")
+        if payment_id:
+            from app.core.redis import get_redis
+            try:
+                r = get_redis()
+                lock_acquired = await r.set(f"payment:processed:{payment_id}", "1", nx=True, ex=86400)
+                if not lock_acquired:
+                    return {"received": True, "status": "already_processed"}
+            except Exception:
+                pass  # Fallback to DB idempotency gate
         await payment_service.process_payment_captured(event, pool)
     elif event_name == "payment.refunded":
         await payment_service.process_refund(event, pool)

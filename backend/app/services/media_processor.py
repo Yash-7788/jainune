@@ -85,7 +85,7 @@ async def _run_moderation(
             prod_key = s3_key.replace("uploads/", "media/")
             cdn_url = f"{settings.cdn_public_base_url}/{prod_key}"
 
-            await asyncio.to_thread(_copy_to_production, s3_key, prod_key)
+            await asyncio.to_thread(_copy_to_production, s3_key, prod_key, media_type)
 
             async with db.acquire() as conn:
                 await conn.execute(
@@ -156,13 +156,40 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def _copy_to_production(quarantine_key: str, production_key: str) -> None:
+def _copy_to_production(quarantine_key: str, production_key: str, media_type: str = "photo") -> None:
     s3 = boto3.client(
         "s3",
         region_name=settings.aws_region,
         aws_access_key_id=settings.aws_access_key_id,
         aws_secret_access_key=settings.aws_secret_access_key,
     )
+    if media_type == "photo":
+        try:
+            import io
+            from PIL import Image
+
+            # Download raw upload from quarantine
+            obj = s3.get_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
+            raw_data = obj["Body"].read()
+
+            # Open image, discard EXIF/metadata, re-encode to clean WebP
+            img = Image.open(io.BytesIO(raw_data))
+            out_buf = io.BytesIO()
+            # Saving to format without copying exif strips 100% of EXIF/GPS/IPTC
+            img.save(out_buf, format="WEBP", quality=85)
+            out_buf.seek(0)
+
+            clean_key = production_key.rsplit(".", 1)[0] + ".webp"
+            s3.put_object(
+                Bucket=settings.aws_s3_production_bucket,
+                Key=clean_key,
+                Body=out_buf.getvalue(),
+                ContentType="image/webp",
+            )
+            return
+        except Exception:
+            pass  # Fallback to S3 copy if Pillow parsing not applicable
+
     s3.copy_object(
         CopySource={
             "Bucket": settings.aws_s3_quarantine_bucket,
@@ -170,7 +197,7 @@ def _copy_to_production(quarantine_key: str, production_key: str) -> None:
         },
         Bucket=settings.aws_s3_production_bucket,
         Key=production_key,
-        MetadataDirective="COPY",
+        MetadataDirective="REPLACE",  # Strip S3 user metadata
     )
 
 

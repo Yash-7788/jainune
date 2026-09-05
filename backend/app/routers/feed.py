@@ -10,6 +10,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.feed import DailyCompatibleResponse, FeedResponse
 from app.services.core_people_finder import (
@@ -36,6 +37,9 @@ async def get_feed(
     - Increments `impressions_last_48h` for shown profiles (Dignity Engine)
     """
     user_id = uuid.UUID(str(current_user["id"]))
+
+    # Rate limit: 20 feed requests per minute per user (SECURITY.md 10.1)
+    await sliding_window_rate_limit(f"ratelimit:feed:{user_id}", 20, 60, redis)
 
     # Enrich current_user with location + behavior vector for pipeline
     async with db.acquire() as conn:

@@ -42,7 +42,7 @@ class UploadRequestResponse(BaseModel):
     media_id: uuid.UUID
     presigned_url: str
     s3_key: str
-    expires_in_seconds: int = 300
+    expires_in_seconds: int = 60
 
 
 class ConfirmUploadBody(BaseModel):
@@ -142,7 +142,7 @@ async def request_upload(
                 "ContentType": body.content_type,
                 "ContentLength": body.file_size_bytes,
             },
-            ExpiresIn=300,
+            ExpiresIn=60,
         )
     except Exception as e:
         raise HTTPException(
