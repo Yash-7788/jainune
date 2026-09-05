@@ -1,5 +1,6 @@
 """
 Email & Bot Verification Service:
+- Whitelist of trusted consumer & business email providers (Gmail, Outlook, Yahoo, iCloud, Proton, Zoho, etc.).
 - Smart detection and rejection of disposable, throwaway, and custom ephemeral email domains.
 - Anti-bot and client integrity verification.
 """
@@ -11,9 +12,35 @@ import re
 import socket
 from typing import Tuple
 
+from app.core.config import settings
+
 log = logging.getLogger(__name__)
 
-# Known public disposable / temporary email domains
+# Trusted and approved primary email providers
+_ALLOWED_POPULAR_DOMAINS = {
+    # Google
+    "gmail.com", "googlemail.com",
+    # Microsoft
+    "outlook.com", "hotmail.com", "live.com", "msn.com", "windowslive.com",
+    "outlook.in", "hotmail.co.in", "live.in", "hotmail.co.uk", "hotmail.fr", "hotmail.es", "hotmail.it",
+    # Yahoo
+    "yahoo.com", "yahoo.co.in", "yahoo.in", "yahoo.co.uk", "ymail.com", "rocketmail.com", "myyahoo.com",
+    # Apple
+    "icloud.com", "me.com", "mac.com",
+    # Proton
+    "proton.me", "protonmail.com",
+    # Zoho
+    "zoho.com", "zohomail.in", "zoho.in",
+    # Indian Demographics
+    "rediffmail.com", "sify.com",
+    # Other Major Global Providers
+    "aol.com", "gmx.com", "gmx.net", "mail.com", "web.de", "t-online.de",
+    "fastmail.com", "fastmail.fm", "hey.com",
+    # Official app domain
+    "jainune.com",
+}
+
+# Known public disposable / temporary email domains (black-list fallback)
 _DISPOSABLE_DOMAINS = {
     "mailinator.com", "guerrillamail.com", "guerrillamail.net", "guerrillamail.org",
     "tempmail.com", "temp-mail.org", "10minutemail.com", "10minutemail.net",
@@ -41,51 +68,66 @@ _DISPOSABLE_KEYWORDS = {
 # Suspicious high-abuse free TLDs
 _SUSPICIOUS_TLDS = {
     ".tk", ".ml", ".ga", ".cf", ".gq", ".top", ".buzz", ".rest", ".country",
+    ".click", ".link", ".work",
 }
 
 
-def is_disposable_email(email: str) -> Tuple[bool, str]:
+def is_disposable_email(email: str, allow_custom_domains: bool = False) -> Tuple[bool, str]:
     """
-    Analyzes an email address for disposable / temporary domain usage.
-    Returns (is_disposable: bool, reason_message: str).
+    Validates an email address against:
+    1. Fast allowlist of trusted consumer email providers (Gmail, Outlook, Yahoo, Apple, etc.).
+    2. Strict rejection of unknown/untrusted/disposable domains.
+    Returns (is_disposable_or_unallowed: bool, reason_message: str).
     """
     if not email or "@" not in email:
         return True, "Invalid email address format."
 
     clean_email = email.strip().lower()
 
-    # Basic RFC 5322 check
+    # Basic RFC 5322 syntax check
     match = re.match(r"^([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)$", clean_email)
     if not match:
         return True, "Invalid email address format."
 
     local_part, domain = match.groups()
 
-    # 1. Exact match on known disposable list
-    if domain in _DISPOSABLE_DOMAINS:
-        return True, "Temporary or disposable email addresses are not permitted."
+    # 1. Immediate Allowlist Pass for standard reputable providers
+    if domain in _ALLOWED_POPULAR_DOMAINS:
+        return False, ""
 
-    # 2. Subdomain check (e.g. *.mailinator.com)
+    # 2. Check for subdomain of allowed provider (e.g. mail.yahoo.com)
     domain_parts = domain.split(".")
     if len(domain_parts) > 2:
         root_domain = ".".join(domain_parts[-2:])
-        if root_domain in _DISPOSABLE_DOMAINS:
-            return True, "Temporary or disposable email addresses are not permitted."
+        if root_domain in _ALLOWED_POPULAR_DOMAINS:
+            return False, ""
 
-    # 3. Keyword heuristic on custom domains
+    # 3. If allowlist is strictly enforced, reject unapproved/custom domains
+    if not allow_custom_domains:
+        return True, "Please use a supported email provider (Gmail, Outlook, Yahoo, iCloud, Proton, Zoho, or Rediffmail)."
+
+    # 4. Fallback checks for custom domains:
+    # 4a. Exact match on known disposable list
+    if domain in _DISPOSABLE_DOMAINS:
+        return True, "Temporary or disposable email addresses are not permitted."
+
+    # 4b. Subdomain check on disposable list
+    if len(domain_parts) > 2 and ".".join(domain_parts[-2:]) in _DISPOSABLE_DOMAINS:
+        return True, "Temporary or disposable email addresses are not permitted."
+
+    # 4c. Keyword heuristic on custom domains
     domain_name = domain_parts[0]
     for kw in _DISPOSABLE_KEYWORDS:
         if kw in domain_name:
             return True, "Disposable or burner email addresses are not allowed on Jainune."
 
-    # 4. TLD check for known spam-throwaway TLDs
+    # 4d. TLD check for spam/burner TLDs
     for tld in _SUSPICIOUS_TLDS:
         if domain.endswith(tld):
             return True, "Email domain is not supported for verification."
 
-    # 5. Fast DNS MX record presence check (failsafe)
+    # 4e. DNS host resolution failsafe
     try:
-        # Check if the domain has a resolvable mail or host IP
         socket.gethostbyname(domain)
     except (socket.gaierror, socket.herror, TimeoutError, OSError):
         return True, "Email domain could not be resolved or has no valid mail servers."
@@ -114,7 +156,6 @@ def verify_bot_integrity(
 
     # 2. In production, turnstile_token verification can be enforced
     if is_production and turnstile_token:
-        # In a full deployment, this calls Cloudflare / Google verify endpoint
         if len(turnstile_token) < 10:
             return True, "Security verification challenge failed."
 

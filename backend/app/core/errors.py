@@ -83,7 +83,7 @@ DEFAULT_USER_MESSAGES: dict[int, tuple[str, str, str]] = {
 # Contextual phrases mapped to witty explanations
 KEYWORD_MAPPINGS: list[tuple[list[str], str, str, str]] = [
     (
-        ["disposable", "burner", "temporary email"],
+        ["disposable", "burner", "temporary email", "supported email provider", "recognized email provider"],
         "DISPOSABLE_EMAIL_BLOCKED",
         "Real Connections Only! 💌",
         "We love authentic vibes! Please use your personal or work email—burner inboxes break Cupid's heart.",

@@ -24,8 +24,26 @@ from app.services.email_verifier import is_disposable_email, verify_bot_integrit
 
 class TestEmailAndBotVerification(unittest.TestCase):
 
-    def test_disposable_email_detection_known_domains(self):
-        """Standard disposable email domains must be blocked."""
+    def test_allowed_popular_email_domains_pass(self):
+        """Major consumer providers (Gmail, Outlook, Yahoo, iCloud, Proton, Zoho, Rediffmail) must pass."""
+        allowed_samples = [
+            "priya.jain@gmail.com",
+            "rahul.shah@outlook.com",
+            "amit.patel@yahoo.com",
+            "rohit.mehta@yahoo.co.in",
+            "neha.doshi@icloud.com",
+            "anand.k@proton.me",
+            "support@zoho.com",
+            "sanjay.jain@rediffmail.com",
+            "admin@jainune.com",
+        ]
+        for email in allowed_samples:
+            is_disp, reason = is_disposable_email(email)
+            self.assertFalse(is_disp, f"Expected {email} to be allowed, but got: {reason}")
+            self.assertEqual(reason, "")
+
+    def test_unapproved_and_disposable_domains_blocked(self):
+        """Unapproved custom domains and disposable domains must be blocked."""
         blocked_samples = [
             "test@mailinator.com",
             "hello@guerrillamail.com",
@@ -34,40 +52,26 @@ class TestEmailAndBotVerification(unittest.TestCase):
             "temp@yopmail.fr",
             "test@burnermail.io",
             "drop@dropmail.me",
+            "random@customunverifieddomain.org",
+            "scam@fake-inbox-temp.net",
         ]
         for email in blocked_samples:
             is_disp, reason = is_disposable_email(email)
-            self.assertTrue(is_disp, f"Expected {email} to be flagged as disposable")
-            self.assertIn("not permitted", reason.lower())
+            self.assertTrue(is_disp, f"Expected {email} to be blocked")
+            self.assertIn("supported email provider", reason.lower())
 
-    def test_disposable_email_subdomains(self):
-        """Subdomains of disposable services must also be blocked."""
-        is_disp, reason = is_disposable_email("test@sub.mailinator.com")
+    def test_disposable_custom_domain_fallback_mode(self):
+        """When allow_custom_domains=True, disposable heuristics and lists are enforced."""
+        is_disp, reason = is_disposable_email("test@mailinator.com", allow_custom_domains=True)
         self.assertTrue(is_disp)
+        self.assertIn("not permitted", reason.lower())
 
-    def test_disposable_email_custom_domain_heuristics(self):
-        """Custom domains containing burner/ephemeral keywords must be blocked."""
-        custom_burner_samples = [
-            "anon@temp-inbox24.org",
-            "user@burner-box.net",
-            "scam@fake-trash-mail.co",
-            "test@dispos-mail-fast.com",
-        ]
-        for email in custom_burner_samples:
-            is_disp, reason = is_disposable_email(email)
-            self.assertTrue(is_disp, f"Expected keyword detection on {email}")
-            self.assertIn("not allowed", reason.lower())
+        is_disp, reason = is_disposable_email("user@temp-burner-box.org", allow_custom_domains=True)
+        self.assertTrue(is_disp)
+        self.assertIn("not allowed", reason.lower())
 
-    def test_disposable_email_suspicious_tlds(self):
-        """Domains using high-abuse free TLDs (.tk, .ml, .buzz, etc.) must be blocked."""
-        suspicious_samples = [
-            "user@freemailservice.tk",
-            "user@testmail.ml",
-            "user@quickaddress.buzz",
-        ]
-        for email in suspicious_samples:
-            is_disp, reason = is_disposable_email(email)
-            self.assertTrue(is_disp, f"Expected suspicious TLD detection on {email}")
+        is_disp, reason = is_disposable_email("user@quick.buzz", allow_custom_domains=True)
+        self.assertTrue(is_disp)
 
     def test_invalid_email_format(self):
         """Malformed email strings must be rejected."""
@@ -76,19 +80,6 @@ class TestEmailAndBotVerification(unittest.TestCase):
             is_disp, reason = is_disposable_email(email)
             self.assertTrue(is_disp)
             self.assertIn("format", reason.lower())
-
-    @patch("socket.gethostbyname", return_value="142.250.190.46")
-    def test_legitimate_email_allowed(self, mock_dns):
-        """Legitimate personal and business emails must pass."""
-        legit_samples = [
-            "priya.jain@gmail.com",
-            "rahul.shah@outlook.com",
-            "contact@jainune.com",
-        ]
-        for email in legit_samples:
-            is_disp, reason = is_disposable_email(email)
-            self.assertFalse(is_disp, f"Expected {email} to be allowed, failed with: {reason}")
-            self.assertEqual(reason, "")
 
     def test_bot_integrity_detection(self):
         """Automated scripts, scrapers, and headless tools must be detected."""
