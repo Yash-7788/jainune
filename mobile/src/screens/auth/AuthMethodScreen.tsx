@@ -158,7 +158,7 @@ export default function AuthMethodScreen() {
       <Text style={styles.legal}>
         By continuing, you verify you are 18+ and agree to our{" "}
         <Text style={styles.link} onPress={() => setLegalDoc("terms")}>
-          Terms of Service
+          Terms of Service & EULA
         </Text>
         {", "}
         <Text style={styles.link} onPress={() => setLegalDoc("privacy")}>
@@ -166,7 +166,7 @@ export default function AuthMethodScreen() {
         </Text>
         {", and "}
         <Text style={styles.link} onPress={() => setLegalDoc("child_safety")}>
-          Child Safety Standards
+          Zero-Tolerance Safety Standards
         </Text>
         .
       </Text>

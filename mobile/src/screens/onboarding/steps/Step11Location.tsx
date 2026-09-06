@@ -39,7 +39,17 @@ export default function Step11Screen() {
   } | null>(null);
 
   useEffect(() => {
-    requestLocation();
+    (async () => {
+      try {
+        const { status } = await Location.getForegroundPermissionsAsync();
+        if (status === "granted") {
+          setPermStatus("granted");
+          fetchPosition();
+        }
+      } catch {
+        // First-time prompt: show prominent disclosure before requesting
+      }
+    })();
   }, []);
 
   const requestLocation = async () => {
@@ -51,7 +61,11 @@ export default function Step11Screen() {
       return;
     }
     setPermStatus("granted");
+    await fetchPosition();
+  };
 
+  const fetchPosition = async () => {
+    setLocStatus("loading");
     try {
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
@@ -133,13 +147,39 @@ export default function Step11Screen() {
     <OnboardingStep
       title="Share your location"
       subtitle="Used to find verified Jain singles nearby. Exact coordinates are never shown to anyone."
-      onNext={permStatus === "denied" ? openSettings : handleNext}
-      nextLabel={permStatus === "denied" ? "Open Device Settings" : "Continue"}
+      onNext={
+        permStatus === "denied"
+          ? openSettings
+          : locStatus === "done"
+          ? handleNext
+          : requestLocation
+      }
+      nextLabel={
+        locStatus === "done"
+          ? "Continue"
+          : permStatus === "denied"
+          ? "Open Device Settings"
+          : "Enable Location Access"
+      }
       loading={loading || locStatus === "loading"}
-      disabled={locStatus !== "done" && permStatus !== "denied"}
+      disabled={locStatus === "loading"}
       error={error}
     >
       <View style={styles.statusCard}>
+        {permStatus === "idle" && locStatus === "idle" && (
+          <View>
+            <Text style={styles.disclosureHeading}>Prominent Location Disclosure</Text>
+            <Text style={styles.disclosureText}>
+              Jainune accesses your device location to:{"\n"}
+              • Connect you with nearby verified Jain singles{"\n"}
+              • Calculate distance in kilometers on match cards{"\n"}
+              • Verify supported matchmaking regions
+            </Text>
+            <Text style={styles.disclosureSubtext}>
+              Your exact GPS coordinates are NEVER shared with other members. Location is only accessed while the app is active in the foreground.
+            </Text>
+          </View>
+        )}
         {locStatus === "loading" && (
           <Text style={styles.statusText}>Getting your location...</Text>
         )}
@@ -169,6 +209,25 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: spacing.base,
     marginBottom: spacing.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  disclosureHeading: {
+    fontFamily: "Outfit_700Bold",
+    fontSize: 15,
+    color: colors.dark,
+    marginBottom: spacing.xs,
+  },
+  disclosureText: {
+    ...typography.bodySmall,
+    color: colors.dark,
+    lineHeight: 20,
+    marginBottom: spacing.sm,
+  },
+  disclosureSubtext: {
+    ...typography.caption,
+    color: colors.mid,
+    lineHeight: 16,
   },
   statusText: { ...typography.body, color: colors.mid, lineHeight: 22 },
 });

@@ -76,6 +76,15 @@ export default function Step21Screen() {
         onToggle={setRelocation}
       />
 
+      {/* Zero-Tolerance EULA & Community Standards (Apple Guideline 1.2) */}
+      <View style={styles.eulaCard}>
+        <Text style={styles.eulaTitle}>Zero-Tolerance Community Standards (EULA)</Text>
+        <Text style={styles.eulaDesc}>
+          By continuing, you agree to our EULA. Jainune has zero tolerance for objectionable content,
+          harassment, or abusive behavior. Violators face immediate removal and permanent account ban within 24 hours.
+        </Text>
+      </View>
+
       <Text style={styles.legal}>
         You can withdraw optional consents at any time from Settings → Privacy. Core Matchmaking consent can only be withdrawn by deleting your account.
       </Text>
@@ -100,10 +109,21 @@ const styles = StyleSheet.create({
     color: colors.saffron,
     textTransform: "uppercase",
   },
+  eulaCard: {
+    backgroundColor: colors.white,
+    borderRadius: radii.lg,
+    padding: spacing.base,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginTop: spacing.sm,
+    marginBottom: spacing.base,
+  },
+  eulaTitle: { fontFamily: "Outfit_700Bold", fontSize: 14, color: colors.dark, marginBottom: 4 },
+  eulaDesc: { ...typography.bodySmall, color: colors.mid, lineHeight: 18 },
   legal: {
     ...typography.bodySmall,
     color: colors.mid,
-    marginTop: spacing.xl,
+    marginTop: spacing.base,
     lineHeight: 18,
   },
 });

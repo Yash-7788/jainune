@@ -153,6 +153,13 @@ function TermsContent() {
         Subscriptions (Jainune+) and consumable arcade tokens are managed via compliant platform billing.
         Renewals can be cancelled anytime before the next billing cycle.
       </Text>
+      <Text style={styles.sectionHeader}>4. Zero Tolerance for Objectionable Content & EULA (Apple Guideline 1.2)</Text>
+      <Text style={styles.paragraph}>
+        Jainune enforces an absolute zero-tolerance policy against objectionable content and abusive users.
+        Users agree not to post, transmit, or share any harassing, defamatory, abusive, sexually explicit,
+        or hateful material. Any user who violates this policy will have their content removed and their account
+        permanently banned within 24 hours of reporting.
+      </Text>
     </View>
   );
 }
