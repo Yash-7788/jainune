@@ -11,11 +11,11 @@ GET  /v1/users/{user_id}/public → public card view (for open profiles)
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_pool
 from app.core.redis import get_redis
@@ -339,6 +339,7 @@ async def get_public_profile(
     Public card view — only fields visible to other users.
     Used by the chat/profile deep-link flow.
     """
+    caller_id = current_user.get("user_id") or current_user.get("id")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -375,8 +376,15 @@ async def get_public_profile(
             FROM users u
             WHERE u.id = $1
               AND u.account_status = 'active'
+              AND u.is_paused = FALSE
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks ub
+                  WHERE (ub.blocker_id = $2 AND ub.blocked_id = u.id)
+                     OR (ub.blocker_id = u.id AND ub.blocked_id = $2)
+              )
             """,
             user_id,
+            caller_id,
         )
 
     if row is None:
@@ -422,6 +430,13 @@ class ReportUserBody(BaseModel):
         pattern="^(harassment|fake_profile|inappropriate_content|hate_speech|spam|underage|scam|other)$",
     )
     detail: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def normalize_reason(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower().replace(" ", "_")
+        return v
 
 
 @router.post("/{user_id}/report", status_code=status.HTTP_201_CREATED)
@@ -536,6 +551,8 @@ async def block_user(
                 SET status = 'unmatched', updated_at = NOW()
                 WHERE (user_id_1 = $1 AND user_id_2 = $2)
                    OR (user_id_1 = $2 AND user_id_2 = $1)
+                   OR (user_a = $1 AND user_b = $2)
+                   OR (user_a = $2 AND user_b = $1)
                 """,
                 blocker_id, user_id,
             )
@@ -545,6 +562,8 @@ async def block_user(
                 SET is_unmatched = TRUE, updated_at = NOW()
                 WHERE (participant_1_id = $1 AND participant_2_id = $2)
                    OR (participant_1_id = $2 AND participant_2_id = $1)
+                   OR (participant_a = $1 AND participant_b = $2)
+                   OR (participant_a = $2 AND participant_b = $1)
                 """,
                 blocker_id, user_id,
             )

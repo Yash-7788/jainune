@@ -49,6 +49,7 @@ PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
         "currency": "INR",
         "validity_days": 30,
         "type": "subscription",
+        "super_connect_credits": 5,
     },
     "jainune_plus_quarterly": {
         "tier": "jainune_plus",
@@ -56,6 +57,7 @@ PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
         "currency": "INR",
         "validity_days": 90,
         "type": "subscription",
+        "super_connect_credits": 15,
     },
     "jainune_plus_semiannual": {
         "tier": "jainune_plus",
@@ -63,6 +65,7 @@ PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
         "currency": "INR",
         "validity_days": 180,
         "type": "subscription",
+        "super_connect_credits": 30,
     },
     "jainune_plus_annual": {
         "tier": "jainune_plus",
@@ -70,6 +73,7 @@ PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
         "currency": "INR",
         "validity_days": 365,
         "type": "subscription",
+        "super_connect_credits": 60,
     },
     # Standalone 2-digit Serendipity Arcade micro-transactions (SUBSCRIPTION_SPEC.md §4)
     "arcade_wheel_spin": {
@@ -327,22 +331,26 @@ async def process_payment_captured(
                 current_valid = current_user_row["subscription_valid_until"] if current_user_row else None
                 base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
                 valid_until = base_time + timedelta(days=plan["validity_days"])
+                credits_to_add = plan.get("super_connect_credits", 5)
                 await conn.execute(
                     """
                     UPDATE users
                        SET subscription_tier        = $1,
                            subscription_valid_until = $2,
+                           super_connect_credits    = COALESCE(super_connect_credits, 0) + $3,
                            updated_at               = NOW()
-                     WHERE id = $3
+                     WHERE id = $4
                     """,
                     plan["tier"],
                     valid_until,
+                    credits_to_add,
                     intent["user_id"],
                 )
                 log.info(
-                    "Subscription upgraded: user=%s tier=%s until=%s",
+                    "Subscription upgraded: user=%s tier=%s credits=+%s until=%s",
                     intent["user_id"],
                     plan["tier"],
+                    credits_to_add,
                     valid_until,
                 )
             elif plan_type == "arcade":

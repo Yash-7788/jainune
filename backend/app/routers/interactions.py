@@ -306,8 +306,15 @@ async def get_my_matches(
         ), '[]'::json) AS photos
     FROM matches m
     JOIN users u ON (u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END)
-    WHERE (m.user_a = $1 OR m.user_b = $1)
+    WHERE (m.user_a = $1 OR m.user_b = $1 OR m.user_id_1 = $1 OR m.user_id_2 = $1)
       AND m.status = 'active'
+      AND u.account_status = 'active'
+      AND u.is_paused = FALSE
+      AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+             OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+      )
     ORDER BY m.created_at DESC
     """
     async with db.acquire() as conn:
@@ -348,9 +355,10 @@ async def get_users_who_liked_me(
     current_user: CurrentUser,
     db: DBDep,
 ) -> dict:
-    """Fetch incoming likes from other users (blurred for free tier on client)."""
+    """Fetch incoming likes from other users (server-side redacted for free tier)."""
     import json
     from datetime import date
+    from app.services.payment_service import get_effective_user_tier
     user_id = uuid.UUID(str(current_user["id"]))
 
     query = """
@@ -375,16 +383,25 @@ async def get_users_who_liked_me(
     JOIN users u ON u.id = i.actor_id
     WHERE i.target_id = $1
       AND i.action_type IN ('like', 'super_connect')
+      AND u.account_status = 'active'
+      AND u.is_paused = FALSE
       AND NOT EXISTS (
           SELECT 1 FROM interactions back
           WHERE back.actor_id = $1 AND back.target_id = i.actor_id
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+             OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
       )
     ORDER BY i.created_at DESC
     LIMIT 50
     """
     async with db.acquire() as conn:
+        tier = await get_effective_user_tier(user_id, conn)
         rows = await conn.fetch(query, user_id)
 
+    is_subscriber = tier in ("jainune_plus", "gold", "platinum")
     today = date.today()
     likes = []
     for r in rows:
@@ -393,22 +410,44 @@ async def get_users_who_liked_me(
         photos_val = r["photos"]
         if isinstance(photos_val, str):
             photos_val = json.loads(photos_val)
-        likes.append({
-            "id": str(r["id"]),
-            "first_name": r["first_name"] or "Someone",
-            "age": age,
-            "city": r["city"] or "Bangalore",
-            "state": r["state"] or "Karnataka",
-            "distance_display": "Nearby",
-            "dietary_strictness": r["dietary_strictness"] or "pure_jain",
-            "community_sect": r["community_sect"] or "shwetambar_murtipujak",
-            "profession": r["profession"] or "Professional",
-            "education": r["education"] or "Graduate",
-            "photos": photos_val or [],
-            "prompts": [],
-            "voice_snapshot": None,
-            "compatibility": {"values_alignment_percentage": 90, "shared_traditions": ["Jain Values"]},
-            "is_verified": r.get("is_photo_verified", False),
-            "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
-        })
-    return {"likes": likes}
+
+        if is_subscriber:
+            likes.append({
+                "id": str(r["id"]),
+                "first_name": r["first_name"] or "Someone",
+                "age": age,
+                "city": r["city"] or "Bangalore",
+                "state": r["state"] or "Karnataka",
+                "distance_display": "Nearby",
+                "dietary_strictness": r["dietary_strictness"] or "pure_jain",
+                "community_sect": r["community_sect"] or "shwetambar_murtipujak",
+                "profession": r["profession"] or "Professional",
+                "education": r["education"] or "Graduate",
+                "photos": photos_val or [],
+                "prompts": [],
+                "voice_snapshot": None,
+                "compatibility": {"values_alignment_percentage": 90, "shared_traditions": ["Jain Values"]},
+                "is_verified": r.get("is_photo_verified", False),
+                "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            })
+        else:
+            # Server-side redaction for free tier: prevent paywall bypass
+            likes.append({
+                "id": str(r["id"]),
+                "first_name": "Someone",
+                "age": age,
+                "city": r["city"] or "Nearby",
+                "state": "",
+                "distance_display": "Nearby",
+                "dietary_strictness": "",
+                "community_sect": "",
+                "profession": "",
+                "education": "",
+                "photos": [],
+                "prompts": [],
+                "voice_snapshot": None,
+                "compatibility": None,
+                "is_verified": False,
+                "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            })
+    return {"likes": likes, "total_count": len(likes)}

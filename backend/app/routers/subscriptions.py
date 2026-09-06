@@ -165,7 +165,7 @@ async def verify_payment(
             "SELECT subscription_valid_until FROM users WHERE id = $1",
             intent["user_id"],
         )
-    v_until = row["subscription_valid_until"] if row and row["subscription_valid_until"] else None
+    v_until = dict(row).get("subscription_valid_until") if row else None
 
     return {
         "success": True,

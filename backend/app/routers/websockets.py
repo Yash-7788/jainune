@@ -186,11 +186,14 @@ async def websocket_chat(
             pass
 
     try:
-        await asyncio.gather(
-            _producer(),
-            _consumer(),
-            return_exceptions=True,
+        producer_task = asyncio.create_task(_producer())
+        consumer_task = asyncio.create_task(_consumer())
+        done, pending = await asyncio.wait(
+            [producer_task, consumer_task],
+            return_when=asyncio.FIRST_COMPLETED,
         )
+        for t in pending:
+            t.cancel()
     finally:
         # ── 6. Cleanup ───────────────────────────────────────────────────────
         try:

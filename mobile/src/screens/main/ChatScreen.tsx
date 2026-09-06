@@ -408,23 +408,30 @@ export default function ChatScreen() {
   }, [matchId]);
 
   const handleReport = useCallback(() => {
+    const reasonMap: Record<string, string> = {
+      "Harassment": "harassment",
+      "Fake Profile": "fake_profile",
+      "Inappropriate Content": "inappropriate_content",
+      "Spam": "spam",
+    };
     const options = ["Harassment", "Fake Profile", "Inappropriate Content", "Spam", "Cancel"];
     if (Platform.OS === "ios") {
       ActionSheetIOS.showActionSheetWithOptions(
         { options, cancelButtonIndex: 4, destructiveButtonIndex: [0, 1, 2, 3], title: "Report this conversation" },
         (idx) => {
           if (idx < 4) {
-            reportMessage(otherUser.id, options[idx]).catch(() => {});
+            const canonicalReason = reasonMap[options[idx]] || "other";
+            reportMessage(otherUser.id, canonicalReason).catch(() => {});
             Alert.alert("Report Submitted", "Our team will review this within 24 hours.");
           }
         }
       );
     } else {
       Alert.alert("Report User", "Choose a reason:", [
-        { text: "Harassment", onPress: () => reportMessage(otherUser.id, "Harassment").catch(() => {}) },
-        { text: "Fake Profile", onPress: () => reportMessage(otherUser.id, "Fake Profile").catch(() => {}) },
-        { text: "Inappropriate Content", onPress: () => reportMessage(otherUser.id, "Inappropriate Content").catch(() => {}) },
-        { text: "Spam", onPress: () => reportMessage(otherUser.id, "Spam").catch(() => {}) },
+        { text: "Harassment", onPress: () => reportMessage(otherUser.id, "harassment").catch(() => {}) },
+        { text: "Fake Profile", onPress: () => reportMessage(otherUser.id, "fake_profile").catch(() => {}) },
+        { text: "Inappropriate Content", onPress: () => reportMessage(otherUser.id, "inappropriate_content").catch(() => {}) },
+        { text: "Spam", onPress: () => reportMessage(otherUser.id, "spam").catch(() => {}) },
         { text: "Cancel", style: "cancel" },
       ]);
     }

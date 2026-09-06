@@ -68,12 +68,14 @@ export default function LikesScreen() {
       if (matchRes.status === "fulfilled") {
         const profiles = matchRes.value.profiles ?? [];
         setMatches(
-          profiles.map((c: FeedCandidate) => ({
+          profiles.map((c: any) => ({
             id: c.id,
             first_name: c.first_name,
             age: c.age,
             city: c.city,
             photo_url: c.photos?.[0]?.url,
+            chat_id: c.chat_id || c.id,
+            matched_at: c.matched_at,
           }))
         );
       }
@@ -81,12 +83,13 @@ export default function LikesScreen() {
       if (likedRes.status === "fulfilled") {
         const likes = likedRes.value.likes ?? [];
         setLikedMe(
-          likes.map((c: FeedCandidate) => ({
+          likes.map((c: any) => ({
             id: c.id,
             first_name: c.first_name,
             age: c.age,
             city: c.city,
             photo_url: c.photos?.[0]?.url,
+            matched_at: c.liked_at,
           }))
         );
       }
@@ -212,9 +215,10 @@ export default function LikesScreen() {
                   navigation.navigate("Subscriptions");
                   return;
                 }
-                if (tab === "matches" && item.chat_id) {
+                if (tab === "matches") {
+                  const targetChatId = item.chat_id || item.id;
                   navigation.navigate("Chat", {
-                    matchId: item.chat_id,
+                    matchId: targetChatId,
                     otherUser: {
                       id: item.id,
                       first_name: item.first_name,
