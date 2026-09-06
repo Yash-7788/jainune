@@ -565,6 +565,10 @@ export default function ChatScreen() {
         data={messages}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
+        maxToRenderPerBatch={10}
+        windowSize={5}
+        initialNumToRender={15}
+        removeClippedSubviews={Platform.OS === "android"}
         contentContainerStyle={styles.list}
         onEndReached={loadOlderMessages}
         onEndReachedThreshold={0.1}

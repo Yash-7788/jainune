@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
 from app.core.redis import get_redis
-from app.core.security import get_current_user
+from app.dependencies import get_current_user
 from app.models.schemas.payment import SubscriptionStatusResponse, SubscriptionTier
 from app.models.schemas.user import UserProfileResponse, UpdatePromptsBody
 

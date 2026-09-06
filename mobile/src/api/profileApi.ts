@@ -66,6 +66,7 @@ export interface SubscriptionPlan {
 
 export interface RazorpayOrder {
   order_id: string;
+  amount: number;
   amount_paisa: number;
   currency: string;
   razorpay_key: string;
@@ -311,9 +312,17 @@ export async function getSubscriptionStatus(): Promise<SubscriptionStatus> {
 }
 
 export async function createSubscriptionOrder(plan_id: string): Promise<RazorpayOrder> {
-  const res = await apiPost<RazorpayOrder>("/subscriptions/order", { plan_id });
+  const res = await apiPost<any>("/subscriptions/order", { plan_id });
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  const d = res.data;
+  const amt = Number(d.amount ?? d.amount_paisa ?? 0);
+  return {
+    order_id: d.order_id,
+    amount: amt,
+    amount_paisa: amt,
+    currency: d.currency || "INR",
+    razorpay_key: d.razorpay_key || d.key_id || "",
+  };
 }
 
 /**
@@ -381,9 +390,17 @@ export async function rollArcadeDice(): Promise<{
 }
 
 export async function createArcadeOrder(product_id: string): Promise<RazorpayOrder> {
-  const res = await apiPost<RazorpayOrder>("/subscriptions/order", { plan_id: product_id });
+  const res = await apiPost<any>("/subscriptions/order", { plan_id: product_id });
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  const d = res.data;
+  const amt = Number(d.amount ?? d.amount_paisa ?? 0);
+  return {
+    order_id: d.order_id,
+    amount: amt,
+    amount_paisa: amt,
+    currency: d.currency || "INR",
+    razorpay_key: d.razorpay_key || d.key_id || "",
+  };
 }
 
 export async function verifyArcadePayment(payload: {

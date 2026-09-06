@@ -65,9 +65,25 @@ class VerifyPaymentBody(BaseModel):
 class OrderResponse(BaseModel):
     order_id: str          # rzp order id
     amount: int            # paise
+    amount_paisa: Optional[int] = None
     currency: str
     plan_id: str
     key_id: str            # public Razorpay key (safe to send to client)
+    razorpay_key: Optional[str] = None
+
+
+class SubscriptionPlanItem(BaseModel):
+    plan_id: str
+    label: str
+    duration_months: int
+    amount_inr: int
+    per_month_inr: int
+    savings_pct: int
+    is_recommended: bool
+
+
+class PlansListResponse(BaseModel):
+    plans: list[SubscriptionPlanItem]
 
 
 class SubscriptionStatusResponse(BaseModel):

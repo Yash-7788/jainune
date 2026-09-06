@@ -185,10 +185,54 @@ async def create_order(
     return {
         "order_id": order["id"],
         "amount": plan["amount"],
+        "amount_paisa": plan["amount"],
         "currency": plan["currency"],
         "plan_id": plan_id,
         "key_id": settings.razorpay_key_id,
+        "razorpay_key": settings.razorpay_key_id,
     }
+
+
+def get_active_subscription_plans() -> list[dict[str, Any]]:
+    """Returns active Jainune+ subscription tiers for client pricing display."""
+    return [
+        {
+            "plan_id": "jainune_plus_monthly",
+            "label": "1 Month",
+            "duration_months": 1,
+            "amount_inr": 499,
+            "per_month_inr": 499,
+            "savings_pct": 0,
+            "is_recommended": False,
+        },
+        {
+            "plan_id": "jainune_plus_quarterly",
+            "label": "3 Months",
+            "duration_months": 3,
+            "amount_inr": 999,
+            "per_month_inr": 333,
+            "savings_pct": 33,
+            "is_recommended": True,
+        },
+        {
+            "plan_id": "jainune_plus_semiannual",
+            "label": "6 Months",
+            "duration_months": 6,
+            "amount_inr": 1699,
+            "per_month_inr": 283,
+            "savings_pct": 43,
+            "is_recommended": False,
+        },
+        {
+            "plan_id": "jainune_plus_annual",
+            "label": "1 Year",
+            "duration_months": 12,
+            "amount_inr": 2799,
+            "per_month_inr": 233,
+            "savings_pct": 53,
+            "is_recommended": False,
+        },
+    ]
 
 
 # ---------------------------------------------------------------------------

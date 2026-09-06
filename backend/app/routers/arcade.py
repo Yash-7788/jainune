@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 import asyncpg
 
 from app.core.database import get_pool
-from app.core.security import get_current_user
+from app.dependencies import get_current_user
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/arcade", tags=["Arcade"])

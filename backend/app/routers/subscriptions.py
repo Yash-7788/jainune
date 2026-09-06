@@ -16,10 +16,11 @@ import asyncpg
 
 from app.core.config import settings
 from app.core.database import get_pool
-from app.core.security import get_current_user
+from app.dependencies import get_current_user
 from app.models.schemas.payment import (
     CreateOrderBody,
     OrderResponse,
+    PlansListResponse,
     SubscriptionStatusResponse,
     VerifyPaymentBody,
 )
@@ -27,6 +28,18 @@ from app.services import payment_service
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/subscriptions", tags=["Subscriptions"])
+
+
+# ---------------------------------------------------------------------------
+# Plans catalogue
+# ---------------------------------------------------------------------------
+
+
+@router.get("/plans", response_model=PlansListResponse, status_code=status.HTTP_200_OK)
+async def list_plans() -> dict:
+    """Returns active subscription plans for mobile checkout."""
+    plans = payment_service.get_active_subscription_plans()
+    return {"plans": plans}
 
 
 # ---------------------------------------------------------------------------

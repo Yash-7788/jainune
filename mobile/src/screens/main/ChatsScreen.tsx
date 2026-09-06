@@ -100,6 +100,10 @@ export default function ChatsScreen() {
       <FlatList
         data={threads}
         keyExtractor={(item) => item.match_id}
+        maxToRenderPerBatch={10}
+        windowSize={5}
+        initialNumToRender={10}
+        removeClippedSubviews={Platform.OS === "android"}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

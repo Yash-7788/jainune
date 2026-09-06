@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 import asyncpg
 
 from app.core.database import get_pool
-from app.core.security import get_current_user
+from app.dependencies import get_current_user
 from app.services.dignity_engine import recompute_trust_score
 
 log = logging.getLogger(__name__)
