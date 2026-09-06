@@ -13,9 +13,9 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
-import { colors, spacing, typography } from "../../../theme/tokens";
-import { BackIcon } from "../../../components/core/Icons";
-import { PrimaryButton, ErrorToast } from "../../../components/core";
+import { colors, spacing, typography } from "../../theme/tokens";
+import { BackIcon } from "../../components/core/Icons";
+import { PrimaryButton, ErrorToast } from "../../components/core";
 
 interface OnboardingStepProps {
   title: string;
