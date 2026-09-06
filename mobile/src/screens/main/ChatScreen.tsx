@@ -55,7 +55,8 @@ import ContentModerationSheet, {
   DetectedType,
 } from "../../components/chat/ContentModerationSheet";
 
-const WS_BASE = "wss://api.jainune.com/v1/ws/chat";
+const WS_BASE =
+  process.env.EXPO_PUBLIC_WS_URL || "wss://api.jainune.com/v1/ws/chat";
 
 interface RouteParams {
   matchId: string;

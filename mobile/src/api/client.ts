@@ -14,7 +14,8 @@ import { ErrorCode, getFriendlyError } from "../utils/errors";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PRIMARY_BASE_URL = "https://api.jainune.com/v1";
+const PRIMARY_BASE_URL =
+  process.env.EXPO_PUBLIC_API_URL || "https://api.jainune.com/v1";
 const SERVER_URLS = [PRIMARY_BASE_URL];
 
 export const SECURE_KEYS = {
