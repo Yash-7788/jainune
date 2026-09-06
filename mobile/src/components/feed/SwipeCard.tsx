@@ -81,7 +81,7 @@ export default function SwipeCard({
     Animated.timing(position, {
       toValue: { x, y },
       duration: SWIPE_OUT_DURATION,
-      useNativeDriver: false,
+      useNativeDriver: true,
     }).start(() => onSwipeComplete(direction));
   };
 
@@ -111,7 +111,7 @@ export default function SwipeCard({
         else {
           Animated.spring(position, {
             toValue: { x: 0, y: 0 },
-            useNativeDriver: false,
+            useNativeDriver: true,
             friction: 5,
           }).start();
           setSwipeDirection(null);

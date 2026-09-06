@@ -94,27 +94,28 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
     const winningIndex = Math.floor((randomDegrees % 360) / (360 / WHEEL_REWARDS.length));
     const prize = WHEEL_REWARDS[winningIndex];
 
-    wheelSpinAnim.setValue(0);
-    Animated.timing(wheelSpinAnim, {
-      toValue: randomDegrees,
-      duration: 3500,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start(async () => {
-      setIsSpinning(false);
-      try {
-        const res = await spinArcadeWheel();
+    try {
+      const res = await spinArcadeWheel();
+      wheelSpinAnim.setValue(0);
+      Animated.timing(wheelSpinAnim, {
+        toValue: randomDegrees,
+        duration: 3500,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(() => {
+        setIsSpinning(false);
         setSpins(res.remaining_spins);
         if (res.paired_user) {
           setLastWon(`✨ Paired with ${res.paired_user.first_name} (${res.paired_user.city})!`);
         } else {
           setLastWon(`${prize.icon} ${prize.label}`);
         }
-      } catch {
-        setSpins((s) => Math.max(0, s - 1));
-        setLastWon(`${prize.icon} ${prize.label}`);
-      }
-    });
+      });
+    } catch (err: any) {
+      setIsSpinning(false);
+      wheelSpinAnim.stopAnimation();
+      Alert.alert("Spin Failed", "Could not complete wheel spin. Please try again.");
+    }
   };
 
   const handleRollDice = async () => {
@@ -127,37 +128,35 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
     setIsRolling(true);
     setLastWon(null);
 
-    diceRollAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(diceRollAnim, {
-        toValue: 1,
-        duration: 800,
-        easing: Easing.bounce,
-        useNativeDriver: true,
-      }),
-    ]).start(async () => {
-      try {
-        const res = await rollArcadeDice();
-        const rolled = res.roll_outcome?.[0] || Math.floor(Math.random() * 6) + 1;
+    try {
+      const res = await rollArcadeDice();
+      const rolled = (res as any).dice?.[0] || (res as any).roll_outcome?.[0] || 1;
+      diceRollAnim.setValue(0);
+      Animated.sequence([
+        Animated.timing(diceRollAnim, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.bounce,
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setIsRolling(false);
         setDiceNumber(rolled);
         setRolls(res.remaining_dice_rolls);
         setLastWon(`🎲 Rolled ${rolled}: ${DICE_REWARDS[rolled - 1]}`);
-      } catch {
-        const rolled = Math.floor(Math.random() * 6) + 1;
-        setDiceNumber(rolled);
-        setRolls((r) => Math.max(0, r - 1));
-        setLastWon(`🎲 Rolled ${rolled}: ${DICE_REWARDS[rolled - 1]}`);
-      } finally {
-        setIsRolling(false);
-      }
-    });
+      });
+    } catch (err: any) {
+      setIsRolling(false);
+      diceRollAnim.stopAnimation();
+      Alert.alert("Roll Failed", "Could not complete dice roll. Please try again.");
+    }
   };
 
   const handlePurchase = async (product: ArcadeProduct) => {
     setPurchasing(true);
     try {
       const res = await purchaseArcadeRolls(product.product_id, product.label);
-      if (res.success) {
+      if (res.success && res.error !== "EXTERNAL_CHECKOUT_OPENED") {
         // Refresh wallet from backend
         try {
           const w = await getArcadeWallet();
@@ -168,6 +167,8 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
           setRolls((r) => r + (product.rolls || 0));
         }
         Alert.alert("Purchased!", `${product.label} added to your arcade balance.`);
+      } else if (res.error === "EXTERNAL_CHECKOUT_OPENED") {
+        Alert.alert("Checkout Opened", "Complete your purchase in your browser. Tokens will appear automatically once confirmed.");
       }
     } catch (err: any) {
       if (err?.code !== 0 && err?.error !== "CANCELLED") {

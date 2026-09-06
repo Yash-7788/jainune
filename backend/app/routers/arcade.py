@@ -14,6 +14,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import random
 from typing import Optional
 from uuid import UUID
 
@@ -337,17 +338,24 @@ async def spin_serendipity_wheel(
                 current_user["user_id"],
             )
 
-            # Find active random candidate in same operational zone
-            candidate = await conn.fetchrow(
-                """
-                SELECT id, first_name, city
-                FROM users
-                WHERE id != $1 AND account_status = 'active'
-                ORDER BY random()
-                LIMIT 1
-                """,
+            # Find active candidate via random offset sampling (avoids table-wide ORDER BY random() timeout)
+            candidate = None
+            total_active = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE id != $1 AND account_status = 'active'",
                 current_user["user_id"],
             )
+            if total_active and total_active > 0:
+                offset = random.randint(0, min(total_active - 1, 500))
+                candidate = await conn.fetchrow(
+                    """
+                    SELECT id, first_name, city
+                    FROM users
+                    WHERE id != $1 AND account_status = 'active'
+                    OFFSET $2 LIMIT 1
+                    """,
+                    current_user["user_id"],
+                    offset,
+                )
 
     return {
         "success": True,

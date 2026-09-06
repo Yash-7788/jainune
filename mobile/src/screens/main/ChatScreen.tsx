@@ -131,7 +131,11 @@ export default function ChatScreen() {
     });
     getSubscriptionStatus()
       .then((sub) => {
-        setIsSubscriber(sub.tier === "plus" && sub.status === "active");
+        setIsSubscriber(
+          sub.tier === "jainune_plus" ||
+            sub.tier === "plus" ||
+            sub.is_active === true
+        );
       })
       .catch(() => {});
   }, []);
@@ -151,13 +155,12 @@ export default function ChatScreen() {
       const msgs = await getMessages(matchId, cursorParam);
       if (msgs.length < 30) setHasMore(false);
       if (cursorParam) {
-        setMessages((prev) => [...msgs, ...prev]);
+        setMessages((prev) => [...prev, ...msgs]);
       } else {
         setMessages(msgs);
-        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 100);
       }
       if (msgs.length > 0) {
-        setCursor(msgs[0].id);
+        setCursor(msgs[msgs.length - 1].id);
       }
     } catch (err: any) {
       const e = err?._apiError;
@@ -301,10 +304,9 @@ export default function ChatScreen() {
               (m) => !(m.id.startsWith("temp_") && m.content === incoming.content && m.sender_id === incoming.sender_id)
             );
             if (withoutTemp.some((m) => m.id === incoming.id)) return prev;
-            return [...withoutTemp, incoming];
+            return [incoming, ...withoutTemp];
           });
           triggerMarkRead();
-          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
         }
         break;
       }
@@ -368,8 +370,7 @@ export default function ChatScreen() {
       is_read: false,
       created_at: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, tempMsg]);
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    setMessages((prev) => [tempMsg, ...prev]);
 
     try {
       const sent = await sendMessage(matchId, content);
@@ -435,8 +436,8 @@ export default function ChatScreen() {
     try {
       const msgs = await getMessages(matchId, cursor);
       if (msgs.length < 30) setHasMore(false);
-      setMessages((prev) => [...msgs, ...prev]);
-      if (msgs.length > 0) setCursor(msgs[0].id);
+      setMessages((prev) => [...prev, ...msgs]);
+      if (msgs.length > 0) setCursor(msgs[msgs.length - 1].id);
     } catch {}
     setLoadingMore(false);
   }, [hasMore, loadingMore, cursor, matchId]);
@@ -566,6 +567,7 @@ export default function ChatScreen() {
       <FlatList
         ref={listRef}
         data={messages}
+        inverted={true}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
         maxToRenderPerBatch={10}
@@ -574,13 +576,13 @@ export default function ChatScreen() {
         removeClippedSubviews={Platform.OS === "android"}
         contentContainerStyle={styles.list}
         onEndReached={loadOlderMessages}
-        onEndReachedThreshold={0.1}
-        ListHeaderComponent={
+        onEndReachedThreshold={0.2}
+        ListFooterComponent={
           loadingMore ? <ActivityIndicator size="small" color={colors.saffron} style={{ margin: spacing.base }} /> : null
         }
         ListEmptyComponent={
           !loading ? (
-            <View style={styles.emptyState}>
+            <View style={[styles.emptyState, { transform: [{ scaleY: -1 }] }]}>
               <Text style={styles.emptyEmoji}>💬</Text>
               <Text style={styles.emptyTitle}>Start the Conversation!</Text>
               <Text style={styles.emptyDesc}>
@@ -589,7 +591,6 @@ export default function ChatScreen() {
             </View>
           ) : null
         }
-        inverted={false}
       />
 
       {/* Input bar */}

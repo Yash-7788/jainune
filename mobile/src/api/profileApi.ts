@@ -47,11 +47,16 @@ export interface MyProfile {
 }
 
 export interface SubscriptionStatus {
-  tier: "free" | "plus";
-  plan_id: string | null;
-  status: "active" | "halted" | "cancelled" | "expired" | null;
-  current_period_end: string | null;
-  cancel_at_period_end: boolean;
+  tier: "free" | "plus" | "gold" | "platinum" | "jainune_plus";
+  is_active?: boolean;
+  status?: "active" | "halted" | "cancelled" | "expired" | null;
+  plan_id?: string | null;
+  current_period_end?: string | null;
+  expires_at?: string | null;
+  daily_likes_remaining?: number;
+  super_connects_remaining?: number;
+  can_see_who_liked?: boolean;
+  cancel_at_period_end?: boolean;
 }
 
 export interface SubscriptionPlan {
@@ -301,13 +306,18 @@ export async function getSubscriptionStatus(): Promise<SubscriptionStatus> {
   }>("/users/me/subscription");
   if (!res.success) throw { _apiError: res.error };
   const d = res.data;
+  const isSubscriber = d.tier !== "free";
   return {
     tier: d.tier as any,
-    is_active: d.tier !== "free",
+    is_active: isSubscriber,
+    status: isSubscriber ? "active" : "expired",
     expires_at: d.valid_until,
+    current_period_end: d.valid_until,
     daily_likes_remaining: d.daily_likes_remaining ?? 999,
     super_connects_remaining: d.super_likes_remaining ?? 0,
     can_see_who_liked: d.can_see_who_liked ?? false,
+    plan_id: null,
+    cancel_at_period_end: false,
   };
 }
 
@@ -376,13 +386,15 @@ export async function spinArcadeWheel(): Promise<{
 export async function rollArcadeDice(): Promise<{
   success: boolean;
   remaining_dice_rolls: number;
-  roll_outcome: number[];
+  roll_outcome?: number[];
+  dice?: number[];
   message: string;
 }> {
   const res = await apiPost<{
     success: boolean;
     remaining_dice_rolls: number;
-    roll_outcome: number[];
+    roll_outcome?: number[];
+    dice?: number[];
     message: string;
   }>("/arcade/roll");
   if (!res.success) throw { _apiError: res.error };

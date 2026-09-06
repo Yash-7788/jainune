@@ -108,7 +108,11 @@ export default function ProfileScreen() {
 
   const age = calcAge(profile.date_of_birth);
   const heroPhoto = profile.photos?.[0]?.url;
-  const isSubscriber = profile.subscription_tier === "plus";
+  const isSubscriber =
+    profile.subscription_tier === "jainune_plus" ||
+    profile.subscription_tier === "plus" ||
+    profile.subscription_tier === "gold" ||
+    profile.subscription_tier === "platinum";
 
   return (
     <ScrollView

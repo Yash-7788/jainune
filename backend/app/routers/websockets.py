@@ -171,7 +171,7 @@ async def websocket_chat(
                 if msg_type in ("typing", "read_receipt"):
                     # Fan out to other participant via the same Redis channel
                     await redis.publish(
-                        channel,
+                        f"chat:{real_chat_id}",
                         json.dumps({
                             "type": msg_type,
                             "payload": {

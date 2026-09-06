@@ -40,7 +40,7 @@ export async function purchaseSubscription(
   if (ACTIVE_BILLING_PROVIDER === "web") {
     const webUrl = `https://jainune.com/subscribe?plan=${encodeURIComponent(plan.plan_id)}`;
     await Linking.openURL(webUrl);
-    return { success: true };
+    return { success: true, activated: false, error: "EXTERNAL_CHECKOUT_OPENED" };
   }
 
   // Option 2: Direct Razorpay / Alternative billing (UCB compliant)
@@ -96,7 +96,7 @@ export async function purchaseArcadeRolls(
   if (ACTIVE_BILLING_PROVIDER === "web") {
     const webUrl = `https://jainune.com/arcade?product=${encodeURIComponent(productId)}`;
     await Linking.openURL(webUrl);
-    return { success: true };
+    return { success: true, activated: false, error: "EXTERNAL_CHECKOUT_OPENED" };
   }
 
   try {

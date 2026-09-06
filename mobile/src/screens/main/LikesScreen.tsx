@@ -58,7 +58,11 @@ export default function LikesScreen() {
       ]);
 
       if (subRes.status === "fulfilled") {
-        setIsSubscriber(subRes.value.tier === "plus" && subRes.value.status === "active");
+        setIsSubscriber(
+          subRes.value.tier === "jainune_plus" ||
+            subRes.value.tier === "plus" ||
+            subRes.value.is_active === true
+        );
       }
 
       if (matchRes.status === "fulfilled") {

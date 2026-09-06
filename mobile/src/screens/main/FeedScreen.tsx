@@ -21,6 +21,7 @@ import {
   ScrollView,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import SwipeCard from "../../components/feed/SwipeCard";
@@ -43,6 +44,7 @@ type UIState = "loading" | "populated" | "empty" | "error" | "offline";
 
 export default function FeedScreen() {
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const [uiState, setUiState] = useState<UIState>("loading");
   const [candidates, setCandidates] = useState<FeedCandidate[]>([]);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
@@ -292,7 +294,7 @@ export default function FeedScreen() {
       </Animated.View>
 
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, Platform.OS === "ios" ? 59 : 32) }]}>
         <Text style={styles.logo}>jainune</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity

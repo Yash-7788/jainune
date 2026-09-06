@@ -10,6 +10,7 @@ Five-stage retrieval pipeline targeting sub-30ms p95:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import uuid
@@ -135,14 +136,16 @@ async def fetch_recommended_feed(
     if len(candidates) > limit:
         await _cache_feed(user_id, candidates[limit:], redis)
 
-    # Batch increment impression counts for Dignity Engine tracking
+    # Buffer impressions in Redis counter to prevent row lock contention on users table
     if candidates:
-        ids = [c["id"] for c in candidates]
-        async with db.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET impressions_last_48h = impressions_last_48h + 1 WHERE id = ANY($1::uuid[])",
-                ids,
-            )
+        try:
+            pipe = redis.pipeline()
+            for c in candidates:
+                pipe.hincrby("buffer:user_impressions_48h", str(c["id"]), 1)
+            await pipe.execute()
+            asyncio.create_task(_async_flush_impressions(db, redis))
+        except Exception:
+            pass
 
     return {
         "candidates": candidates[:limit],
@@ -150,6 +153,29 @@ async def fetch_recommended_feed(
         "exhausted": len(candidates) <= limit,
         "from_cache": False,
     }
+
+
+async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> None:
+    """Asynchronously flush buffered user impression counts from Redis to PostgreSQL."""
+    try:
+        acquired = await redis.set("lock:flush_impressions", "1", nx=True, ex=10)
+        if not acquired:
+            return
+        counts = await redis.hgetall("buffer:user_impressions_48h")
+        if not counts:
+            return
+        await redis.delete("buffer:user_impressions_48h")
+        updates = [
+            (int(v), uuid.UUID(k.decode() if isinstance(k, bytes) else k))
+            for k, v in counts.items()
+        ]
+        async with db.acquire() as conn:
+            await conn.executemany(
+                "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
+                updates,
+            )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

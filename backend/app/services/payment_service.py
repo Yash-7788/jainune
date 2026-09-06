@@ -16,6 +16,7 @@ Plan pricing (INR, in paise):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -155,16 +156,21 @@ async def create_order(
         raise ValueError(f"Unknown plan: {plan_id}")
 
     rzp = _rzp_client()
-    order = rzp.order.create(
-        {
-            "amount": plan["amount"],
-            "currency": plan["currency"],
-            "notes": {
-                "user_id": str(user_id),
-                "plan_id": plan_id,
+    try:
+        order = await asyncio.to_thread(
+            rzp.order.create,
+            {
+                "amount": plan["amount"],
+                "currency": plan["currency"],
+                "notes": {
+                    "user_id": str(user_id),
+                    "plan_id": plan_id,
+                },
             },
-        }
-    )
+        )
+    except Exception as exc:
+        log.error("Razorpay order creation failed: %s", exc)
+        raise ValueError(f"Unable to create payment order: {exc}")
 
     # Persist intent so webhook can look up user_id and plan from order_id
     async with pool.acquire() as conn:
@@ -292,26 +298,26 @@ async def process_payment_captured(
         return
 
     async with pool.acquire() as conn:
-        intent = await conn.fetchrow(
-            "SELECT user_id, plan_id, status FROM payment_intents WHERE razorpay_order_id = $1",
-            order_id,
-        )
-        if intent is None:
-            log.error("No payment_intent for order_id=%s", order_id)
-            return
-
-        if intent["status"] == "captured":
-            log.info("Duplicate webhook for order_id=%s — skipping", order_id)
-            return
-
-        plan = PLAN_CATALOGUE.get(intent["plan_id"])
-        if plan is None:
-            log.error("Unknown plan %s for order_id=%s", intent["plan_id"], order_id)
-            return
-
-        plan_type = plan.get("type", "subscription")
-
         async with conn.transaction():
+            intent = await conn.fetchrow(
+                "SELECT user_id, plan_id, status FROM payment_intents WHERE razorpay_order_id = $1 FOR UPDATE",
+                order_id,
+            )
+            if intent is None:
+                log.error("No payment_intent for order_id=%s", order_id)
+                return
+
+            if intent["status"] == "captured":
+                log.info("Duplicate webhook for order_id=%s — skipping", order_id)
+                return
+
+            plan = PLAN_CATALOGUE.get(intent["plan_id"])
+            if plan is None:
+                log.error("Unknown plan %s for order_id=%s", intent["plan_id"], order_id)
+                return
+
+            plan_type = plan.get("type", "subscription")
+
             if plan_type == "subscription":
                 current_user_row = await conn.fetchrow(
                     "SELECT subscription_valid_until FROM users WHERE id = $1",
@@ -383,7 +389,8 @@ async def process_payment_captured(
                 UPDATE payment_intents
                    SET status              = 'captured',
                        razorpay_payment_id = $1,
-                       captured_at         = NOW()
+                       captured_at         = NOW(),
+                       updated_at          = NOW()
                  WHERE razorpay_order_id   = $2
                 """,
                 payment_id,
@@ -403,17 +410,21 @@ async def process_refund(
         return
 
     async with pool.acquire() as conn:
-        intent = await conn.fetchrow(
-            "SELECT user_id, plan_id FROM payment_intents WHERE razorpay_payment_id = $1",
-            payment_id,
-        )
-        if intent is None:
-            return
-
-        plan = PLAN_CATALOGUE.get(intent["plan_id"], {})
-        plan_type = plan.get("type", "subscription")
-
         async with conn.transaction():
+            intent = await conn.fetchrow(
+                "SELECT user_id, plan_id, status FROM payment_intents WHERE razorpay_payment_id = $1 FOR UPDATE",
+                payment_id,
+            )
+            if intent is None:
+                return
+
+            if intent["status"] == "refunded":
+                log.info("Duplicate refund webhook for payment_id=%s — skipping", payment_id)
+                return
+
+            plan = PLAN_CATALOGUE.get(intent["plan_id"], {})
+            plan_type = plan.get("type", "subscription")
+
             if plan_type == "subscription":
                 await conn.execute(
                     """

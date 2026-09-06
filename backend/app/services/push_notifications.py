@@ -116,6 +116,26 @@ async def send_push(
     if not device_token:
         return False
 
+    # Expo push token delivery (handles iOS APNs / Android without raw token mismatches)
+    if device_token.startswith(("ExponentPushToken", "ExpoPushToken")):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://exp.host/--/api/v2/push/send",
+                    json={
+                        "to": device_token,
+                        "title": title,
+                        "body": body,
+                        "data": data or {},
+                        "sound": "default",
+                        "priority": "high",
+                    },
+                )
+                return resp.status_code == 200
+        except Exception as exc:
+            log.error("Expo push exception: %s", exc)
+            return False
+
     try:
         access_token = await _get_access_token()
     except Exception as exc:

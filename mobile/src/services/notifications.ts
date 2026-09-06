@@ -46,12 +46,12 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     let token: string | null = null;
     try {
-      const deviceTokenData = await Notifications.getDevicePushTokenAsync();
-      token = deviceTokenData.data;
+      const expoTokenData = await Notifications.getExpoPushTokenAsync();
+      token = expoTokenData.data;
     } catch {
       try {
-        const expoTokenData = await Notifications.getExpoPushTokenAsync();
-        token = expoTokenData.data;
+        const deviceTokenData = await Notifications.getDevicePushTokenAsync();
+        token = deviceTokenData.data;
       } catch {
         token = null;
       }

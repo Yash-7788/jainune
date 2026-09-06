@@ -158,7 +158,13 @@ export default function SubscriptionsScreen() {
     );
   }
 
-  const isActive = status?.tier === "plus" && status?.status === "active";
+  const isActive =
+    (status?.tier === "jainune_plus" ||
+      status?.tier === "plus" ||
+      status?.tier === "gold" ||
+      status?.tier === "platinum" ||
+      status?.is_active === true) &&
+    status?.status !== "expired";
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>

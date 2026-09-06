@@ -127,14 +127,14 @@ async def verify_payment(
 
     # 3. Redis distributed lock to prevent concurrent double-processing
     from app.core.redis import get_redis
-    lock_key = f"lock:payment:verify:{body.razorpay_order_id}"
+    lock_key = f"lock:payment:order:{body.razorpay_order_id}"
     r = None
     lock_acquired = True
     try:
         r = get_redis()
         lock_acquired = await r.set(lock_key, "1", nx=True, ex=15)
     except Exception:
-        pass  # DB transaction gate is fallback
+        pass  # DB transaction FOR UPDATE gate is fallback
 
     if not lock_acquired:
         raise HTTPException(status_code=409, detail="Payment verification is already in progress")
@@ -212,16 +212,32 @@ async def razorpay_webhook(
     if event_name == "payment.captured":
         payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
         payment_id = payment_entity.get("id")
-        if payment_id:
-            from app.core.redis import get_redis
-            try:
-                r = get_redis()
-                lock_acquired = await r.set(f"payment:processed:{payment_id}", "1", nx=True, ex=86400)
-                if not lock_acquired:
+        order_id = payment_entity.get("order_id")
+        from app.core.redis import get_redis
+        r = None
+        order_lock_key = f"lock:payment:order:{order_id}" if order_id else None
+        order_lock_acquired = True
+        try:
+            r = get_redis()
+            if payment_id:
+                processed = await r.set(f"payment:processed:{payment_id}", "1", nx=True, ex=86400)
+                if not processed:
                     return {"received": True, "status": "already_processed"}
-            except Exception:
-                pass  # Fallback to DB idempotency gate
-        await payment_service.process_payment_captured(event, pool)
+            if order_lock_key:
+                order_lock_acquired = await r.set(order_lock_key, "1", nx=True, ex=15)
+                if not order_lock_acquired:
+                    return {"received": True, "status": "lock_busy"}
+        except Exception:
+            pass  # Fallback to DB transaction FOR UPDATE gate
+
+        try:
+            await payment_service.process_payment_captured(event, pool)
+        finally:
+            if r and order_lock_key and order_lock_acquired:
+                try:
+                    await r.delete(order_lock_key)
+                except Exception:
+                    pass
     elif event_name == "payment.refunded":
         await payment_service.process_refund(event, pool)
     elif event_name == "payment.failed":
