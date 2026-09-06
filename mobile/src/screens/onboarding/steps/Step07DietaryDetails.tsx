@@ -18,8 +18,8 @@ type Route = RouteProp<OnboardingStackParams, "Step07">;
 export default function Step07Screen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
-  const { dietaryStrictness } = route.params;
   const { data, updateData, setStep } = useOnboardingStore();
+  const dietaryStrictness = route.params?.dietaryStrictness || data.dietaryStrictness || "pure_jain";
   const [eatsRootVeg, setEatsRootVeg] = useState(data.eatsRootVeg ?? false);
   const [eatsOnionGarlic, setEatsOnionGarlic] = useState(data.eatsOnionGarlic ?? false);
   const [loading, setLoading] = useState(false);

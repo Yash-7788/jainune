@@ -37,9 +37,25 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         set({ state: "unauthenticated" });
         return;
       }
-      // Token exists — trust it (interceptor handles 401 refresh)
-      // We can't decode without the public key on client, so we rely on first API call
-      set({ state: "authenticated" });
+      try {
+        const { getOnboardingStatus } = await import("../api/onboardingApi");
+        const { useOnboardingStore } = await import("./onboardingStore");
+        const status = await getOnboardingStatus();
+        if (status.completed) {
+          set({ state: "authenticated", onboardingCompleted: true });
+        } else {
+          useOnboardingStore.getState().setStep(status.current_step || 2);
+          set({ state: "onboarding", onboardingCompleted: false });
+        }
+      } catch (err: any) {
+        const s = err?._apiError?.status || err?.status;
+        if (s === 401 || s === 403) {
+          set({ state: "unauthenticated" });
+        } else {
+          // Offline / network fallback: trust saved session
+          set({ state: "authenticated" });
+        }
+      }
     } catch {
       set({ state: "unauthenticated" });
     }

@@ -41,12 +41,10 @@ export default function SplashScreen() {
 
       // 4. After 2s, route based on auth state
       setTimeout(() => {
-        // Auth state is reactive — navigation happens via AppNavigator
-        // Just need to leave splash
-        if (state === "unauthenticated" || state === "loading") {
+        const currentState = useAuthStore.getState().state;
+        if (currentState === "unauthenticated" || currentState === "loading") {
           navigation.replace("Welcome");
         }
-        // If authenticated or onboarding, AppNavigator handles routing
       }, 2000);
     })();
   }, []);

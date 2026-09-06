@@ -69,7 +69,34 @@ function ProgressHeader() {
   );
 }
 
+const stepToScreenName: Record<number, keyof OnboardingStackParams> = {
+  2: "Step02",
+  3: "Step03",
+  4: "Step04",
+  5: "Step05",
+  6: "Step06",
+  7: "Step07",
+  8: "Step08",
+  9: "Step09",
+  10: "Step10",
+  11: "Step11",
+  12: "Step12",
+  13: "Step13",
+  14: "Step14",
+  15: "Step15",
+  16: "Step16",
+  17: "Step17",
+  18: "Step18",
+  19: "Step19",
+  20: "Step20",
+  21: "Step21",
+  22: "Step22",
+};
+
 export default function OnboardingNavigator() {
+  const currentStep = useOnboardingStore((s) => s.step);
+  const initialRouteName = stepToScreenName[currentStep] || "Step02";
+
   return (
     <View style={{ flex: 1 }}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
@@ -80,7 +107,7 @@ export default function OnboardingNavigator() {
           animation: "slide_from_right",
           contentStyle: { backgroundColor: colors.bg },
         }}
-        initialRouteName="Step02"
+        initialRouteName={initialRouteName}
       >
         <Stack.Screen name="Step02" component={Step02Screen} />
         <Stack.Screen name="Step03" component={Step03Screen} />
