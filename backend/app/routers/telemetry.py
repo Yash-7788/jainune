@@ -12,6 +12,7 @@ The async telemetry_worker drains the stream and writes to DB.
 """
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import List, Optional
@@ -171,3 +172,42 @@ async def ingest_events(
                 pass  # Non-critical
 
     return TelemetryResponse(accepted=accepted, dropped=dropped)
+
+
+class InteractionEventPayload(BaseModel):
+    target_user_id: uuid.UUID
+    action: str
+    total_dwell_ms: int = 0
+    photo_dwell_ms: int = 0
+    prompt_dwell_ms: int = 0
+    voice_played_ratio: float = 0.0
+    comment_char_count: int = 0
+
+
+@router.post(
+    "/interaction-event",
+    response_model=TelemetryResponse,
+    summary="Ingest single interaction telemetry event",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_interaction_event(
+    event: InteractionEventPayload,
+    current_user: CurrentUser,
+    redis: RedisDep,
+) -> TelemetryResponse:
+    """Accepts single user interaction dwell telemetry event from mobile feed."""
+    actor_id = str(current_user["id"])
+    server_ts = int(time.time() * 1000)
+    entry = {
+        "actor_id": actor_id,
+        "event_type": f"interaction_{event.action}",
+        "target_user_id": str(event.target_user_id),
+        "duration_ms": str(event.total_dwell_ms),
+        "server_ts": str(server_ts),
+        "payload": json.dumps(event.model_dump(), default=str),
+    }
+    try:
+        await redis.xadd("telemetry:stream", entry, maxlen=50_000, approximate=True)
+        return TelemetryResponse(accepted=1, dropped=0)
+    except Exception:
+        return TelemetryResponse(accepted=0, dropped=1)

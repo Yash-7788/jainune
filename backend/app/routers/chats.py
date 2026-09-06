@@ -148,6 +148,17 @@ async def list_chats(
 
 
 @router.get(
+    "/weekly-question",
+    summary="Get weekly Jain icebreaker question",
+)
+async def get_weekly_question(
+    current_user: CurrentUser,
+) -> dict:
+    """Returns rotating Jain cultural & philosophical question for chat icebreakers."""
+    return {"question": "How do you incorporate Jain principles like Ahimsa and Anekantavada into your daily life?"}
+
+
+@router.get(
     "/{chat_id}/messages",
     response_model=ChatHistoryResponse,
     summary="Paginated message history",
