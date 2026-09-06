@@ -302,6 +302,16 @@ async def send_message(
                 detail="Communication is blocked.",
             )
 
+        recipient_status = await conn.fetchval(
+            "SELECT account_status FROM users WHERE id = $1",
+            other_id,
+        )
+        if recipient_status == "deleted":
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Recipient account is no longer active.",
+            )
+
         # Check user subscription status
         user_sub = await conn.fetchrow(
             "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
@@ -337,25 +347,35 @@ async def send_message(
         mod_disclaimer = mod_result.moderation_disclaimer
 
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO messages (
-                chat_id, sender_id, message_type, content, media_url,
-                is_moderated, moderation_type, moderation_disclaimer
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO messages (
+                    chat_id, sender_id, message_type, content, media_url,
+                    is_moderated, moderation_type, moderation_disclaimer
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                          is_moderated, moderation_type, moderation_disclaimer
+                """,
+                actual_chat_id,
+                user_id,
+                body.message_type,
+                final_content,
+                body.media_url,
+                is_moderated,
+                mod_type,
+                mod_disclaimer,
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
-                      is_moderated, moderation_type, moderation_disclaimer
-            """,
-            actual_chat_id,
-            user_id,
-            body.message_type,
-            final_content,
-            body.media_url,
-            is_moderated,
-            mod_type,
-            mod_disclaimer,
-        )
+            await conn.execute(
+                "UPDATE chats SET updated_at = NOW() WHERE id = $1",
+                actual_chat_id,
+            )
+            if chat.get("match_id"):
+                await conn.execute(
+                    "UPDATE matches SET last_message_at = NOW(), updated_at = NOW() WHERE id = $1",
+                    chat["match_id"],
+                )
 
     msg = ChatMessage(
         id=row["id"],
