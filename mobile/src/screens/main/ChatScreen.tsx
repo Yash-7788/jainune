@@ -32,6 +32,7 @@ import {
   Image,
   Alert,
   ActionSheetIOS,
+  AppState,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNavigation, useRoute } from "@react-navigation/native";
@@ -74,7 +75,15 @@ export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
   const route = useRoute();
-  const { matchId, otherUser } = route.params as RouteParams;
+  const rawParams = (route.params || {}) as Partial<RouteParams>;
+  const matchId = rawParams.matchId || "";
+  const otherUser = rawParams.otherUser || {
+    id: "",
+    first_name: "Match",
+    photo_url: null,
+    is_online: false,
+    momentum_expires_at: null,
+  };
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
@@ -106,7 +115,7 @@ export default function ChatScreen() {
   const myUserId = useRef<string | null>(null);
 
   // Momentum countdown
-  const momentumExpiry = route.params.momentumExpiresAt || route.params.otherUser.momentum_expires_at;
+  const momentumExpiry = rawParams.momentumExpiresAt || otherUser.momentum_expires_at;
   const [hoursLeft, setHoursLeft] = useState<number | null>(null);
 
   useEffect(() => {
@@ -258,7 +267,18 @@ export default function ChatScreen() {
     loadMessages();
     triggerMarkRead();
     connectWebSocket();
+
+    const appStateSub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+          reconnectAttempts.current = 0;
+          connectWebSocket();
+        }
+      }
+    });
+
     return () => {
+      appStateSub.remove();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (pingInterval.current) {
         clearInterval(pingInterval.current);

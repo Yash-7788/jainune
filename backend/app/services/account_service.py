@@ -122,7 +122,7 @@ async def purge_user_account(
         await conn.execute("DELETE FROM user_media WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM user_behavior_vectors WHERE user_id = $1", user_id)
-        await conn.execute("DELETE FROM dignity_badges WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM dignity_badges WHERE from_user_id = $1 OR to_user_id = $1", user_id)
 
         # Delete wallet & transactions
         await conn.execute("DELETE FROM arcade_transactions WHERE user_id = $1", user_id)
@@ -131,7 +131,10 @@ async def purge_user_account(
         # Cascade / explicit delete on interactions, matches, chats, messages
         # Note: messages & chats cascade from users, but clean explicitly to ensure zero orphaned memory
         await conn.execute("DELETE FROM messages WHERE sender_id = $1", user_id)
-        await conn.execute("DELETE FROM chats WHERE participant_a = $1 OR participant_b = $1", user_id)
+        await conn.execute(
+            "DELETE FROM chats WHERE participant_a = $1 OR participant_b = $1 OR participant_1_id = $1 OR participant_2_id = $1",
+            user_id,
+        )
         await conn.execute("DELETE FROM matches WHERE user_a = $1 OR user_b = $1", user_id)
         await conn.execute("DELETE FROM interactions WHERE actor_id = $1 OR target_id = $1", user_id)
 

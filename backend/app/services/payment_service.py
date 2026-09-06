@@ -418,7 +418,7 @@ async def process_refund(
             if intent is None:
                 return
 
-            if intent["status"] == "refunded":
+            if intent.get("status") == "refunded":
                 log.info("Duplicate refund webhook for payment_id=%s — skipping", payment_id)
                 return
 

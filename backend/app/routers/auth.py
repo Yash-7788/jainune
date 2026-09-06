@@ -184,7 +184,19 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
 @router.post("/email/otp/verify")
 async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep) -> dict:
     clean_email = body.email.strip().lower()
+    rate_key = f"auth:email_attempts:{clean_email}"
     session_key = f"auth:email_otp:{clean_email}"
+
+    attempts = await redis.incr(rate_key)
+    if attempts == 1:
+        await redis.expire(rate_key, 300)
+    if attempts > 5:
+        await redis.delete(session_key)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Maximum OTP verification attempts exceeded. Request a new OTP.",
+        )
+
     stored_hash = await redis.get(session_key)
     if not stored_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
@@ -195,6 +207,7 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code.")
 
     await redis.delete(session_key)
+    await redis.delete(rate_key)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(

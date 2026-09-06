@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel
 
 from app.core.config import settings

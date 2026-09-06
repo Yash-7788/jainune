@@ -73,8 +73,12 @@ export default function FeedScreen() {
     if (candidates.length > 0) {
       const upcoming = candidates.slice(0, 3);
       for (const cand of upcoming) {
-        if (cand.photos && cand.photos.length > 0 && cand.photos[0].url) {
-          Image.prefetch(cand.photos[0].url);
+        if (cand.photos && cand.photos.length > 0) {
+          for (const p of cand.photos.slice(0, 2)) {
+            if (p.url) {
+              Image.prefetch(p.url).catch(() => {});
+            }
+          }
         }
       }
     }

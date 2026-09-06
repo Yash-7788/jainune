@@ -86,6 +86,8 @@ async def _run_moderation(
         if approved:
             # Copy quarantine → production
             prod_key = s3_key.replace("uploads/", "media/")
+            if media_type == "photo":
+                prod_key = prod_key.rsplit(".", 1)[0] + ".webp"
             cdn_url = f"{settings.cdn_public_base_url}/{prod_key}"
 
             await asyncio.to_thread(_copy_to_production, s3_key, prod_key, media_type)

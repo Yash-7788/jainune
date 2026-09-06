@@ -99,7 +99,13 @@ async def list_chats(
                 ORDER BY created_at DESC
                 LIMIT 1
             ) lm ON TRUE
-            WHERE c.participant_1_id = $1 OR c.participant_2_id = $1
+            WHERE (c.participant_1_id = $1 OR c.participant_2_id = $1)
+              AND c.is_unmatched = FALSE
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks ub
+                  WHERE (ub.blocker_id = $1 AND ub.blocked_id = (CASE WHEN c.participant_1_id = $1 THEN c.participant_2_id ELSE c.participant_1_id END))
+                     OR (ub.blocked_id = $1 AND ub.blocker_id = (CASE WHEN c.participant_1_id = $1 THEN c.participant_2_id ELSE c.participant_1_id END))
+              )
             ORDER BY lm.created_at DESC NULLS LAST
             """,
             user_id,
@@ -278,10 +284,25 @@ async def send_message(
 
     body.validate_content()
 
-    from app.services.chat_safety_filter import filter_chat_content
+    other_id = chat["participant_2_id"] if chat["participant_1_id"] == user_id else chat["participant_1_id"]
 
-    # Check user subscription status
+    # Check user blocks
     async with db.acquire() as conn:
+        blocked = await conn.fetchval(
+            """
+            SELECT 1 FROM user_blocks
+            WHERE (blocker_id = $1 AND blocked_id = $2)
+               OR (blocker_id = $2 AND blocked_id = $1)
+            """,
+            user_id, other_id,
+        )
+        if blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Communication is blocked.",
+            )
+
+        # Check user subscription status
         user_sub = await conn.fetchrow(
             "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
             user_id,
@@ -291,7 +312,7 @@ async def send_message(
     if user_sub:
         tier = user_sub.get("subscription_tier") or "free"
         valid_until = user_sub.get("subscription_valid_until")
-        if tier in ("gold", "platinum") and valid_until and valid_until > datetime.now(timezone.utc):
+        if tier in ("jainune_plus", "gold", "platinum") and valid_until and valid_until > datetime.now(timezone.utc):
             is_subscribed = True
 
     # Filter content if text message
@@ -301,6 +322,7 @@ async def send_message(
     mod_disclaimer = None
 
     if body.message_type == "text" and body.content:
+        from app.services.chat_safety_filter import filter_chat_content
         mod_result = await filter_chat_content(
             content=body.content,
             chat_id=actual_chat_id,
