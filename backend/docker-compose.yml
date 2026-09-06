@@ -61,7 +61,7 @@ services:
       dockerfile: Dockerfile
     container_name: jainune_worker
     restart: unless-stopped
-    command: celery -A app.celery_app worker -B --loglevel=info --concurrency=2
+    command: celery -A app.celery_app worker -B --loglevel=info --concurrency=2 -Q default,notifications
     environment:
       - ENVIRONMENT=development
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/jainune_dev

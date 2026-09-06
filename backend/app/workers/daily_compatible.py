@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -132,7 +133,7 @@ async def _run_async() -> None:
                         ON CONFLICT (user_a_id, user_b_id) DO UPDATE
                             SET score = EXCLUDED.score, proposed_at = NOW()
                         """,
-                        [(p["user_a"], p["user_b"], p["score"]) for p in proposals],
+                        [(uuid.UUID(str(p["user_a"])), uuid.UUID(str(p["user_b"])), float(p["score"])) for p in proposals],
                     )
                     log.info("run_daily_compatible: wrote %d proposals", len(proposals))
             except Exception as exc:

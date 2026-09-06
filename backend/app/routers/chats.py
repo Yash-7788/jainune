@@ -485,7 +485,7 @@ async def unmatch_chat(
     """
     user_id = uuid.UUID(str(current_user["id"]))
     chat = await _assert_participant(chat_id, user_id, db)
-
+    actual_chat_id = chat["id"]
     p1 = chat["participant_1_id"]
     p2 = chat["participant_2_id"]
     other_id = p2 if p1 == user_id else p1
@@ -494,7 +494,7 @@ async def unmatch_chat(
         async with conn.transaction():
             await conn.execute(
                 "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE id = $1",
-                chat_id,
+                actual_chat_id,
             )
             if chat.get("match_id"):
                 await conn.execute(

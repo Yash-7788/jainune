@@ -200,7 +200,10 @@ async def websocket_chat(
             await pubsub.unsubscribe(*sub_channels)
         except Exception:
             pass
-        await pubsub.close()
+        try:
+            await pubsub.close()
+        except Exception:
+            pass
         try:
             await websocket.close()
         except Exception:

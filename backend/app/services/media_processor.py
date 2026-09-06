@@ -104,6 +104,8 @@ async def _run_moderation(
                     """,
                     cdn_url, prod_key, media_id,
                 )
+            # Delete raw upload from quarantine bucket
+            await asyncio.to_thread(_delete_from_quarantine, s3_key)
         else:
             async with db.acquire() as conn:
                 await conn.execute(

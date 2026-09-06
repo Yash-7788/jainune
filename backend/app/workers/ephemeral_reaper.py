@@ -227,16 +227,12 @@ def purge_deleted_users() -> None:
 
             ids = [r["id"] for r in rows]
             # Delete S3 objects first (no cascade for external storage)
-            s3 = _s3_client()
             media_keys = await conn.fetch(
                 "SELECT s3_key FROM user_media WHERE user_id = ANY($1::uuid[])",
                 ids,
             )
-            for mk in media_keys:
-                try:
-                    s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=mk["s3_key"])
-                except Exception as exc:
-                    log.warning("S3 purge error for key %s: %s", mk["s3_key"], exc)
+            from app.services.account_service import _delete_s3_keys_sync
+            _delete_s3_keys_sync([mk["s3_key"] for mk in media_keys if mk.get("s3_key")])
 
             # Hard delete — cascades via FK
             result = await conn.execute(

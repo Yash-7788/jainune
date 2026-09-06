@@ -33,7 +33,7 @@ services:
     restart: always
     env_file:
       - .env.production
-    command: celery -A app.celery_app worker -B --loglevel=info --concurrency=4
+    command: celery -A app.celery_app worker -B --loglevel=info --concurrency=4 -Q default,notifications
     deploy:
       resources:
         limits:

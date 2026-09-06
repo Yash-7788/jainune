@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 import asyncpg
 
@@ -47,6 +48,7 @@ def notify_new_match(self, match_id: str) -> None:
     async def _run():
         conn = await _get_conn()
         try:
+            m_uuid = uuid.UUID(str(match_id))
             row = await conn.fetchrow(
                 """
                 SELECT
@@ -57,7 +59,7 @@ def notify_new_match(self, match_id: str) -> None:
                 JOIN users u_b ON u_b.id = m.user_b_id
                 WHERE m.id = $1
                 """,
-                match_id,
+                m_uuid,
             )
             if row is None:
                 log.warning("notify_new_match: match %s not found", match_id)
@@ -99,6 +101,8 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
     async def _run():
         conn = await _get_conn()
         try:
+            c_uuid = uuid.UUID(str(chat_id))
+            s_uuid = uuid.UUID(str(sender_id))
             # Find the other participant in this chat thread
             row = await conn.fetchrow(
                 """
@@ -113,8 +117,8 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
                 END
                 WHERE c.id = $1
                 """,
-                chat_id,
-                sender_id,
+                c_uuid,
+                s_uuid,
             )
             if row is None or not row["recipient_token"]:
                 return
@@ -148,13 +152,14 @@ def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
     async def _run():
         conn = await _get_conn()
         try:
+            u_uuid = uuid.UUID(str(liked_user_id))
             row = await conn.fetchrow(
                 """
                 SELECT fcm_token, subscription_tier
                 FROM users
                 WHERE id = $1 AND account_status = 'active'
                 """,
-                liked_user_id,
+                u_uuid,
             )
             if row is None or not row["fcm_token"]:
                 return
@@ -192,6 +197,7 @@ def notify_match_expiring(self, match_id: str) -> None:
     async def _run():
         conn = await _get_conn()
         try:
+            m_uuid = uuid.UUID(str(match_id))
             row = await conn.fetchrow(
                 """
                 SELECT
@@ -200,9 +206,9 @@ def notify_match_expiring(self, match_id: str) -> None:
                 FROM matches m
                 JOIN users u_a ON u_a.id = m.user_a_id
                 JOIN users u_b ON u_b.id = m.user_b_id
-                WHERE m.id = $1 AND m.status = 'matched'
+                WHERE m.id = $1 AND m.status IN ('active', 'matched')
                 """,
-                match_id,
+                m_uuid,
             )
             if row is None:
                 return
@@ -253,9 +259,9 @@ def send_daily_digest() -> None:
                     u.fcm_token,
                     COUNT(i.id) AS like_count
                 FROM users u
-                JOIN interactions i ON i.target_user_id = u.id
-                    AND i.action = 'like'
-                    AND i.created_at > NOW() - INTERVAL '24h'
+                JOIN interactions i ON i.target_id = u.id
+                    AND (i.action_type = 'like' OR i.interaction_type = 'like')
+                    AND i.created_at > NOW() - INTERVAL '24 hours'
                 WHERE u.account_status = 'active'
                   AND u.fcm_token IS NOT NULL
                   AND u.fcm_token != ''
