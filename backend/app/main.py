@@ -1,3 +1,5 @@
+import json
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,9 +12,39 @@ from app.core.database import close_pool, create_pool
 from app.core.redis import close_redis, create_redis
 
 
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+
+if settings.environment == "production":
+    _h = logging.StreamHandler()
+    _h.setFormatter(JsonFormatter())
+    logging.root.handlers = [_h]
+    logging.root.setLevel(logging.INFO)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    if getattr(settings, "sentry_dsn", ""):
+        try:
+            import sentry_sdk
+            sentry_sdk.init(
+                dsn=settings.sentry_dsn,
+                environment=settings.environment,
+                traces_sample_rate=0.1,
+            )
+        except Exception:
+            pass
     await create_pool()
     await create_redis()
     yield
@@ -98,11 +130,43 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# ── Health (Deep Connectivity Check) ─────────────────────────────────────────
 
 @app.get("/v1/health", tags=["Health"])
 async def health():
-    return {"status": "healthy", "version": settings.app_version}
+    db_ok = False
+    redis_ok = False
+
+    try:
+        from app.core.database import get_pool
+        pool = get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+            db_ok = True
+    except Exception:
+        db_ok = False
+
+    try:
+        from app.core.redis import get_redis
+        r = get_redis()
+        if r and await r.ping():
+            redis_ok = True
+    except Exception:
+        redis_ok = False
+
+    is_healthy = db_ok and redis_ok
+    return JSONResponse(
+        status_code=200 if is_healthy else 503,
+        content={
+            "status": "healthy" if is_healthy else "degraded",
+            "version": settings.app_version,
+            "checks": {
+                "database": "connected" if db_ok else "disconnected",
+                "redis": "connected" if redis_ok else "disconnected",
+            },
+        },
+    )
 
 
 # ── Routers (registered after all imports to avoid circular deps) ─────────────

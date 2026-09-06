@@ -18,12 +18,16 @@ try:
     with open(settings.jwt_private_key_path, "rb") as f:
         _RSA_PRIVATE_KEY = f.read()
 except (FileNotFoundError, OSError):
+    if settings.environment == "production":
+        raise RuntimeError(f"FATAL: Production JWT private key missing at {settings.jwt_private_key_path}")
     _RSA_PRIVATE_KEY = b""
 
 try:
     with open(settings.jwt_public_key_path, "rb") as f:
         _RSA_PUBLIC_KEY = f.read()
 except (FileNotFoundError, OSError):
+    if settings.environment == "production":
+        raise RuntimeError(f"FATAL: Production JWT public key missing at {settings.jwt_public_key_path}")
     _RSA_PUBLIC_KEY = b""
 
 

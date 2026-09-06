@@ -57,4 +57,8 @@ jobs:
           script: |
             cd /opt/jainune
             docker compose -f backend/docker-compose.prod.yml pull
+            if [ "${{ inputs.migrate_db }}" = "true" ]; then
+              echo "Reconciling database migrations..."
+              docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py
+            fi
             docker compose -f backend/docker-compose.prod.yml up -d --remove-orphans

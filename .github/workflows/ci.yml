@@ -24,7 +24,7 @@ jobs:
           cd backend
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install -r requirements-dev.txt
 
       - name: Verify Python Compilation
         run: |
@@ -33,6 +33,11 @@ jobs:
       - name: Run verification script
         run: |
           python verify_endpoints.py
+
+      - name: Run unit tests
+        run: |
+          cd backend
+          python -m pytest tests/unit -v --tb=short -o addopts=""
 
   mobile-check:
     name: Mobile Typecheck & Lint
@@ -55,4 +60,4 @@ jobs:
       - name: TypeScript validation
         run: |
           cd mobile
-          npm run type-check || true
+          npm run type-check

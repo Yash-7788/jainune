@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
     app_version: str = "1.0.0"
-    allowed_origins: List[str] = ["http://localhost:3000", "jainune://"]
+    allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]
+    sentry_dsn: str = ""
 
     # Database
     database_url: str = "postgresql://postgres:password@localhost:5432/jainune_dev"
