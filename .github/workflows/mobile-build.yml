@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd mobile
-          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps --no-audit
 
       - name: Build Android AAB
         run: |
