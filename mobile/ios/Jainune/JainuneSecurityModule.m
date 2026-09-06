@@ -139,7 +139,11 @@ RCT_EXPORT_METHOD(emergencyPurgeStorage) {
 }
 
 RCT_EXPORT_METHOD(exitApp) {
-  exit(0);
+  // Apple App Store Guideline 2.5.1 prohibits calling exit().
+  // UI blanking preserves screen privacy while avoiding artificial crash.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateBlankingView:YES];
+  });
 }
 
 @end

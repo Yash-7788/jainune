@@ -224,6 +224,8 @@ async def razorpay_webhook(
         await payment_service.process_payment_captured(event, pool)
     elif event_name == "payment.refunded":
         await payment_service.process_refund(event, pool)
+    elif event_name == "payment.failed":
+        await payment_service.process_payment_failed(event, pool)
     else:
         log.debug("Unhandled webhook event: %s", event_name)
 

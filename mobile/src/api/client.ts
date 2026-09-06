@@ -119,9 +119,11 @@ _client.interceptors.response.use(
         const refreshToken = await getRefreshToken();
         if (!refreshToken) throw new Error("No refresh token");
 
-        const resp = await _client.post("/auth/token/refresh", {
-          refresh_token: refreshToken,
-        });
+        const resp = await axios.post(
+          `${SERVER_URLS[0]}/auth/token/refresh`,
+          { refresh_token: refreshToken },
+          { timeout: 10_000, headers: { "Content-Type": "application/json" } }
+        );
         const { access_token, refresh_token: new_refresh } = resp.data.data;
         const userId =
           (await SecureStore.getItemAsync(SECURE_KEYS.USER_ID)) ?? "";
@@ -143,7 +145,7 @@ _client.interceptors.response.use(
         await clearTokens();
         // Notify app to navigate to login
         _onSessionExpired?.();
-        return Promise.reject({ _sessionExpired: true });
+        return Promise.reject(error);
       } finally {
         _isRefreshing = false;
       }

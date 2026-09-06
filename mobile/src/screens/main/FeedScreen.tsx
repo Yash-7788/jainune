@@ -25,6 +25,7 @@ import * as SecureStore from "expo-secure-store";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import SwipeCard from "../../components/feed/SwipeCard";
 import MatchModal from "../../components/feed/MatchModal";
+import { Image } from "expo-image";
 import {
   getFeed,
   postInteraction,
@@ -64,6 +65,18 @@ export default function FeedScreen() {
       })
       .catch(() => {});
   }, []);
+
+  // Hardware GPU prefetch for upcoming card photos (zero-flicker swipes)
+  useEffect(() => {
+    if (candidates.length > 0) {
+      const upcoming = candidates.slice(0, 3);
+      for (const cand of upcoming) {
+        if (cand.photos && cand.photos.length > 0 && cand.photos[0].url) {
+          Image.prefetch(cand.photos[0].url);
+        }
+      }
+    }
+  }, [candidates]);
 
   const fetchBatch = useCallback(async () => {
     if (isFetching) return;

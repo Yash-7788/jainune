@@ -11,13 +11,13 @@ import {
   PanResponder,
   View,
   Text,
-  Image,
   ScrollView,
   TouchableOpacity,
   StyleSheet,
   Dimensions,
   Platform,
 } from "react-native";
+import { Image } from "expo-image";
 import { colors, spacing, radii, typography, shadows } from "../../theme/tokens";
 import { FeedCandidate } from "../../api/feedApi";
 
@@ -157,7 +157,9 @@ export default function SwipeCard({
           <Image
             source={{ uri: currentPhoto.url }}
             style={styles.photo}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={200}
           />
         ) : (
           <View style={[styles.photo, styles.photoPlaceholder]}>

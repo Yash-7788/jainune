@@ -462,6 +462,34 @@ async def process_refund(
             )
 
 
+async def process_payment_failed(
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+) -> None:
+    """Handle payment.failed webhook event by marking payment_intent as failed."""
+    payment = event.get("payload", {}).get("payment", {}).get("entity", {})
+    order_id: str = payment.get("order_id", "")
+    payment_id: str = payment.get("id", "")
+    error_desc: str = payment.get("error_description", "Payment failed at gateway")
+
+    if not order_id:
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE payment_intents
+               SET status              = 'failed',
+                   razorpay_payment_id = $1,
+                   updated_at          = NOW()
+             WHERE razorpay_order_id   = $2
+            """,
+            payment_id,
+            order_id,
+        )
+    log.warning("Payment failed for order=%s payment=%s: %s", order_id, payment_id, error_desc)
+
+
 async def get_effective_user_tier(
     user_id: Any,
     conn: asyncpg.Connection,

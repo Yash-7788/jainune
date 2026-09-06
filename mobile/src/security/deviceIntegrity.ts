@@ -57,8 +57,9 @@ const JAILBREAK_PATHS: string[] = [
 ];
 
 // Production Release Signing Certificate SHA-256 Fingerprint
-// If APK is decompiled, modified, and resigned with Kali or debug key, signature mismatch triggers halt.
-export const EXPECTED_RELEASE_CERT_SHA256 = "E8:7A:B4:9C:2F:1D:6E:8A:3B:5C:7D:9E:0F:1A:2B:3C:4D:5E:6F:7A:8B:9C:0D:1E:2F:3A:4B:5C:6D:7E:8F:90";
+// When configured via EXPO_PUBLIC_RELEASE_CERT_SHA256, verifies APK has not been resigned.
+export const EXPECTED_RELEASE_CERT_SHA256 =
+  process.env.EXPO_PUBLIC_RELEASE_CERT_SHA256 || "";
 
 /**
  * Executes multi-vector hardware, kernel, and process integrity checks.
@@ -212,9 +213,12 @@ async function checkAdbAndDeveloperOptions(): Promise<boolean> {
  * Compares current APK signing certificate with release keystore signature.
  */
 async function verifyApkSignatureIntegrity(): Promise<boolean> {
-  if (NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
+  if (EXPECTED_RELEASE_CERT_SHA256 && NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
     const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
-    if (currentFingerprint && currentFingerprint !== EXPECTED_RELEASE_CERT_SHA256) {
+    if (
+      currentFingerprint &&
+      currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()
+    ) {
       return true; // Tampered / resigned
     }
   }
