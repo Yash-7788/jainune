@@ -265,6 +265,7 @@ async def record_interaction_action(
     return InteractionActionResponse(
         success=True,
         match_created=match_created,
+        is_match=match_created,
         chat_id=chat_id,
         message="Match created! You can now chat." if match_created else "Interaction recorded.",
     )

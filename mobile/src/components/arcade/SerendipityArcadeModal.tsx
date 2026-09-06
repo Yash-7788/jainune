@@ -18,7 +18,7 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
-import RazorpayCheckout from "react-native-razorpay";
+import { purchaseArcadeRolls } from "../../services/billingService";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   ARCADE_PRODUCTS,
@@ -156,46 +156,21 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
   const handlePurchase = async (product: ArcadeProduct) => {
     setPurchasing(true);
     try {
-      // 1. Create server order
-      const order = await createArcadeOrder(product.product_id);
-
-      // 2. Open Razorpay Checkout
-      const paymentResult = await RazorpayCheckout.open({
-        key: order.razorpay_key,
-        order_id: order.order_id,
-        amount: order.amount_paisa,
-        currency: order.currency,
-        name: "Serendipity Arcade",
-        description: product.label,
-        theme: { color: colors.saffron },
-        modal: { backdropclose: false },
-      });
-
-      // 3. Client signature check
-      if (!validatePaymentResponse(paymentResult)) {
-        throw new Error("INVALID_PAYMENT_RESPONSE");
+      const res = await purchaseArcadeRolls(product.product_id, product.label);
+      if (res.success) {
+        // Refresh wallet from backend
+        try {
+          const w = await getArcadeWallet();
+          setSpins(w.available_spins);
+          setRolls(w.available_dice_rolls);
+        } catch {
+          setSpins((s) => s + (product.spins || 0));
+          setRolls((r) => r + (product.rolls || 0));
+        }
+        Alert.alert("Purchased!", `${product.label} added to your arcade balance.`);
       }
-
-      // 4. Verification
-      await verifyArcadePayment({
-        razorpay_order_id: paymentResult.razorpay_order_id,
-        razorpay_payment_id: paymentResult.razorpay_payment_id,
-        razorpay_signature: paymentResult.razorpay_signature,
-      });
-
-      // Refresh wallet from backend
-      try {
-        const w = await getArcadeWallet();
-        setSpins(w.available_spins);
-        setRolls(w.available_dice_rolls);
-      } catch {
-        setSpins((s) => s + (product.spins || 0));
-        setRolls((r) => r + (product.rolls || 0));
-      }
-
-      Alert.alert("Purchased!", `${product.label} added to your arcade balance.`);
     } catch (err: any) {
-      if (err?.code !== 0) {
+      if (err?.code !== 0 && err?.error !== "CANCELLED") {
         Alert.alert("Payment Failed", extractError(err).message);
       }
     } finally {

@@ -79,16 +79,24 @@ export async function postInteraction(
   targetElementId: string,
   comment?: string
 ): Promise<InteractionResult> {
-  const res = await apiPost<InteractionResult>("/interactions/action", {
+  const backendAction = action === "superlike" ? "super_connect" : action;
+  const res = await apiPost<any>("/interactions/action", {
+    target_id: targetUserId,
     target_user_id: targetUserId,
-    action,
+    action: backendAction,
     target_element_type: targetElementType,
     target_element_id: targetElementId,
     comment: comment ?? null,
     voice_note_id: null,
   });
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  return {
+    action,
+    is_match: Boolean(res.data?.is_match || res.data?.match_created),
+    chat_id: res.data?.chat_id ?? null,
+    match_timestamp: res.data?.match_timestamp ?? (res.data?.match_created ? new Date().toISOString() : null),
+    momentum_window_hours: res.data?.momentum_window_hours ?? 48,
+  };
 }
 
 /** POST /v1/telemetry/interaction-event — fire-and-forget, non-blocking */

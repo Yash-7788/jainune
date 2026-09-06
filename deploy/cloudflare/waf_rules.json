@@ -1,0 +1,36 @@
+{
+  "description": "Cloudflare WAF and Firewall Rules for Jainune API",
+  "rules": [
+    {
+      "id": "block_suspicious_user_agents",
+      "description": "Block automated scraping tools, headless browsers, and vulnerability scanners",
+      "expression": "(http.user_agent contains \"sqlmap\" or http.user_agent contains \"nikto\" or http.user_agent contains \"python-requests\" or http.user_agent contains \"Go-http-client\" or http.user_agent contains \"curl\") and not (http.request.uri.path contains \"/v1/health\")",
+      "action": "block"
+    },
+    {
+      "id": "challenge_low_bot_score_on_auth",
+      "description": "Managed challenge on low-score automated clients hitting authentication",
+      "expression": "cf.bot_management.score lt 30 and (http.request.uri.path contains \"/v1/auth/otp/send\" or http.request.uri.path contains \"/v1/auth/google\" or http.request.uri.path contains \"/v1/auth/apple\")",
+      "action": "managed_challenge"
+    },
+    {
+      "id": "rate_limit_auth_endpoints",
+      "description": "Rate limit OTP requests per IP to prevent SMS fatigue and cost exhaustion",
+      "expression": "http.request.uri.path eq \"/v1/auth/otp/send\"",
+      "action": "rate_limit",
+      "ratelimit": {
+        "characteristics": ["ip.src"],
+        "period": 60,
+        "requests": 5,
+        "action": "block",
+        "duration": 300
+      }
+    },
+    {
+      "id": "block_non_indian_payment_ips",
+      "description": "Flag anomalous international traffic on local currency payment routes",
+      "expression": "http.request.uri.path contains \"/v1/subscriptions/\" and not (ip.src.country in {\"IN\" \"US\" \"GB\" \"CA\" \"AE\" \"SG\"})",
+      "action": "managed_challenge"
+    }
+  ]
+}

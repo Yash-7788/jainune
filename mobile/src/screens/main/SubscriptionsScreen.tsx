@@ -45,8 +45,7 @@ import {
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
 
-import RazorpayCheckout from "react-native-razorpay";
-import { validatePaymentResponse } from "../../security/inputValidation";
+import { purchaseSubscription } from "../../services/billingService";
 
 const FEATURES = [
   "30 daily intentional likes (vs 10 free)",
@@ -132,34 +131,9 @@ export default function SubscriptionsScreen() {
   const handleSubscribe = async () => {
     setPaying(true);
     try {
-      // 1. Create server-side order (amount determined by server from plan_id)
-      const order = await createSubscriptionOrder(selectedPlan.plan_id);
+      const result = await purchaseSubscription(selectedPlan);
 
-      // 2. Open Razorpay checkout
-      const paymentResult = await RazorpayCheckout.open({
-        key: order.razorpay_key,
-        order_id: order.order_id,
-        amount: order.amount_paisa,
-        currency: order.currency,
-        name: "Jainune+",
-        description: `${selectedPlan.label} Subscription`,
-        prefill: {},
-        theme: { color: colors.saffron },
-        modal: { backdropclose: false },
-      });
-
-      // 3. Verify signature (defence-in-depth; webhook is authoritative)
-      if (!validatePaymentResponse(paymentResult)) {
-        throw new Error("INVALID_PAYMENT_RESPONSE");
-      }
-
-      const result = await verifySubscriptionPayment({
-        razorpay_order_id: paymentResult.razorpay_order_id,
-        razorpay_payment_id: paymentResult.razorpay_payment_id,
-        razorpay_signature: paymentResult.razorpay_signature,
-      });
-
-      if (result.activated) {
+      if (result.activated && result.expires_at) {
         Alert.alert(
           "Welcome to Jainune+",
           `Your subscription is active until ${new Date(result.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}.`,
@@ -167,8 +141,7 @@ export default function SubscriptionsScreen() {
         );
       }
     } catch (err: any) {
-      // Razorpay cancellation returns code=0 — don't show error
-      if (err?.code === 0) {
+      if (err?.code === 0 || err?.error === "CANCELLED") {
         return;
       }
       Alert.alert("Payment Failed", extractError(err).message);

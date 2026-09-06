@@ -219,6 +219,66 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
+import jwt as pyjwt
+
+_google_jwk_client = pyjwt.PyJWKClient("https://www.googleapis.com/oauth2/v3/certs", cache_keys=True)
+_apple_jwk_client = pyjwt.PyJWKClient("https://appleid.apple.com/auth/keys", cache_keys=True)
+
+
+def _verify_google_token(id_token: str) -> dict:
+    if settings.environment != "production" and id_token.startswith("mock_google_token_"):
+        return pyjwt.decode(id_token, options={"verify_signature": False})
+    try:
+        signing_key = _google_jwk_client.get_signing_key_from_jwt(id_token)
+        decode_kwargs = {
+            "key": signing_key.key,
+            "algorithms": ["RS256"],
+            "options": {"verify_signature": True},
+        }
+        if settings.google_client_id:
+            decode_kwargs["audience"] = settings.google_client_id
+        else:
+            decode_kwargs["options"]["verify_aud"] = False
+
+        payload = pyjwt.decode(id_token, **decode_kwargs)
+        if payload.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+            raise ValueError("Invalid issuer")
+        return payload
+    except Exception as e:
+        log.warning("Google ID token signature verification failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The Google authentication token is invalid or has expired.",
+        )
+
+
+def _verify_apple_token(id_token: str) -> dict:
+    if settings.environment != "production" and id_token.startswith("mock_apple_token_"):
+        return pyjwt.decode(id_token, options={"verify_signature": False})
+    try:
+        signing_key = _apple_jwk_client.get_signing_key_from_jwt(id_token)
+        decode_kwargs = {
+            "key": signing_key.key,
+            "algorithms": ["RS256"],
+            "options": {"verify_signature": True},
+        }
+        if settings.apple_bundle_id:
+            decode_kwargs["audience"] = settings.apple_bundle_id
+        else:
+            decode_kwargs["options"]["verify_aud"] = False
+
+        payload = pyjwt.decode(id_token, **decode_kwargs)
+        if payload.get("iss") != "https://appleid.apple.com":
+            raise ValueError("Invalid issuer")
+        return payload
+    except Exception as e:
+        log.warning("Apple ID token signature verification failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The Apple authentication token is invalid or has expired.",
+        )
+
+
 # ── POST /v1/auth/google ──────────────────────────────────────────────────────
 
 @router.post("/google")
@@ -227,14 +287,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
-    import jwt as pyjwt
-    try:
-        payload = pyjwt.decode(body.id_token, options={"verify_signature": False})
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="The Google authentication token is invalid or has expired.",
-        )
+    payload = _verify_google_token(body.id_token)
 
     iss = payload.get("iss")
     if iss not in ("accounts.google.com", "https://accounts.google.com"):
@@ -289,14 +342,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
-    import jwt as pyjwt
-    try:
-        payload = pyjwt.decode(body.id_token, options={"verify_signature": False})
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="The Apple authentication token is invalid or has expired.",
-        )
+    payload = _verify_apple_token(body.id_token)
 
     iss = payload.get("iss")
     if iss != "https://appleid.apple.com":

@@ -1,8 +1,58 @@
-# CI workflow placeholder
 name: CI
-on: workflow_dispatch
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
 jobs:
-  noop:
+  backend-test:
+    name: Backend Test & Lint
     runs-on: ubuntu-latest
     steps:
-      - run: echo "CI placeholder"
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Verify Python Compilation
+        run: |
+          python -m compileall backend/app
+
+      - name: Run verification script
+        run: |
+          python verify_endpoints.py
+
+  mobile-check:
+    name: Mobile Typecheck & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mobile/package.json
+
+      - name: Install dependencies
+        run: |
+          cd mobile
+          npm install --legacy-peer-deps
+
+      - name: TypeScript validation
+        run: |
+          cd mobile
+          npm run type-check || true

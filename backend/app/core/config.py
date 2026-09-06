@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
     otp_pepper_secret: str = "default_test_pepper_secret_32_bytes_len"
+    google_client_id: str = ""
+    apple_bundle_id: str = "com.jainune.app"
 
     # AWS S3
     aws_region: str = "ap-south-1"

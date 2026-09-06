@@ -11,13 +11,13 @@ apply plugin: "com.facebook.react"
  */
 
 android {
-    compileSdkVersion 34
+    compileSdkVersion 35
     namespace "com.jainune"
 
     defaultConfig {
         applicationId "com.jainune"
         minSdkVersion 24       // Android 7.0 — covers 99%+ of current devices
-        targetSdkVersion 34    // Android 14
+        targetSdkVersion 35    // Android 15 (Target API 35/36 compliant)
         versionCode 1
         versionName "1.0.0"
         multiDexEnabled true

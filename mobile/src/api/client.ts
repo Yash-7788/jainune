@@ -184,13 +184,25 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
   throw lastError;
 }
 
+function normalizeResponse<T>(data: any): ApiResponse<T> {
+  if (data && typeof data === "object" && "success" in data) {
+    return data as ApiResponse<T>;
+  }
+  return {
+    success: true,
+    data: data as T,
+    error: null,
+    meta: { timestamp: new Date().toISOString(), request_id: "" },
+  };
+}
+
 export async function apiPost<T = unknown>(
   path: string,
   body?: unknown
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
     const resp = await _client.post<ApiResponse<T>>(path, body);
-    return resp.data;
+    return normalizeResponse<T>(resp.data);
   });
 }
 
@@ -200,7 +212,7 @@ export async function apiGet<T = unknown>(
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
     const resp = await _client.get<ApiResponse<T>>(path, { params });
-    return resp.data;
+    return normalizeResponse<T>(resp.data);
   });
 }
 
@@ -210,7 +222,7 @@ export async function apiPut<T = unknown>(
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
     const resp = await _client.put<ApiResponse<T>>(path, body);
-    return resp.data;
+    return normalizeResponse<T>(resp.data);
   });
 }
 
@@ -220,7 +232,7 @@ export async function apiPatch<T = unknown>(
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
     const resp = await _client.patch<ApiResponse<T>>(path, body);
-    return resp.data;
+    return normalizeResponse<T>(resp.data);
   });
 }
 
@@ -230,7 +242,7 @@ export async function apiDelete<T = unknown>(
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
     const resp = await _client.delete<ApiResponse<T>>(path, { params });
-    return resp.data;
+    return normalizeResponse<T>(resp.data);
   });
 }
 

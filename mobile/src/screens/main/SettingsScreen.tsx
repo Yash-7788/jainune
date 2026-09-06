@@ -16,6 +16,7 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  Linking,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
@@ -134,23 +135,42 @@ export default function SettingsScreen() {
         ))}
       </View>
 
-      {/* Legal */}
+      {/* Legal & Safety */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>LEGAL</Text>
-        <TouchableOpacity style={styles.linkRow}>
+        <Text style={styles.sectionTitle}>LEGAL & SAFETY</Text>
+        <TouchableOpacity
+          style={styles.linkRow}
+          onPress={() => Linking.openURL("https://jainune.com/legal/privacy")}
+        >
           <Text style={styles.linkRowText}>Privacy Policy</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.linkRow}>
+        <TouchableOpacity
+          style={styles.linkRow}
+          onPress={() => Linking.openURL("https://jainune.com/legal/terms")}
+        >
           <Text style={styles.linkRowText}>Terms of Service</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.linkRow}>
-          <Text style={styles.linkRowText}>DPDP Consent Settings</Text>
+        <TouchableOpacity
+          style={styles.linkRow}
+          onPress={() => Linking.openURL("https://jainune.com/legal/child-safety")}
+        >
+          <Text style={styles.linkRowText}>Child Safety & CSAE Standards</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.linkRow}>
+        <TouchableOpacity
+          style={styles.linkRow}
+          onPress={() => Linking.openURL("https://jainune.com/legal/community-guidelines")}
+        >
           <Text style={styles.linkRowText}>Community Guidelines</Text>
+          <Text style={styles.linkChevron}>›</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.linkRow}
+          onPress={() => Linking.openURL("https://jainune.com/legal/delete-account")}
+        >
+          <Text style={styles.linkRowText}>External Data Erasure Portal</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
       </View>
