@@ -33,6 +33,11 @@ export const colors = {
   blueLight: "#EBF2FF",
   red: "#E84040",
   redLight: "#FFF0F0",
+
+  // Theme accents
+  obsidian: "#0D0F14",
+  gold: "#D4AF37",
+  sand: "#C5C9D3",
 } as const;
 
 export const gradients = {
@@ -101,6 +106,18 @@ export const typography = {
     color: colors.mid,
   },
   cta: {
+    fontFamily: "Outfit_700Bold",
+    fontSize: 16,
+    lineHeight: 20,
+    color: colors.white,
+  },
+  headline: {
+    fontFamily: "Outfit_700Bold",
+    fontSize: 24,
+    lineHeight: 30,
+    color: colors.dark,
+  },
+  label: {
     fontFamily: "Outfit_700Bold",
     fontSize: 16,
     lineHeight: 20,

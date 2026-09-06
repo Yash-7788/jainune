@@ -7,6 +7,8 @@
 import { create } from "zustand";
 import { getAccessToken, getRefreshToken, clearTokens } from "../api/client";
 import { logout as apiLogout } from "../api/authApi";
+import { getOnboardingStatus } from "../api/onboardingApi";
+import { useOnboardingStore } from "./onboardingStore";
 
 export type AuthState = "loading" | "unauthenticated" | "authenticated" | "onboarding";
 
@@ -38,8 +40,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         return;
       }
       try {
-        const { getOnboardingStatus } = await import("../api/onboardingApi");
-        const { useOnboardingStore } = await import("./onboardingStore");
         const status = await getOnboardingStatus();
         if (status.completed) {
           set({ state: "authenticated", onboardingCompleted: true });

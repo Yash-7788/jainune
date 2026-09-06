@@ -53,14 +53,14 @@ export default function Step15Screen() {
       <JainuneInput
         label="Job title"
         value={jobTitle}
-        onChangeText={(t) => setJobTitle(t.slice(0, 128))}
+        onChangeText={(t: string) => setJobTitle(t.slice(0, 128))}
         placeholder="Software Engineer"
         autoFocus
       />
       <JainuneInput
         label="Company (optional)"
         value={company}
-        onChangeText={(t) => setCompany(t.slice(0, 128))}
+        onChangeText={(t: string) => setCompany(t.slice(0, 128))}
         placeholder="Infosys"
       />
     </OnboardingStep>

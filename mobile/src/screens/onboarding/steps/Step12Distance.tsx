@@ -51,7 +51,7 @@ export default function Step12Screen() {
         maximumValue={200}
         step={5}
         value={km}
-        onValueChange={(v) => setKm(Math.round(v))}
+        onValueChange={(v: number) => setKm(Math.round(v))}
         minimumTrackTintColor={colors.saffron}
         maximumTrackTintColor={colors.border}
         thumbTintColor={colors.saffron}

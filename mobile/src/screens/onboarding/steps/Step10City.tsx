@@ -49,14 +49,14 @@ export default function Step10Screen() {
       <JainuneInput
         label="City"
         value={city}
-        onChangeText={(t) => setCity(t.slice(0, 64))}
+        onChangeText={(t: string) => setCity(t.slice(0, 64))}
         placeholder="Mumbai"
         autoFocus
       />
       <JainuneInput
         label="State"
         value={state}
-        onChangeText={(t) => setState(t.slice(0, 64))}
+        onChangeText={(t: string) => setState(t.slice(0, 64))}
         placeholder="Maharashtra"
       />
     </OnboardingStep>

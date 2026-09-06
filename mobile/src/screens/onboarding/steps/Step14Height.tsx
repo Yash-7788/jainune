@@ -70,7 +70,7 @@ export default function Step14Screen() {
         maximumValue={250}
         step={1}
         value={cm}
-        onValueChange={(v) => setCm(Math.round(v))}
+        onValueChange={(v: number) => setCm(Math.round(v))}
         minimumTrackTintColor={colors.saffron}
         maximumTrackTintColor={colors.border}
         thumbTintColor={colors.saffron}

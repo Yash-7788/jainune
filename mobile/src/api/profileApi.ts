@@ -40,7 +40,7 @@ export interface MyProfile {
   is_verified: boolean;
   account_status: string;
   paryushan_mode: boolean;
-  subscription_tier: "free" | "plus";
+  subscription_tier: "free" | "plus" | "gold" | "platinum" | "jainune_plus";
   subscription_expires_at: string | null;
   liked_by_count: number;
   profile_health_score: number;

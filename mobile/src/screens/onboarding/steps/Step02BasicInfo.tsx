@@ -106,7 +106,7 @@ export default function Step02Screen() {
       <JainuneInput
         label="First name"
         value={firstName}
-        onChangeText={(t) => {
+        onChangeText={(t: string) => {
           setFirstName(t.slice(0, 64));
           if (firstNameError) setFirstNameError(undefined);
         }}

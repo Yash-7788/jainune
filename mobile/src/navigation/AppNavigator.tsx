@@ -92,7 +92,7 @@ function AuthNavigator() {
       <AuthStack.Screen
         name="EmailOTPVerify"
         component={OTPVerifyScreen}
-        initialParams={{ phoneNumber: "", masked: "" }}
+        initialParams={{ email: "", masked: "" }}
       />
     </AuthStack.Navigator>
   );
