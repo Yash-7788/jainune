@@ -25,13 +25,17 @@ import { extractError } from "../../api/client";
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 import type { AuthStackParams } from "../../navigation/AppNavigator";
 
-// Configure Google Sign-In at module level
-GoogleSignin.configure({
-  webClientId:
-    process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ||
-    "YOUR_WEB_CLIENT_ID.apps.googleusercontent.com",
-  offlineAccess: false,
-});
+// Configure Google Sign-In at module level (safeguarded for Expo Go)
+try {
+  GoogleSignin?.configure?.({
+    webClientId:
+      process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ||
+      "YOUR_WEB_CLIENT_ID.apps.googleusercontent.com",
+    offlineAccess: false,
+  });
+} catch {
+  // Native module unavailable in standard Expo Go
+}
 
 type Nav = NativeStackNavigationProp<AuthStackParams, "AuthMethod">;
 

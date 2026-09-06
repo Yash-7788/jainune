@@ -6,7 +6,13 @@
  */
 
 import { Platform, Linking } from "react-native";
-import RazorpayCheckout from "react-native-razorpay";
+let RazorpayCheckout: any = null;
+try {
+  const rnrp = require("react-native-razorpay");
+  RazorpayCheckout = rnrp?.default || rnrp;
+} catch {
+  // Native module unavailable in Expo Go
+}
 import {
   createSubscriptionOrder,
   verifySubscriptionPayment,
