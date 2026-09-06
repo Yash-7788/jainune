@@ -153,6 +153,18 @@ async def list_chats(
     return ChatListResponse(threads=threads)
 
 
+WEEKLY_QUESTIONS = [
+    "How do you incorporate Jain principles like Ahimsa and Anekantavada into your daily life?",
+    "What is your family's favorite Paryushan or festival tradition?",
+    "What does balance between traditional Jain values and modern ambitions look like to you?",
+    "Which Jain pilgrimage or temple holds the most special memory for you?",
+    "How important is strict dietary practice in your lifestyle and future home?",
+    "What is one value passed down from your elders that you cherish the most?",
+    "If you could volunteer for any community or social initiative, what would it be?",
+    "How do you practice mindful living and compassion in a high-speed world?",
+]
+
+
 @router.get(
     "/weekly-question",
     summary="Get weekly Jain icebreaker question",
@@ -161,7 +173,10 @@ async def get_weekly_question(
     current_user: CurrentUser,
 ) -> dict:
     """Returns rotating Jain cultural & philosophical question for chat icebreakers."""
-    return {"question": "How do you incorporate Jain principles like Ahimsa and Anekantavada into your daily life?"}
+    from datetime import datetime, timezone
+    week_num = datetime.now(timezone.utc).isocalendar().week
+    selected = WEEKLY_QUESTIONS[week_num % len(WEEKLY_QUESTIONS)]
+    return {"question": selected}
 
 
 @router.get(

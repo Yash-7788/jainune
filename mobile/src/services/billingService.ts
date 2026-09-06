@@ -49,13 +49,16 @@ export async function purchaseSubscription(
           expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
         };
       }
-      // StoreKit in-app sandbox / backend receipt verification fallback
-      const order = await createSubscriptionOrder(plan.plan_id);
-      return {
-        success: true,
-        activated: true,
-        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
-      };
+      // StoreKit sandbox fallback allowed strictly in __DEV__ (Expo Go)
+      if (__DEV__) {
+        await createSubscriptionOrder(plan.plan_id);
+        return {
+          success: true,
+          activated: true,
+          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+        };
+      }
+      throw new Error("STOREKIT_MODULE_UNAVAILABLE");
     } catch (err: any) {
       if (err?.code === "E_USER_CANCELLED") {
         return { success: false, error: "CANCELLED" };
@@ -122,8 +125,11 @@ export async function purchaseArcadeRolls(
         await NativeIap.requestPurchase({ sku: productId });
         return { success: true };
       }
-      await createArcadeOrder(productId);
-      return { success: true };
+      if (__DEV__) {
+        await createArcadeOrder(productId);
+        return { success: true };
+      }
+      throw new Error("STOREKIT_MODULE_UNAVAILABLE");
     } catch (err: any) {
       if (err?.code === "E_USER_CANCELLED") {
         return { success: false, error: "CANCELLED" };

@@ -228,8 +228,8 @@ export default function FeedScreen() {
           setMatchCandidate(candidate);
         }
       } catch (err: any) {
-        if (err?._apiError?.code === "INSUFFICIENT_CREDITS") {
-          // TODO Phase 7: open arcade/coin purchase sheet
+        if (err?._apiError?.code === "INSUFFICIENT_CREDITS" || err?._apiError?.code === "DAILY_LIMIT_REACHED") {
+          setDailyLimitReached(true);
         }
       }
     },
