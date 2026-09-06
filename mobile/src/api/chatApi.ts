@@ -38,45 +38,100 @@ export interface WsTicket {
 
 /** GET /v1/chats — all active chat threads */
 export async function getChats(): Promise<ChatThread[]> {
-  const res = await apiGet<{ chats: ChatThread[] }>("/chats");
+  const res = await apiGet<{ threads?: any[]; chats?: any[] }>("/chats");
   if (!res.success) throw { _apiError: res.error };
-  return res.data.chats;
+  const rawList = res.data?.threads || res.data?.chats || [];
+  return rawList.map((t: any) => ({
+    match_id: t.match_id || t.id,
+    other_user: {
+      id: t.other_user_id || t.other_user?.id || "",
+      first_name: t.other_user_first_name || t.other_user?.first_name || "Match",
+      photo_url: t.other_user_photo_url || t.other_user?.photo_url || null,
+      is_online: t.other_user?.is_online ?? false,
+    },
+    last_message: t.last_message || (t.last_message_text ? {
+      id: "",
+      match_id: t.match_id || t.id,
+      sender_id: "",
+      type: "text" as const,
+      content: t.last_message_text,
+      media_url: null,
+      is_read: true,
+      created_at: t.last_message_at || new Date().toISOString(),
+    } : null),
+    unread_count: t.unread_count || 0,
+    momentum_expires_at: t.expires_at || t.momentum_expires_at || null,
+  }));
 }
 
 /** GET /v1/chats/:match_id/messages (cursor paginated) */
 export async function getMessages(matchId: string, cursor?: string): Promise<Message[]> {
-  const res = await apiGet<{ messages: Message[] }>(`/chats/${matchId}/messages`, {
+  const res = await apiGet<{ messages: any[] }>(`/chats/${matchId}/messages`, {
     cursor,
+    before: cursor,
     limit: 30,
   });
   if (!res.success) throw { _apiError: res.error };
-  return res.data.messages;
+  const rawMsgs = res.data?.messages || [];
+  return rawMsgs.map((m: any) => ({
+    id: String(m.id),
+    match_id: String(m.chat_id || matchId),
+    sender_id: String(m.sender_id),
+    type: (m.message_type === "photo" || m.type === "photo") ? "photo" : (m.message_type === "voice" || m.type === "voice") ? "voice" : "text",
+    content: m.content || null,
+    media_url: m.media_url || null,
+    is_read: Boolean(m.is_read),
+    created_at: m.created_at || new Date().toISOString(),
+  }));
 }
 
 /** POST /v1/chats/:match_id/messages — text */
 export async function sendMessage(matchId: string, content: string): Promise<Message> {
   const trimmed = content.trim();
   if (!trimmed || trimmed.length > MAX_MESSAGE_LENGTH) throw new Error("INVALID_MESSAGE_LENGTH");
-  const res = await apiPost<Message>(`/chats/${matchId}/messages`, {
+  const res = await apiPost<any>(`/chats/${matchId}/messages`, {
+    message_type: "text",
     type: "text",
     content: trimmed,
   });
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  const m = res.data;
+  return {
+    id: String(m.id),
+    match_id: String(m.chat_id || matchId),
+    sender_id: String(m.sender_id),
+    type: "text",
+    content: m.content,
+    media_url: m.media_url || null,
+    is_read: Boolean(m.is_read),
+    created_at: m.created_at,
+  };
 }
 
 /** POST /v1/chats/:match_id/messages — media (photo or voice) */
 export async function sendMediaMessage(
   matchId: string,
   type: "photo" | "voice",
-  mediaId: string
+  mediaUrl: string
 ): Promise<Message> {
-  const res = await apiPost<Message>(`/chats/${matchId}/messages`, {
+  const res = await apiPost<any>(`/chats/${matchId}/messages`, {
+    message_type: type,
     type,
-    media_id: mediaId,
+    media_url: mediaUrl,
+    media_id: mediaUrl,
   });
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  const m = res.data;
+  return {
+    id: String(m.id),
+    match_id: String(m.chat_id || matchId),
+    sender_id: String(m.sender_id),
+    type,
+    content: m.content || null,
+    media_url: m.media_url || mediaUrl,
+    is_read: Boolean(m.is_read),
+    created_at: m.created_at,
+  };
 }
 
 /** POST /v1/chats/:match_id/read */

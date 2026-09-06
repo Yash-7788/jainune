@@ -34,14 +34,14 @@ async def _assert_participant(
     user_id: uuid.UUID,
     db,
 ) -> dict:
-    """Fetch chat row and verify the requesting user is a participant."""
+    """Fetch chat row and verify the requesting user is a participant. Accepts chat_id or match_id."""
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT id, match_id, participant_1_id, participant_2_id,
                    is_ephemeral, expires_at, is_unmatched
             FROM chats
-            WHERE id = $1
+            WHERE (id = $1 OR match_id = $1)
               AND (participant_1_id = $2 OR participant_2_id = $2)
             """,
             chat_id, user_id,
@@ -158,15 +158,18 @@ async def get_messages(
     db: DBDep,
     limit: int = Query(default=30, ge=1, le=100),
     before: Optional[str] = Query(default=None, description="Cursor: message UUID for pagination"),
+    cursor: Optional[str] = Query(default=None, description="Cursor alias for pagination"),
 ) -> ChatHistoryResponse:
     user_id = uuid.UUID(str(current_user["id"]))
-    await _assert_participant(chat_id, user_id, db)
+    chat = await _assert_participant(chat_id, user_id, db)
+    actual_chat_id = chat["id"]
+    cursor_val = before or cursor
 
     async with db.acquire() as conn:
-        if before:
-            # Cursor-based: fetch messages older than `before` message id
+        if cursor_val:
+            # Cursor-based: fetch messages older than cursor message id
             try:
-                before_uuid = uuid.UUID(before)
+                before_uuid = uuid.UUID(cursor_val)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid cursor.")
             before_ts = await conn.fetchval(
@@ -182,7 +185,7 @@ async def get_messages(
                 ORDER BY created_at DESC
                 LIMIT $3
                 """,
-                chat_id, before_ts, limit + 1,
+                actual_chat_id, before_ts, limit + 1,
             )
         else:
             rows = await conn.fetch(
@@ -195,7 +198,7 @@ async def get_messages(
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
-                chat_id, limit + 1,
+                actual_chat_id, limit + 1,
             )
 
     has_more = len(rows) > limit
@@ -246,6 +249,7 @@ async def send_message(
     """
     user_id = uuid.UUID(str(current_user["id"]))
     chat = await _assert_participant(chat_id, user_id, db)
+    actual_chat_id = chat["id"]
 
     if chat.get("is_unmatched"):
         raise HTTPException(
@@ -288,7 +292,7 @@ async def send_message(
     if body.message_type == "text" and body.content:
         mod_result = await filter_chat_content(
             content=body.content,
-            chat_id=chat_id,
+            chat_id=actual_chat_id,
             user_id=user_id,
             redis=redis,
             is_subscribed=is_subscribed,
@@ -310,7 +314,7 @@ async def send_message(
             RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
                       is_moderated, moderation_type, moderation_disclaimer
             """,
-            chat_id,
+            actual_chat_id,
             user_id,
             body.message_type,
             final_content,
@@ -334,31 +338,35 @@ async def send_message(
         moderation_disclaimer=row["moderation_disclaimer"],
     )
 
-    # Publish to Redis pub/sub for WebSocket fan-out
+    # Publish to Redis pub/sub for WebSocket fan-out (both chat_id and match_id if distinct)
     import json
-    await redis.publish(
-        f"chat:{chat_id}",
-        json.dumps({
-            "type": "message",
-            "payload": {
-                "id": str(msg.id),
-                "sender_id": str(msg.sender_id),
-                "message_type": msg.message_type,
-                "content": msg.content,
-                "media_url": msg.media_url,
-                "created_at": msg.created_at.isoformat(),
-                "is_moderated": msg.is_moderated,
-                "moderation_type": msg.moderation_type,
-                "moderation_disclaimer": msg.moderation_disclaimer,
-            },
-        }),
-    )
+    payload_str = json.dumps({
+        "type": "message",
+        "payload": {
+            "id": str(msg.id),
+            "chat_id": str(msg.chat_id),
+            "sender_id": str(msg.sender_id),
+            "message_type": msg.message_type,
+            "content": msg.content,
+            "media_url": msg.media_url,
+            "created_at": msg.created_at.isoformat(),
+            "is_moderated": msg.is_moderated,
+            "moderation_type": msg.moderation_type,
+            "moderation_disclaimer": msg.moderation_disclaimer,
+        },
+    })
+    channels = {f"chat:{actual_chat_id}"}
+    if chat.get("match_id"):
+        channels.add(f"chat:{chat['match_id']}")
+    channels.add(f"chat:{chat_id}")
+    for ch in channels:
+        await redis.publish(ch, payload_str)
 
     # Dispatch FCM push notification to recipient
     try:
         from app.workers.notification_worker import notify_new_message
         preview_text = msg.content[:80] if msg.content else "Sent a media attachment"
-        notify_new_message.delay(str(chat_id), str(user_id), preview_text)
+        notify_new_message.delay(str(actual_chat_id), str(user_id), preview_text)
     except Exception:
         pass
 
@@ -376,7 +384,8 @@ async def mark_read(
     db: DBDep,
 ) -> None:
     user_id = uuid.UUID(str(current_user["id"]))
-    await _assert_participant(chat_id, user_id, db)
+    chat = await _assert_participant(chat_id, user_id, db)
+    actual_chat_id = chat["id"]
 
     async with db.acquire() as conn:
         await conn.execute(
@@ -385,7 +394,7 @@ async def mark_read(
             SET is_read = TRUE
             WHERE chat_id = $1 AND sender_id != $2 AND is_read = FALSE
             """,
-            chat_id, user_id,
+            actual_chat_id, user_id,
         )
 
 

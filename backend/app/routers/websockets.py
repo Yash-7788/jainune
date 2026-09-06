@@ -108,10 +108,10 @@ async def websocket_chat(
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT c.id, c.is_unmatched,
+            SELECT c.id, c.match_id, c.is_unmatched,
                    CASE WHEN c.participant_1_id = $2 THEN c.participant_2_id ELSE c.participant_1_id END AS other_id
             FROM chats c
-            WHERE c.id = $1
+            WHERE (c.id = $1 OR c.match_id = $1)
               AND (c.participant_1_id = $2 OR c.participant_2_id = $2)
             """,
             chat_id, user_id,
@@ -138,8 +138,11 @@ async def websocket_chat(
 
     # ── 4. Redis pub/sub subscription ────────────────────────────────────────
     pubsub = redis.pubsub()
-    channel = f"chat:{chat_id}"
-    await pubsub.subscribe(channel)
+    real_chat_id = row["id"]
+    sub_channels = {f"chat:{real_chat_id}", f"chat:{chat_id}"}
+    if row.get("match_id"):
+        sub_channels.add(f"chat:{row['match_id']}")
+    await pubsub.subscribe(*sub_channels)
 
     # ── 5. Concurrent tasks ──────────────────────────────────────────────────
 
@@ -190,7 +193,10 @@ async def websocket_chat(
         )
     finally:
         # ── 6. Cleanup ───────────────────────────────────────────────────────
-        await pubsub.unsubscribe(channel)
+        try:
+            await pubsub.unsubscribe(*sub_channels)
+        except Exception:
+            pass
         await pubsub.close()
         try:
             await websocket.close()

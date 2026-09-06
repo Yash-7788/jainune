@@ -39,6 +39,7 @@ from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
+STREAM_KEY = "telemetry:stream"
 BUFFER_KEY = "telemetry:buffer"
 DRAIN_BATCH = 2000   # max events drained per invocation
 
@@ -58,7 +59,7 @@ async def _get_redis() -> aioredis.Redis:
 
 @celery_app.task(name="app.workers.telemetry_worker.flush_telemetry_buffer")
 def flush_telemetry_buffer() -> None:
-    """Drain the Redis telemetry buffer and bulk-insert into Postgres."""
+    """Drain the Redis telemetry stream and buffer and bulk-insert into Postgres."""
     asyncio.run(_flush_async())
 
 
@@ -67,21 +68,28 @@ async def _flush_async() -> None:
     conn = await _get_conn()
 
     try:
-        # Atomically pop up to DRAIN_BATCH items
-        raw_events: list[str] = await redis.lrange(BUFFER_KEY, 0, DRAIN_BATCH - 1)
-        if not raw_events:
-            return
-
-        # Remove what we just read
-        await redis.ltrim(BUFFER_KEY, len(raw_events), -1)
-
         events = []
-        for raw in raw_events:
-            try:
-                e = json.loads(raw)
-                events.append(e)
-            except json.JSONDecodeError:
-                log.warning("Invalid telemetry event JSON: %s", raw[:100])
+
+        # 1. Drain from Redis Stream (telemetry:stream written by POST /v1/telemetry/events)
+        stream_entries = await redis.xrange(STREAM_KEY, count=DRAIN_BATCH)
+        if stream_entries:
+            del_ids = []
+            for stream_id, entry in stream_entries:
+                del_ids.append(stream_id)
+                events.append(entry)
+            await redis.xdel(STREAM_KEY, *del_ids)
+
+        # 2. Drain legacy list buffer if any items present
+        remaining_budget = DRAIN_BATCH - len(events)
+        if remaining_budget > 0:
+            raw_events: list[str] = await redis.lrange(BUFFER_KEY, 0, remaining_budget - 1)
+            if raw_events:
+                await redis.ltrim(BUFFER_KEY, len(raw_events), -1)
+                for raw in raw_events:
+                    try:
+                        events.append(json.loads(raw))
+                    except Exception:
+                        pass
 
         if not events:
             return
@@ -90,26 +98,48 @@ async def _flush_async() -> None:
         rows = []
         for e in events:
             try:
+                actor_id = e.get("actor_id") or e.get("user_id")
+                target_id = e.get("target_user_id") or e.get("target_id")
+                event_type = e.get("event_type", "unknown")
+                server_ts = e.get("server_ts") or e.get("ts") or e.get("client_ts")
+
+                if server_ts and str(server_ts).isdigit():
+                    occ_at = datetime.fromtimestamp(int(server_ts) / 1000.0, tz=timezone.utc)
+                else:
+                    occ_at = datetime.now(tz=timezone.utc)
+
+                meta_dict = {}
+                if e.get("payload"):
+                    payload_val = e["payload"]
+                    meta_dict["payload"] = json.loads(payload_val) if isinstance(payload_val, str) else payload_val
+                if e.get("duration_ms"):
+                    meta_dict["duration_ms"] = e["duration_ms"]
+                if e.get("batch_id"):
+                    meta_dict["batch_id"] = e["batch_id"]
+                if e.get("meta"):
+                    meta_dict["meta"] = e["meta"]
+
                 rows.append((
-                    e.get("event_type", "unknown"),
-                    e.get("user_id"),
-                    e.get("target_id"),
-                    e.get("ts") or datetime.now(tz=timezone.utc).isoformat(),
-                    json.dumps(e.get("meta") or {}),
+                    event_type,
+                    actor_id,
+                    target_id,
+                    occ_at,
+                    json.dumps(meta_dict),
                 ))
             except Exception as exc:
                 log.warning("Skipping malformed telemetry event: %s", exc)
 
-        await conn.executemany(
-            """
-            INSERT INTO telemetry_events
-                (event_type, user_id, target_id, occurred_at, meta)
-            VALUES ($1, $2::uuid, $3::uuid, $4::timestamptz, $5::jsonb)
-            ON CONFLICT DO NOTHING
-            """,
-            rows,
-        )
-        log.info("flush_telemetry_buffer: flushed %d events", len(rows))
+        if rows:
+            await conn.executemany(
+                """
+                INSERT INTO telemetry_events
+                    (event_type, user_id, target_id, occurred_at, meta)
+                VALUES ($1, $2::uuid, $3::uuid, $4::timestamptz, $5::jsonb)
+                ON CONFLICT DO NOTHING
+                """,
+                rows,
+            )
+            log.info("flush_telemetry_buffer: flushed %d events", len(rows))
     except Exception as exc:
         log.error("flush_telemetry_buffer failed: %s", exc, exc_info=True)
     finally:

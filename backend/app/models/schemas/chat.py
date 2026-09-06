@@ -36,14 +36,23 @@ class ChatMessage(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message_type: str = "text"
+    type: Optional[str] = None
     content: Optional[str] = None
     media_url: Optional[str] = None
+    media_id: Optional[str] = None
     user_disclaimer_approved: bool = False
 
     def validate_content(self) -> None:
+        if self.type and self.message_type == "text":
+            self.message_type = self.type
+        if self.media_id and not self.media_url:
+            self.media_url = self.media_id
+        if self.message_type in ("photo", "image") and self.media_url:
+            self.message_type = "photo"
+
         if self.message_type == "text" and not self.content:
             raise ValueError("content required for text messages")
-        if self.message_type in ("image", "voice", "gif") and not self.media_url:
+        if self.message_type in ("image", "photo", "voice", "gif") and not self.media_url:
             raise ValueError("media_url required for media messages")
 
 

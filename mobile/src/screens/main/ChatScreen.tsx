@@ -273,34 +273,62 @@ export default function ChatScreen() {
 
   const handleWsEvent = (data: {
     type: string;
-    message?: Message;
+    message?: any;
+    payload?: any;
     message_id?: string;
     user_id?: string;
   }) => {
     switch (data.type) {
-      case "new_message":
-        if (data.message) {
+      case "message":
+      case "new_message": {
+        const p = data.payload || data.message;
+        if (p) {
+          const incoming: Message = {
+            id: String(p.id),
+            match_id: String(p.chat_id || matchId),
+            sender_id: String(p.sender_id),
+            type: (p.message_type === "photo" || p.type === "photo") ? "photo" : (p.message_type === "voice" || p.type === "voice") ? "voice" : "text",
+            content: p.content || null,
+            media_url: p.media_url || null,
+            is_read: Boolean(p.is_read),
+            created_at: p.created_at || new Date().toISOString(),
+          };
           setMessages((prev) => {
-            if (prev.some((m) => m.id === data.message!.id)) return prev;
-            return [...prev, data.message!];
+            const withoutTemp = prev.filter(
+              (m) => !(m.id.startsWith("temp_") && m.content === incoming.content && m.sender_id === incoming.sender_id)
+            );
+            if (withoutTemp.some((m) => m.id === incoming.id)) return prev;
+            return [...withoutTemp, incoming];
           });
           triggerMarkRead();
           setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
         }
         break;
-      case "message_read":
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === data.message_id ? { ...m, is_read: true } : m
-          )
-        );
+      }
+      case "read_receipt":
+      case "message_read": {
+        const targetId = data.payload?.message_id || data.message_id;
+        if (targetId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === targetId ? { ...m, is_read: true } : m
+            )
+          );
+        } else {
+          setMessages((prev) => prev.map((m) => ({ ...m, is_read: true })));
+        }
         break;
-      case "user_online":
-        if (data.user_id === otherUser.id) setIsOnline(true);
+      }
+      case "user_online": {
+        const uid = data.payload?.user_id || data.user_id;
+        if (uid === otherUser.id) setIsOnline(true);
         break;
-      case "user_offline":
-        if (data.user_id === otherUser.id) setIsOnline(false);
+      }
+      case "user_offline": {
+        const uid = data.payload?.user_id || data.user_id;
+        if (uid === otherUser.id) setIsOnline(false);
         break;
+      }
     }
   };
 

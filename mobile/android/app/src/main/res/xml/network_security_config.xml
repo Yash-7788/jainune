@@ -55,12 +55,26 @@
     </trust-anchors>
   </domain-config>
 
-  <!-- Global base config — block ALL plaintext HTTP everywhere -->
+  <!-- Local development & emulator loopbacks (safe for dev) -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="true">10.0.2.2</domain>
+    <domain includeSubdomains="true">localhost</domain>
+    <domain includeSubdomains="true">127.0.0.1</domain>
+  </domain-config>
+
+  <!-- Global base config — block ALL plaintext HTTP elsewhere -->
   <base-config cleartextTrafficPermitted="false">
     <trust-anchors>
       <certificates src="system" />
-      <!-- Explicitly NO user certificates — defeats Burp/Charles MITM -->
     </trust-anchors>
   </base-config>
+
+  <!-- Debug overrides: active only in debug builds (android:debuggable=true) -->
+  <debug-overrides>
+    <trust-anchors>
+      <certificates src="system" />
+      <certificates src="user" />
+    </trust-anchors>
+  </debug-overrides>
 
 </network-security-config>

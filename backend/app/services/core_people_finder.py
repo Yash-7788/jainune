@@ -64,9 +64,12 @@ async def _get_cached_feed(
 ) -> Optional[List[dict]]:
     """Read pre-ranked candidate batch from Redis sorted set."""
     key = f"feed:cache:{user_id}"
-    raw = await redis.get(key)
-    if raw:
-        return json.loads(raw)
+    try:
+        raw = await redis.get(key)
+        if raw:
+            return json.loads(raw)
+    except Exception as exc:
+        log.warning("Redis feed cache decode error for user %s: %s", user_id, exc)
     return None
 
 
@@ -463,20 +466,27 @@ async def fetch_daily_compatible(
     Falls back to top BRRE result when nightly job hasn't run yet.
     """
     cache_key = f"daily_compatible:{user_id}"
-    cached = await redis.get(cache_key)
-    if cached:
-        return json.loads(cached)
+    try:
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception as exc:
+        log.warning("Redis daily_compatible decode error for user %s: %s", user_id, exc)
 
-    # No nightly result: fall back to highest reciprocal score in DB
+    algo = "brre_fallback"
+    rationale = "Highest reciprocal behavioral affinity in your region."
+
     async with db.acquire() as conn:
+        # Check nightly GS proposal for today first
         row = await conn.fetchrow(
             """
             SELECT
                 u.id, u.first_name, u.city, u.state, u.community_sect,
                 u.dietary_strictness, u.date_of_birth
-            FROM users u
-            JOIN user_behavior_vectors b ON u.id = b.user_id
-            WHERE u.id != $1
+            FROM daily_proposals dp
+            JOIN users u ON (u.id = CASE WHEN dp.user_a_id = $1 THEN dp.user_b_id ELSE dp.user_a_id END)
+            WHERE (dp.user_a_id = $1 OR dp.user_b_id = $1)
+              AND dp.proposed_at >= CURRENT_DATE
               AND u.account_status = 'active'
               AND u.onboarding_completed = TRUE
               AND NOT EXISTS (
@@ -488,13 +498,43 @@ async def fetch_daily_compatible(
                   WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
                      OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
               )
-            ORDER BY b.revealed_preference_vector <=>
-                (SELECT revealed_preference_vector FROM user_behavior_vectors WHERE user_id = $1)
-            ASC
+            ORDER BY dp.proposed_at DESC
             LIMIT 1
             """,
             user_id,
         )
+        if row:
+            algo = "gale_shapley_nightly"
+            rationale = "Your curated Daily Compatible match from last night's matching cycle."
+        else:
+            # Fall back to highest reciprocal score in DB
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    u.id, u.first_name, u.city, u.state, u.community_sect,
+                    u.dietary_strictness, u.date_of_birth
+                FROM users u
+                JOIN user_behavior_vectors b ON u.id = b.user_id
+                WHERE u.id != $1
+                  AND u.account_status = 'active'
+                  AND u.onboarding_completed = TRUE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM interactions i
+                      WHERE i.actor_id = $1 AND i.target_id = u.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_blocks ub
+                      WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                         OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
+                  )
+                ORDER BY b.revealed_preference_vector <=>
+                    (SELECT revealed_preference_vector FROM user_behavior_vectors WHERE user_id = $1)
+                ASC
+                LIMIT 1
+                """,
+                user_id,
+            )
+
     if not row:
         return None
 
@@ -505,7 +545,7 @@ async def fetch_daily_compatible(
     if dob:
         age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
 
-    return {
+    result = {
         "id": str(row["id"]),
         "first_name": row["first_name"],
         "age": age,
@@ -513,9 +553,16 @@ async def fetch_daily_compatible(
         "state": row["state"],
         "community_sect": row["community_sect"],
         "dietary_strictness": row["dietary_strictness"],
-        "compatibility_rationale": "Highest reciprocal behavioral affinity in your region.",
-        "pairing_algorithm": "brre_fallback",
+        "compatibility_rationale": rationale,
+        "pairing_algorithm": algo,
     }
+
+    try:
+        await redis.set(cache_key, json.dumps(result, default=str), ex=86400)
+    except Exception as exc:
+        log.warning("Failed to cache daily_compatible for user %s: %s", user_id, exc)
+
+    return result
 
 
 class CorePeopleFinder:

@@ -91,11 +91,22 @@ public class JainuneSecurityModule extends ReactContextBaseJavaModule {
         }
       }
 
-      // 2. Build tags check (test-keys = unofficial build, often rooted)
+      // 2. Build tags check: test-keys confirmed only if su is discoverable in PATH
       String buildTags = Build.TAGS;
       if (buildTags != null && buildTags.contains("test-keys")) {
-        promise.resolve(true);
-        return;
+        Process process = null;
+        try {
+          process = Runtime.getRuntime().exec(new String[]{"which", "su"});
+          if (process.getInputStream().read() != -1) {
+            promise.resolve(true);
+            return;
+          }
+        } catch (Exception ignored) {
+        } finally {
+          if (process != null) {
+            process.destroy();
+          }
+        }
       }
 
       // 3. Check for root management apps via PackageManager

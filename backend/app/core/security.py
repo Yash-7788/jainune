@@ -151,9 +151,10 @@ async def sliding_window_rate_limit(
     now_ms = int(time.time() * 1000)
     window_start = now_ms - (window_seconds * 1000)
 
+    import secrets
     pipe = redis.pipeline()
     pipe.zremrangebyscore(key, 0, window_start)
-    pipe.zadd(key, {str(now_ms): now_ms})
+    pipe.zadd(key, {f"{now_ms}:{secrets.token_hex(4)}": now_ms})
     pipe.zcard(key)
     pipe.expire(key, window_seconds + 1)
     results = await pipe.execute()
