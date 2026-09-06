@@ -249,3 +249,33 @@ def purge_deleted_users() -> None:
             await conn.close()
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Task: reap stale payment intents (>24h uncaptured)
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="app.workers.ephemeral_reaper.reap_stale_payment_intents")
+def reap_stale_payment_intents() -> None:
+    """Marks abandoned/uncaptured payment intents older than 24 hours as expired."""
+
+    async def _run():
+        conn = await _get_conn()
+        try:
+            result = await conn.execute(
+                """
+                UPDATE payment_intents
+                   SET status = 'expired',
+                       updated_at = NOW()
+                 WHERE status = 'created'
+                   AND created_at < NOW() - INTERVAL '24 hours'
+                """
+            )
+            count = int(result.split()[-1])
+            if count > 0:
+                log.info("reap_stale_payment_intents: expired %d stale payment intents", count)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())

@@ -36,16 +36,26 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     // Android channel configuration
     if (Platform.OS === "android") {
-      await Notifications.setNotificationChannelAsync("default", {
-        name: "Default",
+      await Notifications.setNotificationChannelAsync("jainune_default", {
+        name: "Jainune Notifications",
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 250, 250, 250],
         lightColor: "#FF6F00",
       });
     }
 
-    const tokenData = await Notifications.getExpoPushTokenAsync();
-    const token = tokenData.data;
+    let token: string | null = null;
+    try {
+      const deviceTokenData = await Notifications.getDevicePushTokenAsync();
+      token = deviceTokenData.data;
+    } catch {
+      try {
+        const expoTokenData = await Notifications.getExpoPushTokenAsync();
+        token = expoTokenData.data;
+      } catch {
+        token = null;
+      }
+    }
 
     // Send token to backend (non-blocking)
     if (token) {

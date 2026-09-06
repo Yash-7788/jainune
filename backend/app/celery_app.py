@@ -85,5 +85,9 @@ celery_app.conf.update(
             "task": "app.workers.notification_worker.send_daily_digest",
             "schedule": crontab(hour=8, minute=0),
         },
+        "reap-stale-payment-intents-hourly": {
+            "task": "app.workers.ephemeral_reaper.reap_stale_payment_intents",
+            "schedule": crontab(minute=30),  # every hour at :30
+        },
     },
 )

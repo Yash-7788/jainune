@@ -102,7 +102,19 @@ async def verify_payment(
         raise HTTPException(status_code=403, detail="Order does not belong to the authenticated user")
 
     if intent["status"] == "captured":
-        return {"success": True, "message": "Payment already verified.", "status": "already_captured"}
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT subscription_valid_until FROM users WHERE id = $1",
+                intent["user_id"],
+            )
+        v_until = row["subscription_valid_until"] if row and row["subscription_valid_until"] else None
+        return {
+            "success": True,
+            "activated": True,
+            "expires_at": v_until.isoformat() if v_until else "",
+            "message": "Payment already verified.",
+            "status": "already_captured",
+        }
 
     # 2. Verify HMAC signature
     valid = payment_service.verify_payment_signature(
@@ -148,7 +160,19 @@ async def verify_payment(
             except Exception:
                 pass
 
-    return {"success": True, "message": "Payment verified. Account upgraded."}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT subscription_valid_until FROM users WHERE id = $1",
+            intent["user_id"],
+        )
+    v_until = row["subscription_valid_until"] if row and row["subscription_valid_until"] else None
+
+    return {
+        "success": True,
+        "activated": True,
+        "expires_at": v_until.isoformat() if v_until else "",
+        "message": "Payment verified. Account upgraded.",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -313,7 +313,14 @@ async def process_payment_captured(
 
         async with conn.transaction():
             if plan_type == "subscription":
-                valid_until = datetime.now(tz=timezone.utc) + timedelta(days=plan["validity_days"])
+                current_user_row = await conn.fetchrow(
+                    "SELECT subscription_valid_until FROM users WHERE id = $1",
+                    intent["user_id"],
+                )
+                now_utc = datetime.now(tz=timezone.utc)
+                current_valid = current_user_row["subscription_valid_until"] if current_user_row else None
+                base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
+                valid_until = base_time + timedelta(days=plan["validity_days"])
                 await conn.execute(
                     """
                     UPDATE users

@@ -33,6 +33,7 @@ import {
   Alert,
   ActionSheetIOS,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import * as SecureStore from "expo-secure-store";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
@@ -69,6 +70,7 @@ interface RouteParams {
 }
 
 export default function ChatScreen() {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
   const route = useRoute();
   const { matchId, otherUser } = route.params as RouteParams;
@@ -487,7 +489,7 @@ export default function ChatScreen() {
       keyboardVerticalOffset={90}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, Platform.OS === "ios" ? 44 : 20) }]}>
         <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Text style={styles.backBtnText}>‹</Text>
         </TouchableOpacity>
@@ -590,7 +592,7 @@ export default function ChatScreen() {
       />
 
       {/* Input bar */}
-      <View style={[styles.inputBar, chatBlocked && styles.inputBarDisabled]}>
+      <View style={[styles.inputBar, chatBlocked && styles.inputBarDisabled, { paddingBottom: Math.max(insets.bottom, Platform.OS === "ios" ? spacing.sm : spacing.xs) }]}>
         {!chatBlocked && (
           <TouchableOpacity
             style={styles.mediaBtn}
@@ -679,7 +681,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.base,
-    paddingTop: Platform.OS === "ios" ? 52 : 20,
     paddingBottom: spacing.base,
     backgroundColor: colors.white,
     borderBottomWidth: 1,
@@ -794,7 +795,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
     gap: spacing.sm,
-    paddingBottom: Platform.OS === "ios" ? spacing.xl : spacing.sm,
   },
   inputBarDisabled: { opacity: 0.5 },
   input: {

@@ -116,6 +116,7 @@ async def ingest_events(
     accepted = 0
     dropped = 0
 
+    pipe = redis.pipeline(transaction=False)
     for event in batch.events:
         entry: dict = {
             "actor_id": str(actor_id),
@@ -131,21 +132,9 @@ async def ingest_events(
         if event.client_ts:
             entry["client_ts"] = str(event.client_ts)
         if event.payload:
-            import json
             entry["payload"] = json.dumps(event.payload, default=str)
 
-        try:
-            # Push to Redis stream — MAXLEN cap prevents unbounded growth
-            await redis.xadd(
-                "telemetry:stream",
-                entry,
-                maxlen=50_000,
-                approximate=True,
-            )
-            accepted += 1
-        except Exception:
-            dropped += 1
-            continue
+        pipe.xadd("telemetry:stream", entry, maxlen=50_000, approximate=True)
 
         # ── EMA attraction for long dwell on profile_view_end ────────────────
         if (
@@ -154,22 +143,26 @@ async def ingest_events(
             and event.duration_ms is not None
             and event.duration_ms >= _DWELL_ATTRACTION_THRESHOLD_S * 1000
         ):
-            # Fire-and-forget vector nudge (same 10% attraction as explicit like)
-            try:
-                await redis.xadd(
-                    "vector:update:queue",
-                    {
-                        "actor_id": str(actor_id),
-                        "target_id": str(event.target_user_id),
-                        "direction": "attract",
-                        "alpha": "0.05",  # half-strength vs explicit like
-                        "reason": "dwell_signal",
-                    },
-                    maxlen=10_000,
-                    approximate=True,
-                )
-            except Exception:
-                pass  # Non-critical
+            pipe.xadd(
+                "vector:update:queue",
+                {
+                    "actor_id": str(actor_id),
+                    "target_id": str(event.target_user_id),
+                    "direction": "attract",
+                    "alpha": "0.05",  # half-strength vs explicit like
+                    "reason": "dwell_signal",
+                },
+                maxlen=10_000,
+                approximate=True,
+            )
+
+    try:
+        await pipe.execute()
+        accepted = len(batch.events)
+        dropped = 0
+    except Exception:
+        accepted = 0
+        dropped = len(batch.events)
 
     return TelemetryResponse(accepted=accepted, dropped=dropped)
 
