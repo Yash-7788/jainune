@@ -26,6 +26,7 @@ import {
   enableScreenCaptureProtection,
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
+import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 
 interface SettingState {
   notifications_enabled: boolean;
@@ -37,6 +38,7 @@ interface SettingState {
 export default function SettingsScreen() {
   const navigation = useNavigation<any>();
   const logout = useAuthStore((s) => s.logout);
+  const [legalDoc, setLegalDoc] = useState<LegalDocType | null>(null);
   const [settings, setSettings] = useState<SettingState>({
     notifications_enabled: true,
     marketing_emails: false,
@@ -140,35 +142,35 @@ export default function SettingsScreen() {
         <Text style={styles.sectionTitle}>LEGAL & SAFETY</Text>
         <TouchableOpacity
           style={styles.linkRow}
-          onPress={() => Linking.openURL("https://jainune.com/legal/privacy")}
+          onPress={() => setLegalDoc("privacy")}
         >
           <Text style={styles.linkRowText}>Privacy Policy</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.linkRow}
-          onPress={() => Linking.openURL("https://jainune.com/legal/terms")}
+          onPress={() => setLegalDoc("terms")}
         >
           <Text style={styles.linkRowText}>Terms of Service</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.linkRow}
-          onPress={() => Linking.openURL("https://jainune.com/legal/child-safety")}
+          onPress={() => setLegalDoc("child_safety")}
         >
           <Text style={styles.linkRowText}>Child Safety & CSAE Standards</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.linkRow}
-          onPress={() => Linking.openURL("https://jainune.com/legal/community-guidelines")}
+          onPress={() => setLegalDoc("community")}
         >
           <Text style={styles.linkRowText}>Community Guidelines</Text>
           <Text style={styles.linkChevron}>›</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.linkRow}
-          onPress={() => Linking.openURL("https://jainune.com/legal/delete-account")}
+          onPress={() => setLegalDoc("deletion")}
         >
           <Text style={styles.linkRowText}>External Data Erasure Portal</Text>
           <Text style={styles.linkChevron}>›</Text>
@@ -208,6 +210,12 @@ export default function SettingsScreen() {
 
       {/* App info */}
       <Text style={styles.appVersion}>Jainune v1.0.0 — Made with care in Bangalore</Text>
+
+      <LegalModal
+        visible={legalDoc !== null}
+        initialDoc={legalDoc ?? "privacy"}
+        onClose={() => setLegalDoc(null)}
+      />
     </ScrollView>
   );
 }

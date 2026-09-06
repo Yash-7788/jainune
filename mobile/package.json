@@ -38,8 +38,6 @@
     "axios": "^1.7.7",
     "zustand": "^4.5.5",
     "@shopify/flash-list": "1.6.4",
-    "react-native-draggable-flatlist": "^4.0.1",
-    "react-native-bottom-sheet": "^4.6.4",
     "@expo-google-fonts/outfit": "^0.2.3",
     "@expo-google-fonts/inter": "^0.2.3",
     "react-native-razorpay": "^2.3.0",

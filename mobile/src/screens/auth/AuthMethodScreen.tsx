@@ -22,6 +22,7 @@ import { PrimaryButton, GhostButton, ErrorToast } from "../../components/core";
 import { googleSignIn, appleSignIn } from "../../api/authApi";
 import { useAuthStore } from "../../store/authStore";
 import { extractError } from "../../api/client";
+import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 import type { AuthStackParams } from "../../navigation/AppNavigator";
 
 // Configure Google Sign-In at module level
@@ -39,6 +40,7 @@ export default function AuthMethodScreen() {
   const setAuthenticated = useAuthStore((s) => s.setAuthenticated);
   const [loading, setLoading] = React.useState<"google" | "apple" | null>(null);
   const [error, setError] = React.useState<{ title: string; message: string } | null>(null);
+  const [legalDoc, setLegalDoc] = React.useState<LegalDocType | null>(null);
 
   const handleGoogle = async () => {
     setLoading("google");
@@ -154,10 +156,26 @@ export default function AuthMethodScreen() {
       </View>
 
       <Text style={styles.legal}>
-        By continuing, you agree to our{" "}
-        <Text style={styles.link}>Terms of Service</Text> and{" "}
-        <Text style={styles.link}>Privacy Policy</Text>.
+        By continuing, you verify you are 18+ and agree to our{" "}
+        <Text style={styles.link} onPress={() => setLegalDoc("terms")}>
+          Terms of Service
+        </Text>
+        {", "}
+        <Text style={styles.link} onPress={() => setLegalDoc("privacy")}>
+          Privacy Policy
+        </Text>
+        {", and "}
+        <Text style={styles.link} onPress={() => setLegalDoc("child_safety")}>
+          Child Safety Standards
+        </Text>
+        .
       </Text>
+
+      <LegalModal
+        visible={legalDoc !== null}
+        initialDoc={legalDoc ?? "privacy"}
+        onClose={() => setLegalDoc(null)}
+      />
     </View>
   );
 }
