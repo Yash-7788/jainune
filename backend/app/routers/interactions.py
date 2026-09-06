@@ -132,8 +132,15 @@ async def record_interaction_action(
             tier = await get_effective_user_tier(actor_id, conn)
 
             if body.action == "like":
-                from datetime import datetime, timezone
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                from datetime import datetime, timedelta, timezone
+                try:
+                    from zoneinfo import ZoneInfo
+                    ist_zone = ZoneInfo("Asia/Kolkata")
+                except Exception:
+                    ist_zone = timezone(timedelta(hours=5, minutes=30))
+
+                ist_now = datetime.now(ist_zone)
+                today_str = ist_now.strftime("%Y-%m-%d")
                 like_key = f"daily_likes:{actor_id}:{today_str}"
 
                 # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
@@ -141,7 +148,10 @@ async def record_interaction_action(
                 if limit is not None:
                     current_likes = await redis.incr(like_key)
                     if current_likes == 1:
-                        await redis.expire(like_key, 86400)
+                        # Expire strictly at upcoming IST midnight
+                        tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
+                        await redis.expire(like_key, max(ttl_seconds, 60))
                     if current_likes > limit:
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,

@@ -408,42 +408,62 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
 async def refresh_token_endpoint(body: TokenRefreshBody, db: DBDep, redis: RedisDep) -> dict:
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
 
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT user_id, expires_at FROM refresh_tokens
-            WHERE token_hash = $1
-            """,
-            token_hash,
+    # 1. Check for replay/reuse of an already-rotated token (Token Family Theft Detection)
+    reused_user_id = await redis.get(f"auth:revoked_rt:{token_hash}")
+    if reused_user_id:
+        reused_uid = reused_user_id.decode() if isinstance(reused_user_id, bytes) else reused_user_id
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", uuid.UUID(reused_uid))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token reuse detected. All sessions revoked.",
         )
 
-        if not row or row["expires_at"] < datetime.now(timezone.utc):
-            # Possible theft: purge all sessions for user if token was already used
-            if row:
-                await conn.execute(
-                    "DELETE FROM refresh_tokens WHERE user_id = $1",
-                    row["user_id"],
-                )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired refresh token.",
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, expires_at FROM refresh_tokens
+                WHERE token_hash = $1
+                FOR UPDATE
+                """,
+                token_hash,
             )
 
-        user_id = row["user_id"]
-        access_token = create_access_token(user_id)
-        new_refresh = create_refresh_token()
-        new_hash = hashlib.sha256(new_refresh.encode()).hexdigest()
-        new_expires = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+            if not row or row["expires_at"] < datetime.now(timezone.utc):
+                # Possible theft: purge all sessions for user if token was already used
+                if row:
+                    await conn.execute(
+                        "DELETE FROM refresh_tokens WHERE user_id = $1",
+                        row["user_id"],
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired refresh token.",
+                )
 
-        # Rotate: delete old, insert new
-        await conn.execute(
-            """
-            UPDATE refresh_tokens
-            SET token_hash = $1, expires_at = $2, created_at = NOW()
-            WHERE user_id = $3
-            """,
-            new_hash, new_expires, user_id,
-        )
+            user_id = row["user_id"]
+            access_token = create_access_token(user_id)
+            new_refresh = create_refresh_token()
+            new_hash = hashlib.sha256(new_refresh.encode()).hexdigest()
+            new_expires = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+
+            # Rotate: delete old, insert new
+            await conn.execute(
+                """
+                UPDATE refresh_tokens
+                SET token_hash = $1, expires_at = $2, created_at = NOW()
+                WHERE user_id = $3
+                """,
+                new_hash, new_expires, user_id,
+            )
+
+    # 2. Mark old token hash as revoked in Redis with TTL matching validity to catch any replay
+    await redis.set(
+        f"auth:revoked_rt:{token_hash}",
+        str(user_id),
+        ex=settings.refresh_token_expire_days * 86400,
+    )
 
     return ok(AccessTokenResponse(
         access_token=access_token,
