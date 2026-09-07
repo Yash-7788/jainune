@@ -211,12 +211,14 @@ export async function submitStep20(mediaId: string): Promise<OnboardingStatus> {
 export async function submitStep21(
   coreMatchmaking: boolean,
   familyContactGotra: boolean,
-  relocationIntercity: boolean
+  relocationIntercity: boolean,
+  marketing: boolean = false
 ): Promise<OnboardingStatus> {
   const res = await apiPatch<OnboardingStatus>("/onboarding/step/21", {
     core_matchmaking: coreMatchmaking,
     family_contact_gotra: familyContactGotra,
     relocation_intercity: relocationIntercity,
+    marketing: marketing,
   });
   if (!res.success) throw { _apiError: res.error };
   return res.data;

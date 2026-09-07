@@ -265,6 +265,7 @@ class Step21ConsentBody(BaseModel):
     core_matchmaking: bool = True
     family_contact_gotra: bool = False
     relocation_intercity: bool = False
+    marketing: bool = False
 
     @field_validator("core_matchmaking")
     @classmethod

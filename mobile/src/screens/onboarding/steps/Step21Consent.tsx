@@ -22,17 +22,19 @@ export default function Step21Screen() {
   const [coreMatchmaking] = useState(true); // always true — mandatory
   const [familyContact, setFamilyContact] = useState(data.consentFamilyContact ?? false);
   const [relocation, setRelocation] = useState(data.consentRelocation ?? false);
+  const [marketing, setMarketing] = useState(data.consentMarketing ?? false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
 
   const handleNext = async () => {
     setLoading(true);
     try {
-      await submitStep21(true, familyContact, relocation);
+      await submitStep21(true, familyContact, relocation, marketing);
       updateData({
         consentCoreMatchmaking: true,
         consentFamilyContact: familyContact,
         consentRelocation: relocation,
+        consentMarketing: marketing,
       });
       setStep(22);
       navigation.navigate("Step22");
@@ -74,6 +76,12 @@ export default function Step21Screen() {
         sub="Allow us to suggest profiles outside your city if you've indicated openness to relocation."
         value={relocation}
         onToggle={setRelocation}
+      />
+      <ToggleRow
+        label="Promotional Updates & Offers"
+        sub="Receive special launch discounts and festival notifications via WhatsApp, SMS, or email."
+        value={marketing}
+        onToggle={setMarketing}
       />
 
       {/* Zero-Tolerance EULA & Community Standards (Apple Guideline 1.2) */}

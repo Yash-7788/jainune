@@ -7,9 +7,12 @@ Location verification service — geofencing for initial operational launch zone
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import logging
 from typing import TYPE_CHECKING, Any, Optional
+
+from app.core.config import settings
 
 if TYPE_CHECKING:
     import asyncpg
@@ -81,6 +84,12 @@ def verify_location_anti_spoofing(
       * Validates origin country matches operational zone country (IN).
       * Validates claimed GPS is within plausible radius of edge IP geolocation (< 600 km).
     """
+    if client_ip:
+        try:
+            ipaddress.ip_address(str(client_ip).strip())
+        except ValueError:
+            return False, "Invalid network client IP address."
+
     if is_mocked:
         return False, "Mock location detected. Please disable mock location apps or developer options."
 
@@ -102,6 +111,17 @@ def verify_location_anti_spoofing(
     # Server-side edge network corroboration
     if headers:
         h = {k.lower(): v for k, v in headers.items()}
+        has_cf_headers = any(k.startswith("cf-") for k in h)
+
+        if has_cf_headers:
+            origin_secret = getattr(settings, "cloudflare_origin_secret", "")
+            edge_token = h.get("x-edge-secret") or h.get("x-origin-secret")
+            if origin_secret:
+                if not edge_token or edge_token != origin_secret:
+                    return False, "Untrusted edge network headers detected without valid origin secret."
+            elif settings.environment == "production":
+                return False, "Untrusted edge network headers detected in production without origin lock."
+
         country = h.get("cf-ipcountry") or h.get("x-country-code")
         if country and country.upper() not in ("IN", "XX", "T1"):
             return False, f"Network location ({country.upper()}) is outside Jainune active launch zones in India."

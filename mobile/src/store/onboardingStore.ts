@@ -55,6 +55,7 @@ export interface OnboardingData {
   consentCoreMatchmaking: boolean;
   consentFamilyContact: boolean;
   consentRelocation: boolean;
+  consentMarketing?: boolean;
 }
 
 interface OnboardingStore {

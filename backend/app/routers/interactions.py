@@ -225,17 +225,20 @@ async def record_interaction_action(
                     )
 
             # ── Insert interaction row ───────────────────────────────────────────
+            interaction_type_val = "pass" if body.action == "pass" else "like"
             await conn.execute(
                 """
-                INSERT INTO interactions (actor_id, target_id, action_type, reacted_prompt_id)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO interactions (actor_id, target_id, action_type, interaction_type, reacted_prompt_id)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (actor_id, target_id) DO UPDATE
                    SET action_type = EXCLUDED.action_type,
+                       interaction_type = EXCLUDED.interaction_type,
                        reacted_prompt_id = EXCLUDED.reacted_prompt_id
                 """,
                 actor_id,
                 target_id,
                 body.action,
+                interaction_type_val,
                 body.prompt_id,
             )
 

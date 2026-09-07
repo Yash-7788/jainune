@@ -495,6 +495,208 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         candidates = await finder.rank_candidates(requester=req, pool_users=pool, top_k=10)
         self.assertEqual(len(candidates), 10)
 
+    async def test_17_interactions_insert_sets_interaction_type_and_action_type(self):
+        """P1: interactions action endpoint must set both action_type and interaction_type."""
+        from app.routers.interactions import record_interaction_action
+        from app.models.schemas.interaction import InteractionActionRequest
+
+        actor_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+
+        mock_user = {"id": str(actor_id), "subscription_tier": "free"}
+
+        mock_conn = _create_mock_conn()
+        executed_sqls = []
+
+        async def track_execute(sql, *args):
+            executed_sqls.append((sql, args))
+            return "INSERT 0 1"
+
+        mock_conn.execute = AsyncMock(side_effect=track_execute)
+        mock_conn.fetchval = AsyncMock(return_value=None)
+
+        async def mock_fetchrow(sql, *args):
+            if "FROM users" in sql:
+                return {
+                    "id": target_id,
+                    "account_status": "active",
+                    "deleted_at": None,
+                    "subscription_tier": "free",
+                    "subscription_valid_until": None,
+                }
+            return None
+
+        mock_conn.fetchrow = AsyncMock(side_effect=mock_fetchrow)
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        mock_redis = AsyncMock()
+        mock_redis.incr = AsyncMock(return_value=1)
+        mock_redis.get = AsyncMock(return_value=None)
+
+        body = InteractionActionRequest(
+            target_id=target_id,
+            action="like",
+            prompt_id=None,
+        )
+
+        with patch("app.routers.interactions.sliding_window_rate_limit", new_callable=AsyncMock):
+            res = await record_interaction_action(
+                body=body,
+                current_user=mock_user,
+                db=mock_pool,
+                redis=mock_redis,
+            )
+
+        self.assertTrue(res.success)
+        insert_calls = [args for sql, args in executed_sqls if "INSERT INTO interactions" in sql]
+        self.assertEqual(len(insert_calls), 1)
+        args = insert_calls[0]
+        # Check that actor_id, target_id, action_type, interaction_type are passed
+        self.assertEqual(args[0], actor_id)
+        self.assertEqual(args[1], target_id)
+        self.assertEqual(args[2], "like")
+        self.assertEqual(args[3], "like")  # interaction_type populated!
+
+    def test_18_location_verifier_origin_lock_and_client_ip(self):
+        """P2: verify_location_anti_spoofing validates client_ip and enforces edge origin-lock."""
+        from app.services.location_verifier import verify_location_anti_spoofing
+        from app.core.config import settings
+
+        # 1. Invalid client IP format rejected
+        valid, err = verify_location_anti_spoofing(
+            lat=19.0760,
+            lon=72.8777,
+            client_ip="not_an_ip",
+        )
+        self.assertFalse(valid)
+        self.assertIn("Invalid network client IP", err)
+
+        # 2. Valid client IP accepted
+        valid, err = verify_location_anti_spoofing(
+            lat=19.0760,
+            lon=72.8777,
+            client_ip="103.21.244.1",
+        )
+        self.assertTrue(valid)
+
+        # 3. Origin secret configured: untrusted edge headers without secret rejected
+        orig_secret = settings.cloudflare_origin_secret
+        try:
+            settings.cloudflare_origin_secret = "secret_edge_pass_999"
+            valid, err = verify_location_anti_spoofing(
+                lat=19.0760,
+                lon=72.8777,
+                headers={"cf-ipcountry": "IN", "cf-iplatitude": "19.07", "cf-iplongitude": "72.87"},
+            )
+            self.assertFalse(valid)
+            self.assertIn("Untrusted edge network headers", err)
+
+            # 4. Valid edge secret provided: accepted
+            valid, err = verify_location_anti_spoofing(
+                lat=19.0760,
+                lon=72.8777,
+                headers={
+                    "x-edge-secret": "secret_edge_pass_999",
+                    "cf-ipcountry": "IN",
+                    "cf-iplatitude": "19.07",
+                    "cf-iplongitude": "72.87",
+                },
+            )
+            self.assertTrue(valid)
+            self.assertIsNone(err)
+        finally:
+            settings.cloudflare_origin_secret = orig_secret
+
+    def test_19_migrations_deterministic_and_unique(self):
+        """P3: All migration files must have unique prefixes and no duplicate numbers."""
+        from pathlib import Path
+        import re
+
+        migrations_dir = Path(__file__).resolve().parent.parent.parent / "migrations"
+        migration_files = sorted(migrations_dir.glob("*.sql"))
+        self.assertTrue(len(migration_files) >= 14)
+
+        prefixes = []
+        for f in migration_files:
+            match = re.match(r"^(\d{4})_", f.name)
+            self.assertIsNotNone(match, f"Invalid migration naming format: {f.name}")
+            prefixes.append(match.group(1))
+
+        # Check all prefixes are strictly unique
+        duplicate_prefixes = [p for p in prefixes if prefixes.count(p) > 1]
+        self.assertEqual(len(duplicate_prefixes), 0, f"Duplicate migration numbers found: {duplicate_prefixes}")
+
+    async def test_20_promotional_broadcast_enforces_marketing_consent(self):
+        """P4: broadcast_promotional_campaign target query must join consent_records."""
+        from app.services.messaging_service import broadcast_promotional_campaign
+        from app.routers.onboarding import step21_consent
+        from app.models.schemas.user import Step21ConsentBody
+
+        captured_query = []
+
+        mock_conn = _create_mock_conn()
+        async def mock_fetch(query, *params):
+            captured_query.append(query)
+            return []
+
+        mock_conn.fetch = AsyncMock(side_effect=mock_fetch)
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        await broadcast_promotional_campaign(
+            pool=mock_pool,
+            campaign_name="festive_push",
+            title="Happy Paryushan",
+            message="Connect with members of the Jain community.",
+            channels=["email"],
+            target_segment="free",
+        )
+
+        self.assertEqual(len(captured_query), 1)
+        sql = captured_query[0]
+        self.assertIn("consent_records", sql)
+        self.assertIn("consent_type = 'marketing'", sql)
+        self.assertIn("granted = TRUE", sql)
+
+        # Also test onboarding Step 21 saves marketing consent
+        user_id = uuid.uuid4()
+        mock_user = MagicMock()
+        mock_user.id = user_id
+
+        step21_sqls = []
+        async def mock_step21_execute(sql, *args):
+            step21_sqls.append((sql, args))
+
+        mock_conn.execute = AsyncMock(side_effect=mock_step21_execute)
+        mock_conn.fetchrow = AsyncMock(return_value={"onboarding_completed": False})
+
+        mock_db = MagicMock()
+        mock_db.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        body = Step21ConsentBody(
+            core_matchmaking=True,
+            family_contact_gotra=True,
+            relocation_intercity=False,
+            marketing=True,
+        )
+
+        with patch("app.routers.onboarding.sliding_window_rate_limit", new_callable=AsyncMock):
+            await step21_consent(
+                body=body,
+                current_user=mock_user,
+                db=mock_db,
+                redis=mock_redis,
+            )
+
+        marketing_consent_saved = any(
+            len(args) >= 3 and args[1] == "marketing" and args[2] is True
+            for sql, args in step21_sqls
+        )
+        self.assertTrue(marketing_consent_saved)
+
 
 if __name__ == "__main__":
     unittest.main()

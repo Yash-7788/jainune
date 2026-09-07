@@ -9,7 +9,7 @@ Production readiness divided into two sequential tiers:
 
 ## 2. Current Progress Checkpoint
 - **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
-- **Test Suite**: 164 unit tests passing with 0 errors and 0 regressions.
+- **Test Suite**: 168 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -42,6 +42,10 @@ Production readiness divided into two sequential tiers:
   - Razorpay payment ID resolution on order ID lookups (B-2).
   - Partial refund preservation of subscription tier (B-3).
   - Super connect credit clawback on subscription full refund (B-4).
+  - Migration 0008 version collision resolved via renumbering to `0014_reports_action_taken.sql` (P3).
+  - `interactions.interaction_type` NOT NULL constraint dropped with default fallback (migration `0015`) and populated in `interactions.py` (P1).
+  - GPS reverse-proxy trust boundary origin-lock (`cloudflare_origin_secret`) and `client_ip` format validation (P2).
+  - DPDP Act / TRAI marketing consent enforcement in `broadcast_promotional_campaign`, schema, and onboarding step 21 UI (P4).
 
 ---
 

@@ -643,6 +643,7 @@ async def step21_consent(
         ("core_matchmaking", body.core_matchmaking),
         ("family_contact_gotra", body.family_contact_gotra),
         ("relocation_intercity", body.relocation_intercity),
+        ("marketing", body.marketing),
     ]
     async with db.acquire() as conn:
         async with conn.transaction():

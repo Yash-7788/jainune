@@ -379,19 +379,29 @@ async def broadcast_promotional_campaign(
     Executes broadcast promotional marketing campaign across SMS, WhatsApp, and/or Email.
     Respects user account status and active segments.
     """
-    where_clause = "account_status = 'active'"
+    where_clause = "u.account_status = 'active'"
     params: list[Any] = []
     if target_segment == "free":
         params.append("free")
-        where_clause += f" AND subscription_tier = ${len(params)}"
+        where_clause += f" AND u.subscription_tier = ${len(params)}"
     elif target_segment == "plus":
-        where_clause += " AND subscription_tier != 'free'"
+        where_clause += " AND u.subscription_tier != 'free'"
+
+    # Enforce marketing opt-in consent under DPDP Act 2023 & TRAI regulations
+    where_clause += """
+        AND EXISTS (
+            SELECT 1 FROM consent_records cr
+            WHERE cr.user_id = u.id
+              AND cr.consent_type = 'marketing'
+              AND cr.granted = TRUE
+        )
+    """
 
     query = f"""
-        SELECT id, phone_number, email, first_name
-        FROM users
+        SELECT u.id, u.phone_number, u.email, u.first_name
+        FROM users u
         WHERE {where_clause}
-        ORDER BY created_at DESC
+        ORDER BY u.created_at DESC
         LIMIT {limit}
     """
     async with pool.acquire() as conn:
