@@ -376,7 +376,11 @@ async def spin_serendipity_wheel(
         "success": True,
         "action": "spin",
         "remaining_spins": remaining,
-        "paired_user": dict(candidate) if candidate else None,
+        "paired_user": {
+            "id": str(candidate["id"]),
+            "first_name": candidate["first_name"],
+            "city": candidate["city"],
+        } if candidate else None,
         "message": "Wheel spin successful! 15-minute speed chat enabled.",
     }
 
