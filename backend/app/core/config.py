@@ -1,5 +1,6 @@
 from typing import List
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,6 +72,38 @@ class Settings(BaseSettings):
     # Cloudflare Turnstile & Origin Protection
     turnstile_secret_key: str = ""
     cloudflare_origin_secret: str = ""
+
+    @model_validator(mode="after")
+    def audit_production_environment(self) -> "Settings":
+        if self.environment.lower() == "production":
+            errors = []
+            if "default_test_pepper" in self.otp_pepper_secret or len(self.otp_pepper_secret) < 32:
+                errors.append("otp_pepper_secret must be set to a cryptographically secure key (>=32 chars) without default/test values")
+            if "postgres:password@localhost" in self.database_url or "jainune_dev" in self.database_url:
+                errors.append("database_url must point to a production database, not local dev/default credentials")
+            if self.razorpay_key_id in ("test_rzp_key", "") or self.razorpay_key_id.startswith("rzp_test_") or self.razorpay_key_id.startswith("test_"):
+                errors.append("razorpay_key_id must be a live production key (cannot use test/default key in production)")
+            if self.razorpay_key_secret in ("test_rzp_secret", "") or self.razorpay_key_secret.startswith("test_"):
+                errors.append("razorpay_key_secret must be a live production secret (cannot use test/default secret in production)")
+            if self.aws_access_key_id in ("test_aws_key", "") or self.aws_access_key_id.startswith("test_"):
+                errors.append("aws_access_key_id must be configured with a production IAM key")
+            if self.aws_secret_access_key in ("test_aws_secret", "") or self.aws_secret_access_key.startswith("test_"):
+                errors.append("aws_secret_access_key must be configured with a production IAM secret")
+            if self.msg91_auth_key in ("test_msg91_key", "") or self.msg91_auth_key.startswith("test_"):
+                errors.append("msg91_auth_key must be configured with production MSG91 credentials")
+            if not self.cloudflare_origin_secret:
+                errors.append("cloudflare_origin_secret must be set to enforce reverse-proxy origin validation in production")
+            if not self.turnstile_secret_key:
+                errors.append("turnstile_secret_key must be set for Cloudflare Turnstile anti-bot verification in production")
+            if not self.sentry_dsn:
+                errors.append("sentry_dsn must be configured for error tracking and observability in production")
+
+            if errors:
+                raise ValueError(
+                    f"Production environment variable audit failed ({len(errors)} errors):\n"
+                    + "\n".join(f"  - {err}" for err in errors)
+                )
+        return self
 
 
 settings = Settings()

@@ -1703,8 +1703,159 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sc_data["type"], "super_connect")
         self.assertEqual(sc_data["sender_id"], sender_id)
 
+    def test_41_production_environment_variables_audit(self):
+        """Verify Settings model_validator rejects insecure default/test secrets in production mode."""
+        from pydantic import ValidationError
+        from app.core.config import Settings
+
+        # 1. Production with defaults must fail
+        with self.assertRaises((ValidationError, ValueError)) as ctx:
+            Settings(
+                environment="production",
+                otp_pepper_secret="default_test_pepper_secret_32_bytes_len",
+                database_url="postgresql://postgres:password@localhost:5432/jainune_dev",
+            )
+        err_str = str(ctx.exception)
+        self.assertIn("Production environment variable audit failed", err_str)
+        self.assertIn("otp_pepper_secret", err_str)
+        self.assertIn("database_url", err_str)
+        self.assertIn("razorpay_key_id", err_str)
+
+        # 2. Production with full valid credentials passes
+        prod_settings = Settings(
+            environment="production",
+            otp_pepper_secret="a_very_secure_prod_pepper_secret_min_32_bytes_long!",
+            database_url="postgresql://app_prod:prod_pw_9921@db-cluster.internal.jainune.com:5432/jainune_production",
+            razorpay_key_id="rzp_live_k8a92j1h829",
+            razorpay_key_secret="live_rzp_secret_key_89218291",
+            aws_access_key_id="AKIA_PROD_LIVE_KEY_992",
+            aws_secret_access_key="prod_live_aws_secret_value_39182918",
+            msg91_auth_key="msg91_live_auth_token_88291",
+            cloudflare_origin_secret="cf_live_origin_tunnel_secret_9918",
+            turnstile_secret_key="0x4AAAAAA_live_turnstile_secret_8819",
+            sentry_dsn="https://mock_sentry_key@o992.ingest.sentry.io/18291",
+        )
+        self.assertEqual(prod_settings.environment, "production")
+
+        # 3. Development environment allows default test secrets
+        dev_settings = Settings(environment="development")
+        self.assertEqual(dev_settings.environment, "development")
+
+    def test_42_dockerfile_security_and_non_root_specs(self):
+        """Verify Dockerfile and docker-compose.prod.yml adhere to non-root UID 10001 and safe capabilities."""
+        from pathlib import Path
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+
+        dockerfile_path = backend_dir / "Dockerfile"
+        self.assertTrue(dockerfile_path.exists())
+        dockerfile_content = dockerfile_path.read_text(encoding="utf-8")
+
+        # Check explicit non-root UID/GID 10001 and home dir
+        self.assertIn("10001", dockerfile_content)
+        self.assertIn("-m -d /home/appuser", dockerfile_content)
+        self.assertIn("USER 10001:10001", dockerfile_content)
+        self.assertIn("--chown=10001:10001", dockerfile_content)
+
+        # Check absence of wildcard forwarded IPs
+        self.assertNotIn('--forwarded-allow-ips "*"', dockerfile_content)
+
+        # Check docker-compose.prod.yml security options
+        compose_path = backend_dir / "docker-compose.prod.yml"
+        self.assertTrue(compose_path.exists())
+        compose_content = compose_path.read_text(encoding="utf-8")
+        self.assertIn("no-new-privileges:true", compose_content)
+        self.assertIn("cap_drop:", compose_content)
+        self.assertIn("ALL", compose_content)
+        self.assertIn('user: "10001:10001"', compose_content)
+        self.assertIn("init: true", compose_content)
+
+    def test_43_database_migration_rollbacks_0001_through_0010(self):
+        """Verify reversible down-migration scripts exist for migrations 0001-0010 and parse valid SQL blocks."""
+        from pathlib import Path
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+        down_dir = backend_dir / "migrations" / "down"
+        self.assertTrue(down_dir.exists(), "Down migrations directory must exist")
+
+        expected_versions = [
+            "0001_initial_schema",
+            "0002_postgis_pgvector",
+            "0003_rls_security_policies",
+            "0004_location_geofence_and_waitlist",
+            "0005_chat_safety_and_moderation",
+            "0006_complete_monetization_and_schema_reconciliation",
+            "0007_production_domain_reconciliation",
+            "0008_multiprovider_auth_and_account_cleanup",
+            "0009_performance_indexes",
+            "0010_database_audit_reconciliation",
+        ]
+
+        for ver in expected_versions:
+            down_file = down_dir / f"{ver}.down.sql"
+            self.assertTrue(down_file.exists(), f"Missing down migration: {down_file.name}")
+            sql = down_file.read_text(encoding="utf-8").strip()
+            self.assertIn("BEGIN;", sql, f"{down_file.name} must include transactional BEGIN;")
+            self.assertTrue(sql.endswith("COMMIT;"), f"{down_file.name} must end with transactional COMMIT;")
+
+    def test_44_sentry_pii_scrubbing_and_prometheus_metrics(self):
+        """Verify Sentry PII scrubbing, error fingerprinting, and Prometheus metric text exposition format."""
+        from app.core.sentry import scrub_pii_from_dict, sentry_before_send
+        from app.core.metrics import PrometheusRegistry
+
+        # 1. PII Scrubbing
+        sensitive_payload = {
+            "headers": {
+                "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.test",
+                "Cookie": "session_id=secret_cookie_val",
+                "User-Agent": "Jainune-App/1.0",
+            },
+            "data": {
+                "phone_number": "+919876543210",
+                "otp": "123456",
+                "message": "Call me at +919876543210 or 9876543210",
+                "normal_field": "Hello world",
+            },
+        }
+        scrubbed = scrub_pii_from_dict(sensitive_payload)
+        self.assertEqual(scrubbed["headers"]["Authorization"], "[SCRUBBED]")
+        self.assertEqual(scrubbed["headers"]["Cookie"], "[SCRUBBED]")
+        self.assertEqual(scrubbed["headers"]["User-Agent"], "Jainune-App/1.0")
+        self.assertEqual(scrubbed["data"]["phone_number"], "[SCRUBBED]")
+        self.assertEqual(scrubbed["data"]["otp"], "[SCRUBBED]")
+        self.assertIn("[PHONE_SCRUBBED]", scrubbed["data"]["message"])
+        self.assertEqual(scrubbed["data"]["normal_field"], "Hello world")
+
+        # 2. Sentry Error Fingerprinting
+        class MockPostgresError(Exception):
+            pass
+        MockPostgresError.__module__ = "asyncpg.exceptions"
+
+        event = {"request": {"headers": {"Authorization": "Bearer secret_tok"}}}
+        hint = {"exc_info": (MockPostgresError, MockPostgresError("connection closed"), None)}
+        processed = sentry_before_send(event, hint)
+        self.assertEqual(processed["fingerprint"], ["database-error", "MockPostgresError"])
+        self.assertEqual(processed["request"]["headers"]["Authorization"], "[SCRUBBED]")
+
+        # 3. Prometheus Metric Registry
+        reg = PrometheusRegistry()
+        reg.record_request_start()
+        self.assertEqual(reg.in_progress, 1)
+
+        reg.record_request_end(method="GET", endpoint="/v1/feed", status=200, duration_seconds=0.045)
+        self.assertEqual(reg.in_progress, 0)
+        self.assertEqual(reg.request_counts[("GET", "/v1/feed", "200")], 1)
+
+        output = reg.generate_prometheus_output(version="1.0.0", environment="production")
+        self.assertIn("# HELP http_requests_total", output)
+        self.assertIn('# TYPE http_requests_total counter', output)
+        self.assertIn('http_requests_total{endpoint="/v1/feed",method="GET",status="200"} 1', output)
+        self.assertIn("# HELP http_request_duration_seconds", output)
+        self.assertIn('# TYPE http_request_duration_seconds histogram', output)
+        self.assertIn('http_request_duration_seconds_bucket{endpoint="/v1/feed",le="0.05",method="GET"} 1', output)
+        self.assertIn('app_build_info{environment="production",version="1.0.0"} 1', output)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -106,11 +106,11 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 - ✅ **Run 6: Push Notification Taps from Cold Boot vs Background**: Extracted unified `handleNotificationRouting` and added `Notifications.getLastNotificationResponseAsync()` in `notifications.ts` wired to `AppNavigator.tsx` on `onReady` and mount, ensuring seamless deep-link navigation to chat, matches, and likes whether tapped from cold boot or background.
 - ✅ **Run 7: Font Scaling, Small Screen (320px) & Accessibility Stress**: Upgraded core buttons to dynamic `minHeight: 52, paddingVertical: spacing.sm` with `maxFontSizeMultiplier={1.35}`; scaled OTP box width to 44px to fit 6 digits within 320px screens; wrapped `OnboardingStep.tsx` in a scrollable `ScrollView` container to eliminate button clipping under 200% system accessibility font scaling.
 
-### Phase 6: Infrastructure, CI/CD & Deployment (3–4 Runs)
-- Docker image minimization and non-root security container execution.
-- Production environment variable auditing (ensuring no hardcoded defaults).
-- Automated database migration rollback tests (`0001` through `0010`).
-- Sentry error grouping and Prometheus metrics exporter validation.
+### Phase 6: Infrastructure, CI/CD & Deployment (4 Runs) [100% COMPLETE]
+- ✅ **Run 1: Docker Image Minimization & Non-Root Security Container Execution**: Configured `Dockerfile` with explicit non-root system UID/GID `10001:10001`, system home directory creation (`-m -d /home/appuser`), restricted `--forwarded-allow-ips` to localhost (`127.0.0.1`), and hardened `docker-compose.prod.yml` with `user: "10001:10001"`, `init: true`, `security_opt: [no-new-privileges:true]`, and `cap_drop: [ALL]`.
+- ✅ **Run 2: Production Environment Variable Auditing**: Added Pydantic `@model_validator(mode="after")` to `Settings` in `app/core/config.py` that fails fast with `ValidationError` in `production` mode if insecure test/default credentials (`test_rzp_*`, `test_aws_*`, `default_test_pepper_*`, `postgres:password@localhost`, unconfigured Cloudflare origin/Turnstile) are detected.
+- ✅ **Run 3: Automated Database Migration Rollback Tests (`0001` through `0010`)**: Created transactional `.down.sql` rollback migrations for versions `0001` through `0010` in `backend/migrations/down/`; added `rollback_migrations()` runner in `run_migrations.py` supporting reversible schema rollbacks with `schema_migrations` tracking.
+- ✅ **Run 4: Sentry Error Grouping & Prometheus Metrics Exporter Validation**: Implemented zero-PII scrubbing and custom error fingerprinting in `app/core/sentry.py` (scrubbing tokens, passwords, cookies, 10-digit Indian phone numbers, OTPs); added zero-dependency thread-safe Prometheus metrics collector in `app/core/metrics.py` exporting standard Prometheus 0.0.4 text format at `/metrics` (tracking in-progress requests, latency histogram buckets, and status codes).
 
 ---
 

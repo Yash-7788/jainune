@@ -1,15 +1,18 @@
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
 from app.core.database import close_pool, create_pool
+from app.core.metrics import metrics_registry
 from app.core.redis import close_redis, create_redis
+from app.core.sentry import init_sentry
 
 
 class JsonFormatter(logging.Formatter):
@@ -36,15 +39,11 @@ if settings.environment == "production":
 async def lifespan(app: FastAPI):
     # Startup
     if getattr(settings, "sentry_dsn", ""):
-        try:
-            import sentry_sdk
-            sentry_sdk.init(
-                dsn=settings.sentry_dsn,
-                environment=settings.environment,
-                traces_sample_rate=0.1,
-            )
-        except Exception:
-            pass
+        init_sentry(
+            dsn=settings.sentry_dsn,
+            environment=settings.environment,
+            traces_sample_rate=0.1,
+        )
     await create_pool()
     await create_redis()
     yield
@@ -84,6 +83,30 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     return response
+
+
+# ── Prometheus metrics collection middleware ─────────────────────────────────
+
+@app.middleware("http")
+async def prometheus_metrics_middleware(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    metrics_registry.record_request_start()
+    start_time = time.monotonic()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration = time.monotonic() - start_time
+        metrics_registry.record_request_end(
+            method=request.method,
+            endpoint=request.url.path,
+            status=status_code,
+            duration_seconds=duration,
+        )
 
 
 # ── Standard response envelope helpers ───────────────────────────────────────
@@ -143,6 +166,17 @@ async def health():
             },
         },
     )
+
+
+# ── Prometheus Metrics Exposition ────────────────────────────────────────────
+
+@app.get("/metrics", include_in_schema=False)
+async def get_metrics():
+    content = metrics_registry.generate_prometheus_output(
+        version=settings.app_version,
+        environment=settings.environment,
+    )
+    return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 # ── Routers (registered after all imports to avoid circular deps) ─────────────
