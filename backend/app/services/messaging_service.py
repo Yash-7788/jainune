@@ -391,6 +391,11 @@ async def broadcast_promotional_campaign(
     Executes broadcast promotional marketing campaign across SMS, WhatsApp, and/or Email.
     Respects user account status and active segments.
     """
+    if cta_url:
+        from app.core.security import is_safe_public_url
+        if not is_safe_public_url(cta_url):
+            raise ValueError("Invalid cta_url: internal or loopback addresses forbidden (SSRF protection).")
+
     where_clause = "u.account_status = 'active'"
     params: list[Any] = []
     if target_segment == "free":

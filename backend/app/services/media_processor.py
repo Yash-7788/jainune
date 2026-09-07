@@ -209,6 +209,64 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def _validate_image_magic_bytes(data: bytes) -> bool:
+    if len(data) < 12:
+        return False
+    if data.startswith(b"\xff\xd8\xff"):
+        return True
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"mif1", b"msf1"):
+            return True
+    return False
+
+
+def process_and_sanitize_image(raw_data: bytes) -> bytes:
+    """
+    Sanitizes raw photo upload before moving to production:
+    1. Validates magic bytes (blocks masqueraded executables, HTML, ZIP bombs).
+    2. Limits maximum decompression dimensions to prevent memory exhaustion (25 MP).
+    3. Verifies file integrity against corrupt headers/streams.
+    4. Strips 100% of EXIF, GPS coordinates, and device metadata.
+    5. Re-encodes cleanly to standardized WebP.
+    """
+    import io
+    from PIL import Image
+
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except ImportError:
+        pass
+
+    if not _validate_image_magic_bytes(raw_data):
+        raise ValueError("Corrupted image header or unsupported file format.")
+
+    # Guard against decompression bombs (max 25 million pixels)
+    Image.MAX_IMAGE_PIXELS = 25_000_000
+
+    try:
+        # Pass 1: verify file integrity
+        with Image.open(io.BytesIO(raw_data)) as img:
+            img.verify()
+
+        # Pass 2: decode, strip metadata, and re-encode to WebP
+        with Image.open(io.BytesIO(raw_data)) as img:
+            out_buf = io.BytesIO()
+            rgb_img = img.convert("RGB")
+            # Saving to WebP without exif keyword strips all EXIF/GPS tags
+            rgb_img.save(out_buf, format="WEBP", quality=85)
+            return out_buf.getvalue()
+    except Image.DecompressionBombError as exc:
+        raise ValueError(f"Decompression bomb detected: {exc}") from exc
+    except Exception as exc:
+        raise ValueError(f"Failed to process and sanitize image: {exc}") from exc
+
+
 def _copy_to_production(quarantine_key: str, production_key: str, media_type: str = "photo") -> None:
     if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
         return
@@ -220,31 +278,17 @@ def _copy_to_production(quarantine_key: str, production_key: str, media_type: st
     )
     if media_type == "photo":
         try:
-            import io
-            from PIL import Image
-
-            try:
-                import pillow_heif
-                pillow_heif.register_heif_opener()
-            except ImportError:
-                pass
-
             # Download raw upload from quarantine
             obj = s3.get_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
             raw_data = obj["Body"].read()
 
-            # Open image, discard EXIF/metadata, re-encode to clean WebP
-            img = Image.open(io.BytesIO(raw_data))
-            out_buf = io.BytesIO()
-            # Saving to format without copying exif strips 100% of EXIF/GPS/IPTC
-            img.save(out_buf, format="WEBP", quality=85)
-            out_buf.seek(0)
+            clean_bytes = process_and_sanitize_image(raw_data)
 
             clean_key = production_key.rsplit(".", 1)[0] + ".webp"
             s3.put_object(
                 Bucket=settings.aws_s3_production_bucket,
                 Key=clean_key,
-                Body=out_buf.getvalue(),
+                Body=clean_bytes,
                 ContentType="image/webp",
             )
             return

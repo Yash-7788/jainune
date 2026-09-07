@@ -268,6 +268,35 @@ def get_trusted_client_ip(request) -> str:
     return "127.0.0.1"
 
 
+def is_safe_public_url(url: str | None) -> bool:
+    """
+    SSRF Protection:
+    Ensures URL uses http/https and does not target localhost,
+    internal cloud metadata (e.g. 169.254.169.254), or RFC 1918 private subnets.
+    """
+    if not url:
+        return True
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower().strip()
+        if not host:
+            return False
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "metadata.google.internal", "instance-data"):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            pass  # Standard domain name
+        return True
+    except Exception:
+        return False
+
+
 def __getattr__(name: str):
     if name == "get_current_user":
         from app.dependencies import get_current_user

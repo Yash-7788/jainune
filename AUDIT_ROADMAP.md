@@ -89,13 +89,13 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 - ✅ **Vector NaN Trap Elimination**: Replaced uninitialized `[0]*128` zero-vectors with normalized uniform unit vectors (`[0.088388]*128`, norm=1.0) and wrapped SQL cosine distance in `COALESCE`, permanently eliminating divide-by-zero `NaN` float outputs from candidate scoring and JSON serialization.
 
 
-### Phase 4: Pentest, OWASP & Attack Surface (6 Runs: 1–3 Complete, 4–6 Pending)
+### Phase 4: Pentest, OWASP & Attack Surface [100% COMPLETE]
 - ✅ **Run 1: Comprehensive IDOR Audit**: Enforced caller ownership checks across all UUID endpoints (`delete_media`, `get_media_status`, `chats._assert_participant`, `subscriptions.verify_payment`, self-block, self-report, and self-interaction rejections).
 - ✅ **Run 2: Rate Limit Evasion Tests via Header Manipulation**: Hardened `get_trusted_client_ip` using stdlib `ipaddress.ip_address` to sanitize candidate IPs against CRLF/Redis key injection and prevent spoofing by ignoring `X-Forwarded-For`/`CF-Connecting-IP` in production unless matched by Cloudflare edge origin secret.
 - ✅ **Run 3: SQL Injection / PostGIS Query String Audit**: Verified 100% parameterization (`$1, $2, ...`) across spatial distance/bounding queries (`ST_Distance`, `ST_DWithin`), bound dynamic UPDATE clauses to an immutable schema column whitelist (`_allowed_cols`), and parameterized promotional campaign limits.
-- **Run 4: Malicious Media Payload Tests**: PIL decompression bomb limits (`Image.MAX_IMAGE_PIXELS`), corrupted WebP/JPEG header fuzzing, magic byte enforcement, and automated EXIF GPS coordinate stripping.
-- **Run 5: SSRF & Webhook Signature Forgery Tests**: Strict HMAC-SHA256 signature enforcement across webhook ingress, rejection of localhost/private network callback destinations.
-- **Run 6: JWT Replay, Token Revocation & Security Headers**: Redis JTI blacklisting, RS256 algorithm enforcement (anti-alg-none/confusion), strict CORS origin lock, and HSTS/CSP response headers.
+- ✅ **Run 4: Malicious Media Payload Tests**: Added `process_and_sanitize_image` enforcing magic byte verification (`JPEG`, `PNG`, `WEBP`, `HEIC`), PIL decompression bomb limits (`Image.MAX_IMAGE_PIXELS = 25_000_000`), corrupted header rejection, and 100% EXIF/GPS coordinate stripping prior to production bucket synchronization.
+- ✅ **Run 5: SSRF & Webhook Signature Forgery Tests**: Strict HMAC-SHA256 signature enforcement across webhook ingress with `hmac.compare_digest`, and added `is_safe_public_url` blocking SSRF against loopback, RFC 1918 private subnets, and AWS/cloud metadata endpoints (`169.254.169.254`).
+- ✅ **Run 6: JWT Replay, Token Revocation & Security Headers**: Verified pyjwt algorithm confusion defense (`RS256` only, rejecting `none` and `HS256`), token replay rejection via Redis JTI blacklist, strict CORS allowed origins whitelist, and production security headers (`nosniff`, `DENY`, HSTS, CSP).
 
 ### Phase 5: Mobile Real-Device Stress & Native Edge Cases (5–7 Runs)
 - Low-memory terminations during camera capture and photo upload on budget Android devices.

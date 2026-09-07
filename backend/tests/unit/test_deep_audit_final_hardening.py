@@ -1359,6 +1359,197 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(feed_args[9], 50)
 
 
+    def test_35_malicious_media_payload_and_exif_stripping(self):
+        """Verify media sanitizer rejects corrupt headers, prevents decompression bombs, and strips EXIF GPS."""
+        import io
+        from PIL import Image
+        from app.services.media_processor import process_and_sanitize_image
+
+        # 1. Corrupt magic bytes / non-image masquerade rejected
+        with self.assertRaises(ValueError) as ctx:
+            process_and_sanitize_image(b"PK\x03\x04zip_bomb_payload_not_image")
+        self.assertIn("Corrupted image header", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            process_and_sanitize_image(b"<script>alert('xss')</script>")
+        self.assertIn("Corrupted image header", str(ctx.exception))
+
+        # 2. Corrupted WebP (valid RIFF header but broken/truncated payload)
+        broken_webp = b"RIFF\x18\x00\x00\x00WEBPVP8 \x0c\x00\x00\x00\x30\x01\x00\x9d\x01\x2a"
+        with self.assertRaises(ValueError):
+            process_and_sanitize_image(broken_webp)
+
+        # 3. Valid image with EXIF metadata is cleanly converted to WebP with 0 EXIF tags
+        valid_img = Image.new("RGB", (100, 100), color="blue")
+        exif = valid_img.getexif()
+        exif[0x010e] = "Camera Description"  # ImageDescription
+        exif[0x0132] = "2026:09:07 12:00:00"  # DateTime
+        in_buf = io.BytesIO()
+        valid_img.save(in_buf, format="JPEG", exif=exif)
+        jpeg_bytes = in_buf.getvalue()
+
+        clean_webp_bytes = process_and_sanitize_image(jpeg_bytes)
+        self.assertTrue(clean_webp_bytes.startswith(b"RIFF"))
+        self.assertEqual(clean_webp_bytes[8:12], b"WEBP")
+
+        # Verify EXIF is completely stripped in the result
+        with Image.open(io.BytesIO(clean_webp_bytes)) as sanitized_img:
+            sanitized_exif = sanitized_img.getexif()
+            self.assertEqual(len(sanitized_exif), 0)
+
+        # 4. Decompression bomb protection triggers DecompressionBombError
+        with patch("PIL.Image.open") as mock_open:
+            mock_open.side_effect = Image.DecompressionBombError("Too large")
+            fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00\x60\x00\x60\x00\x00"
+            with self.assertRaises(ValueError) as ctx:
+                process_and_sanitize_image(fake_jpeg)
+            self.assertIn("Decompression bomb detected", str(ctx.exception))
+
+    async def test_36_ssrf_and_webhook_signature_forgery(self):
+        """Verify SSRF blocklist on external URLs and HMAC-SHA256 webhook anti-tamper verification."""
+        from app.core.security import is_safe_public_url
+        from app.services.payment_service import verify_webhook_signature
+        from app.services.messaging_service import broadcast_promotional_campaign
+        from app.core.config import settings
+
+        # 1. SSRF URL validation
+        self.assertFalse(is_safe_public_url("http://127.0.0.1:8000/secret"))
+        self.assertFalse(is_safe_public_url("http://localhost/admin"))
+        self.assertFalse(is_safe_public_url("http://169.254.169.254/latest/meta-data/"))
+        self.assertFalse(is_safe_public_url("http://10.0.0.1/internal"))
+        self.assertFalse(is_safe_public_url("http://192.168.1.1/"))
+        self.assertFalse(is_safe_public_url("ftp://example.com/file"))
+        self.assertTrue(is_safe_public_url("https://jainune.com/invite"))
+        self.assertTrue(is_safe_public_url("https://app.jainune.com/welcome"))
+
+        # Campaign rejects internal SSRF cta_url
+        mock_conn = _create_mock_conn()
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        with self.assertRaises(ValueError) as ctx:
+            await broadcast_promotional_campaign(
+                pool=mock_pool,
+                campaign_name="SSRF Attempt",
+                title="Bad URL",
+                message="Test",
+                channels=["sms"],
+                cta_url="http://169.254.169.254/secret",
+            )
+        self.assertIn("Invalid cta_url", str(ctx.exception))
+
+        # 2. Webhook Signature Forgery
+        import hmac
+        import hashlib
+        payload = b'{"event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_123","amount":29900}}}}'
+        secret = "test_webhook_secret_key"
+
+        with patch.object(settings, "razorpay_webhook_secret", secret):
+            # Valid signature passes
+            valid_sig = hmac.HMAC(secret.encode(), payload, hashlib.sha256).hexdigest()
+            self.assertTrue(verify_webhook_signature(payload, valid_sig))
+
+            # Tampered payload fails
+            tampered_payload = b'{"event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_123","amount":1}}}}'
+            self.assertFalse(verify_webhook_signature(tampered_payload, valid_sig))
+
+            # Forged signature fails
+            self.assertFalse(verify_webhook_signature(payload, "forged_signature_hex"))
+
+            # Empty signature fails
+            self.assertFalse(verify_webhook_signature(payload, ""))
+
+    async def test_37_jwt_replay_token_revocation_and_security_headers(self):
+        """Verify algorithm confusion rejection, token revocation blacklist, and strict security headers."""
+        import jwt as pyjwt
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        from app.core.security import validate_access_token
+        from fastapi.security import HTTPAuthorizationCredentials
+        from starlette.testclient import TestClient
+        from app.main import app
+
+        user_id = str(uuid.uuid4())
+        jti = str(uuid.uuid4())
+
+        priv_key_obj = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        test_priv_pem = priv_key_obj.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+        test_pub_pem = priv_key_obj.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
+        with patch("app.core.security._RSA_PRIVATE_KEY", test_priv_pem), \
+             patch("app.core.security._RSA_PUBLIC_KEY", test_pub_pem):
+
+            # 1. Algorithm confusion attack: attacker passes token signed with HS256 (HMAC)
+            confused_token = pyjwt.encode(
+                {
+                    "sub": user_id,
+                    "jti": jti,
+                    "iss": "jainune-api",
+                    "aud": "jainune-client",
+                    "exp": 9999999999,
+                },
+                "attacker_secret_key_32_bytes_long!",
+                algorithm="HS256",
+            )
+            creds_confused = HTTPAuthorizationCredentials(scheme="Bearer", credentials=confused_token)
+            with self.assertRaises(HTTPException) as ctx:
+                await validate_access_token(creds_confused)
+            self.assertEqual(ctx.exception.status_code, 401)
+
+            # 2. Token replay after revocation via Redis blacklist
+            valid_token = pyjwt.encode(
+                {
+                    "sub": user_id,
+                    "jti": jti,
+                    "iss": "jainune-api",
+                    "aud": "jainune-client",
+                    "exp": 9999999999,
+                },
+                test_priv_pem,
+                algorithm="RS256",
+            )
+            creds_valid = HTTPAuthorizationCredentials(scheme="Bearer", credentials=valid_token)
+            mock_redis = AsyncMock()
+
+            # Active token: exists returns False -> success
+            mock_redis.exists.return_value = False
+            payload = await validate_access_token(creds_valid, redis=mock_redis)
+            self.assertEqual(payload["sub"], user_id)
+
+            # Blacklisted token: exists returns True -> 401 Revoked
+            mock_redis.exists.return_value = True
+            with self.assertRaises(HTTPException) as ctx:
+                await validate_access_token(creds_valid, redis=mock_redis)
+            self.assertEqual(ctx.exception.status_code, 401)
+            self.assertEqual(ctx.exception.detail, "Token has been revoked.")
+
+        # 3. Security response headers middleware
+        from app.main import add_security_headers
+        mock_req = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.headers = {}
+        async def mock_call_next(req):
+            return mock_resp
+
+        res = await add_security_headers(mock_req, mock_call_next)
+        self.assertEqual(res.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(res.headers.get("X-Frame-Options"), "DENY")
+        self.assertIn("max-age=31536000", res.headers.get("Strict-Transport-Security", ""))
+        self.assertIn("default-src 'none'", res.headers.get("Content-Security-Policy", ""))
+
+        # 4. CORS origin lock
+        from app.core.config import settings
+        self.assertNotIn("https://evil-hacker.com", settings.allowed_origins)
+        self.assertIn("https://app.jainune.com", settings.allowed_origins)
+        self.assertIn("https://jainune.com", settings.allowed_origins)
+
+
 if __name__ == "__main__":
     unittest.main()
 
