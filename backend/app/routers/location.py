@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
 from app.core.security import sliding_window_rate_limit
-from app.dependencies import CurrentUser, RedisDep
+from app.dependencies import get_current_user, RedisDep
 import asyncpg
 
 from app.main import ok
@@ -51,8 +51,8 @@ class LocationZoneResponse(BaseModel):
 async def verify_location(
     body: VerifyLocationRequest,
     request: Request,
-    current_user: CurrentUser,
     redis: RedisDep,
+    current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     """
