@@ -89,7 +89,7 @@ export async function performDeviceIntegrityCheck(): Promise<IntegrityCheckResul
 
   // 2. Active Debugger / Kali PTRACE Inspection
   try {
-    const debuggerAttached = checkDebuggerAttached();
+    const debuggerAttached = await checkDebuggerAttached();
     if (debuggerAttached) {
       details.isDebuggerAttached = true;
       violations.push("DEBUGGER_PTRACE_ATTACHED");
@@ -160,12 +160,12 @@ async function checkRootOrJailbreak(): Promise<boolean> {
 /**
  * Detects whether debugger is actively connected.
  */
-function checkDebuggerAttached(): boolean {
+async function checkDebuggerAttached(): Promise<boolean> {
   if (__DEV__) {
     return false; // Allow standard development in debug mode
   }
   if (NativeModules.JainuneSecurityModule?.isDebuggerAttached) {
-    return NativeModules.JainuneSecurityModule.isDebuggerAttached();
+    return await NativeModules.JainuneSecurityModule.isDebuggerAttached();
   }
   return false;
 }
