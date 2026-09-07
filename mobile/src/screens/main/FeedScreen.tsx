@@ -176,7 +176,15 @@ export default function FeedScreen() {
           setMatchCandidate(candidate);
         }
       } catch (err: any) {
-        if (err?._apiError?.code === "DAILY_LIMIT_REACHED") {
+        const errCode = err?._apiError?.code;
+        const errStatus = err?._apiError?.status || err?.status;
+        const errMsg = err?._apiError?.message?.toLowerCase() || "";
+        if (
+          errCode === "DAILY_LIMIT_REACHED" ||
+          errCode === "PAYMENT_REQUIRED" ||
+          errStatus === 402 ||
+          errMsg.includes("limit")
+        ) {
           setDailyLimitReached(true);
         }
       }
@@ -228,7 +236,16 @@ export default function FeedScreen() {
           setMatchCandidate(candidate);
         }
       } catch (err: any) {
-        if (err?._apiError?.code === "INSUFFICIENT_CREDITS" || err?._apiError?.code === "DAILY_LIMIT_REACHED") {
+        const errCode = err?._apiError?.code;
+        const errStatus = err?._apiError?.status || err?.status;
+        const errMsg = err?._apiError?.message?.toLowerCase() || "";
+        if (
+          errCode === "INSUFFICIENT_CREDITS" ||
+          errCode === "DAILY_LIMIT_REACHED" ||
+          errStatus === 402 ||
+          errMsg.includes("credit") ||
+          errMsg.includes("limit")
+        ) {
           setDailyLimitReached(true);
         }
       }

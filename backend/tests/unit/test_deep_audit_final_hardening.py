@@ -198,6 +198,58 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             client = _s3_client()
             self.assertIsNone(client)
 
+    async def test_07_delete_my_account_alias(self):
+        """Account deletion endpoint works via delete_my_account."""
+        from app.routers.users import delete_my_account
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id}
+
+        mock_pool = MagicMock()
+        mock_conn = _create_mock_conn()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        with patch("app.services.account_service.purge_user_account", new_callable=AsyncMock) as mock_purge:
+            mock_purge.return_value = {"status": "purged"}
+            res = await delete_my_account(
+                hard_delete=True,
+                current_user=current_user,
+                pool=mock_pool,
+                redis=mock_redis,
+            )
+            self.assertTrue(res["success"])
+            self.assertEqual(res["data"]["status"], "purged")
+
+    async def test_08_telemetry_event_ingestion(self):
+        """Telemetry router accepts valid events and queues to redis."""
+        from app.routers.telemetry import ingest_events, TelemetryBatch, TelemetryEvent
+
+        user_id = uuid.uuid4()
+        current_user = {"id": user_id}
+        mock_db = MagicMock()
+        mock_redis = AsyncMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+
+        with patch("app.routers.telemetry.sliding_window_rate_limit", new_callable=AsyncMock):
+            batch = TelemetryBatch(events=[
+                TelemetryEvent(
+                    event_type="photo_swipe",
+                    target_user_id=uuid.uuid4(),
+                    duration_ms=1200,
+                )
+            ])
+            res = await ingest_events(
+                batch=batch,
+                current_user=current_user,
+                db=mock_db,
+                redis=mock_redis,
+            )
+            self.assertEqual(res.accepted, 1)
+            self.assertEqual(res.dropped, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

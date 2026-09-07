@@ -303,6 +303,7 @@ async def set_fcm_token(
 
 
 @router.delete("/me", status_code=status.HTTP_200_OK)
+@router.post("/me/delete", status_code=status.HTTP_200_OK)
 async def delete_my_account(
     hard_delete: bool = Query(True, description="When True, immediately and permanently purges all user rows, media from S3, and Redis caches to free memory and disk."),
     current_user: dict = Depends(get_current_user),

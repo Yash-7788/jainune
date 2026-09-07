@@ -9,7 +9,7 @@ Production readiness divided into two sequential tiers:
 
 ## 2. Current Progress Checkpoint
 - **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
-- **Test Suite**: 154 unit tests passing with 0 errors and 0 regressions.
+- **Test Suite**: 156 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -29,6 +29,9 @@ Production readiness divided into two sequential tiers:
   - Dilemma voting concurrency race protection (`ON CONFLICT DO NOTHING`).
   - Realtime WebSocket lifecycle (`useWebSocket.ts`), chat list sync on focus (`ChatsScreen.tsx`).
   - Media quarantine & ephemeral reaper cloud client fail-safes.
+  - Account deletion dual-method alias (`DELETE /v1/users/me` & `POST /v1/users/me/delete`).
+  - Mobile client telemetry buffer, AppState auto-flush (`useTelemetry.ts`), and Redis stream ingestion.
+  - Feed screen 402/quota paywall triggers and subscription sheet activation.
 
 ---
 
