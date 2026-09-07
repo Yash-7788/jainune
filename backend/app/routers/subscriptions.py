@@ -8,6 +8,7 @@ POST /v1/subscriptions/webhook        → Razorpay server-to-server webhook (no 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -98,10 +99,10 @@ async def verify_payment(
     await sliding_window_rate_limit(
         f"ratelimit:subscriptions:verify:{current_user['user_id']}", 20, 60, redis
     )
-    # 1. Verify caller owns the order
+    # 1. Verify caller owns the order and validate amount
     async with pool.acquire() as conn:
         intent = await conn.fetchrow(
-            "SELECT user_id, status FROM payment_intents WHERE razorpay_order_id = $1",
+            "SELECT user_id, status, amount, plan_id FROM payment_intents WHERE razorpay_order_id = $1",
             body.razorpay_order_id,
         )
     if intent is None:
@@ -110,6 +111,10 @@ async def verify_payment(
     if str(intent["user_id"]) != str(current_user["user_id"]):
         log.warning("User %s attempted to verify order %s belonging to %s", current_user["user_id"], body.razorpay_order_id, intent["user_id"])
         raise HTTPException(status_code=403, detail="Order does not belong to the authenticated user")
+
+    plan = payment_service.PLAN_CATALOGUE.get(intent.get("plan_id"))
+    if plan and intent.get("amount") is not None and intent["amount"] != plan["amount"]:
+        raise HTTPException(status_code=400, detail="Payment intent amount mismatch with plan price")
 
     if intent["status"] == "captured":
         async with pool.acquire() as conn:
@@ -149,20 +154,34 @@ async def verify_payment(
     if not lock_acquired:
         raise HTTPException(status_code=409, detail="Payment verification is already in progress")
 
+    payment_entity: dict[str, Any] = {
+        "order_id": body.razorpay_order_id,
+        "id": body.razorpay_payment_id,
+    }
+    if intent.get("amount") is not None:
+        payment_entity["amount"] = intent["amount"]
+
+    try:
+        rzp = payment_service._rzp_client()
+        fetched = await asyncio.to_thread(rzp.payment.fetch, body.razorpay_payment_id)
+        if fetched and "amount" in fetched:
+            payment_entity["amount"] = fetched["amount"]
+    except Exception:
+        pass  # Fallback to intent amount if offline or rzp client unavailable
+
     try:
         await payment_service.process_payment_captured(
             event={
                 "payload": {
                     "payment": {
-                        "entity": {
-                            "order_id": body.razorpay_order_id,
-                            "id": body.razorpay_payment_id,
-                        }
+                        "entity": payment_entity,
                     }
                 }
             },
             pool=pool,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if r and lock_acquired:
             try:
@@ -242,6 +261,9 @@ async def razorpay_webhook(
 
         try:
             await payment_service.process_payment_captured(event, pool)
+        except ValueError as exc:
+            log.error("Payment validation error on webhook: %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc))
         finally:
             if r and order_lock_key and order_lock_acquired:
                 try:

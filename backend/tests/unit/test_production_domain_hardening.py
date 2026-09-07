@@ -336,6 +336,168 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
             await get_users_who_liked_me(current_user=user_dict, db=pool, redis=mock_redis)
         self.assertEqual(ctx.exception.status_code, 429)
 
+    async def test_o1_chat_moderation_nfkd_diacritics_and_original_masking(self):
+        """O-1: NFKD combining diacritics normalized correctly and original string characters masked."""
+        from app.services.chat_safety_filter import filter_chat_content
+        chat_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        # Combining accent mark sequence: 'i' + '\u0301' and 'a' + '\u0300'
+        content_decomposed = "call me on i\u0301nsta\u0300 now"
+        res = await filter_chat_content(content_decomposed, chat_id, user_id, None)
+        self.assertTrue(res.is_moderated)
+        self.assertEqual(res.content, "call me on ####### now")
+
+        # Precomposed unicode characters: 'í' and 'à'
+        content_precomposed = "call me on \u00ednst\u00e0 now"
+        res2 = await filter_chat_content(content_precomposed, chat_id, user_id, None)
+        self.assertTrue(res2.is_moderated)
+        self.assertEqual(res2.content, "call me on ##### now")
+
+    async def test_o2_media_processor_rejects_oversized_upload(self):
+        """O-2: Media processor checks actual S3 ContentLength and rejects oversized upload."""
+        from app.services.media_processor import _run_moderation
+        pool, conn = _make_mock_pool()
+        media_id = uuid.uuid4()
+
+        mock_s3 = MagicMock()
+        mock_s3.head_object.return_value = {"ContentLength": 15 * 1024 * 1024}
+
+        with patch("boto3.client", return_value=mock_s3), \
+             patch("app.services.media_processor.get_pool", return_value=pool), \
+             patch("app.services.media_processor._delete_from_quarantine") as mock_del:
+            await _run_moderation(media_id, "uploads/user/photo/test.jpg", "photo", uuid.uuid4())
+
+            update_sql = conn.execute.call_args[0][0]
+            self.assertIn("UPDATE user_media", update_sql)
+            self.assertIn("SET status = 'rejected'", update_sql)
+            self.assertIn("exceeds maximum allowed limit", conn.execute.call_args[0][1])
+            mock_del.assert_called_once_with("uploads/user/photo/test.jpg")
+
+    def test_o3_copy_to_production_refuses_unstripped_photo_fallback(self):
+        """O-3: _copy_to_production registers pillow-heif and raises ValueError if photo sanitization fails."""
+        from app.services.media_processor import _copy_to_production
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"corrupt_photo_bytes"))}
+
+        with patch("boto3.client", return_value=mock_s3):
+            with self.assertRaises(ValueError) as ctx:
+                _copy_to_production("quarantine/pic.heic", "prod/pic.webp", "photo")
+            self.assertIn("Failed to strip EXIF/GPS metadata from photo", str(ctx.exception))
+            mock_s3.copy_object.assert_not_called()
+
+    async def test_o4_payment_amount_reverification(self):
+        """O-4: process_payment_captured and verify_payment re-verify amounts against plan catalogue price."""
+        from app.services.payment_service import process_payment_captured
+        from app.routers.subscriptions import verify_payment
+        from app.models.schemas.payment import VerifyPaymentBody
+        pool, conn = _make_mock_pool()
+        user_id = uuid.uuid4()
+
+        # 1. process_payment_captured rejects mismatched intent amount
+        conn.fetchrow.return_value = {
+            "user_id": user_id,
+            "plan_id": "gold_monthly",
+            "status": "created",
+            "amount": 100,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            await process_payment_captured(
+                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 29900}}}},
+                pool=pool,
+            )
+        self.assertIn("does not match plan price", str(ctx.exception))
+
+        # 2. process_payment_captured rejects mismatched captured amount
+        conn.fetchrow.return_value = {
+            "user_id": user_id,
+            "plan_id": "gold_monthly",
+            "status": "created",
+            "amount": 29900,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            await process_payment_captured(
+                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 100}}}},
+                pool=pool,
+            )
+        self.assertIn("does not match expected plan price", str(ctx.exception))
+
+        # 3. verify_payment rejects intent amount mismatch
+        conn.fetchrow.return_value = {
+            "user_id": user_id,
+            "plan_id": "gold_monthly",
+            "status": "created",
+            "amount": 999,
+        }
+        body = VerifyPaymentBody(razorpay_order_id="order_123", razorpay_payment_id="pay_123", razorpay_signature="sig_123")
+        with self.assertRaises(HTTPException) as ctx:
+            await verify_payment(body=body, current_user={"user_id": user_id}, pool=pool)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("mismatch with plan price", ctx.exception.detail)
+
+    async def test_o5_refresh_token_concurrency_grace_and_theft(self):
+        """O-5: Refresh token race returns cached token during grace window; theft detected post-lock."""
+        from app.routers.auth import refresh_token_endpoint
+        from app.models.schemas.auth import TokenRefreshBody
+        import json, hashlib
+
+        pool, conn = _make_mock_pool()
+        user_id = uuid.uuid4()
+        token = "test_refresh_token_123"
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+        mock_redis = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[0, 1, 1, True])
+        mock_redis.pipeline.return_value = mock_pipe
+        mock_redis.set = AsyncMock()
+
+        mock_request = MagicMock()
+        mock_request.client.host = "127.0.0.1"
+
+        # Case 1: Within 15s grace window, return cached payload without error
+        grace_data = {"access_token": "acc_grace", "refresh_token": "ref_grace", "expires_in": 900}
+        mock_redis.get = AsyncMock(side_effect=lambda k: json.dumps(grace_data).encode() if f"auth:grace_rt:{token_hash}" in k else None)
+
+        res = await refresh_token_endpoint(TokenRefreshBody(refresh_token=token), mock_request, pool, mock_redis)
+        self.assertTrue(res["success"])
+        self.assertEqual(res["data"]["access_token"], "acc_grace")
+
+        # Case 2: Past grace window, revoked token triggers all-session revocation and 401
+        mock_redis.get = AsyncMock(side_effect=lambda k: str(user_id).encode() if f"auth:revoked_rt:{token_hash}" in k else None)
+        with self.assertRaises(HTTPException) as ctx:
+            await refresh_token_endpoint(TokenRefreshBody(refresh_token=token), mock_request, pool, mock_redis)
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("Refresh token reuse detected", ctx.exception.detail)
+        conn.execute.assert_any_call("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
+    async def test_o6_interaction_action_blocked_user_forbidden(self):
+        """O-6: record_interaction_action rejects like/pass/super_connect with blocked user (403)."""
+        from app.routers.interactions import record_interaction_action
+        from app.models.schemas.interaction import InteractionActionRequest
+        pool, conn = _make_mock_pool()
+        actor_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+
+        # user_blocks check returns 1 (blocked exists)
+        conn.fetchval.return_value = 1
+
+        mock_redis = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[0, 1, 1, True])
+        mock_redis.pipeline.return_value = mock_pipe
+
+        body = InteractionActionRequest(target_id=target_id, action="like")
+        with self.assertRaises(HTTPException) as ctx:
+            await record_interaction_action(
+                body=body,
+                current_user={"id": str(actor_id)},
+                db=pool,
+                redis=mock_redis,
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("Cannot interact with a blocked user", ctx.exception.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,13 +40,29 @@ _HOMOGLYPH_MAP = {
 
 
 def normalize_text_for_moderation(text: str) -> str:
-    """Strips zero-width characters and normalizes homoglyphs without corrupting numeric digits."""
-    cleaned = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060]", "", text)
-    cleaned = unicodedata.normalize("NFKD", cleaned)
-    for k, v in _HOMOGLYPH_MAP.items():
-        if k in cleaned:
-            cleaned = cleaned.replace(k, v)
-    return cleaned
+    norm, _ = normalize_text_with_mapping(text)
+    return norm
+
+
+def normalize_text_with_mapping(text: str) -> tuple[str, list[int]]:
+    """
+    Strips zero-width characters and normalizes homoglyphs and combining diacritics.
+    Returns (normalized_text, norm_to_orig_index_map).
+    """
+    zero_width = set("\u200b\u200c\u200d\ufeff\u00ad\u2060")
+    norm_chars: list[str] = []
+    norm_to_orig: list[int] = []
+    for orig_idx, orig_char in enumerate(text):
+        if orig_char in zero_width:
+            continue
+        decomp = unicodedata.normalize("NFKD", orig_char)
+        # Strip combining diacritical marks (e.g. accents on í, à)
+        base = "".join(c for c in decomp if not unicodedata.combining(c))
+        for ch in base:
+            ch = _HOMOGLYPH_MAP.get(ch, ch)
+            norm_chars.append(ch)
+            norm_to_orig.append(orig_idx)
+    return "".join(norm_chars), norm_to_orig
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +221,7 @@ async def filter_chat_content(
         return ModerationResult(content="", is_moderated=False)
 
     # Normalized text for pattern matching (unicode homoglyphs & zero-width chars)
-    normalized = normalize_text_for_moderation(content)
+    normalized, norm_to_orig = normalize_text_with_mapping(content)
 
     # -------------------------------------------------------------------------
     # 1. Single-character / single-digit stealth tracking (Roblox style)
@@ -326,19 +342,23 @@ async def filter_chat_content(
             else:
                 merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], e))
 
-        # If lengths match exactly (homoglyphs 1:1), apply directly to content; otherwise mask normalized
-        if len(content) == len(normalized):
-            chars = list(content)
-            for s, e in merged_spans:
-                for i in range(s, min(e, len(chars))):
-                    chars[i] = "#"
-            masked_content = "".join(chars)
-        else:
-            chars = list(normalized)
-            for s, e in merged_spans:
-                for i in range(s, min(e, len(chars))):
-                    chars[i] = "#"
-            masked_content = "".join(chars)
+        mask_indices: set[int] = set()
+        for s, e in merged_spans:
+            if s < len(norm_to_orig) and e - 1 < len(norm_to_orig):
+                orig_start = norm_to_orig[s]
+                orig_end = norm_to_orig[e - 1]
+                while orig_end + 1 < len(content) and unicodedata.combining(content[orig_end + 1]):
+                    orig_end += 1
+                for idx in range(orig_start, orig_end + 1):
+                    mask_indices.add(idx)
+            else:
+                for i in range(s, min(e, len(norm_to_orig))):
+                    mask_indices.add(norm_to_orig[i])
+
+        chars = list(content)
+        for idx in mask_indices:
+            chars[idx] = "#"
+        masked_content = "".join(chars)
     else:
         masked_content = content
 

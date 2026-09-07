@@ -53,6 +53,31 @@ _BLOCKED_LABELS = {
 }
 
 
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024   # 10 MB
+_MAX_VOICE_BYTES = 5 * 1024 * 1024    # 5 MB
+
+
+def _check_s3_size(s3_key: str, media_type: str) -> tuple[bool, str | None]:
+    """Verify actual uploaded object size in S3 quarantine bucket."""
+    s3 = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    try:
+        head = s3.head_object(Bucket=settings.aws_s3_quarantine_bucket, Key=s3_key)
+        actual_size = head.get("ContentLength", 0)
+        max_bytes = _MAX_PHOTO_BYTES if media_type == "photo" else _MAX_VOICE_BYTES
+        if actual_size <= 0:
+            return False, "Upload file is empty"
+        if actual_size > max_bytes:
+            return False, f"Upload size {actual_size} bytes exceeds maximum allowed limit of {max_bytes} bytes"
+        return True, None
+    except Exception as e:
+        return False, f"Failed to verify upload object size: {e}"
+
+
 async def enqueue_moderation(
     media_id: uuid.UUID,
     s3_key: str,
@@ -75,6 +100,22 @@ async def _run_moderation(
     """Executes the full moderation pipeline in a background task."""
     db = get_pool()
     try:
+        # Check actual S3 object size against maximum limits (O-2)
+        size_ok, size_reason = await asyncio.to_thread(_check_s3_size, s3_key, media_type)
+        if not size_ok:
+            async with db.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE user_media
+                    SET status = 'rejected',
+                        rejection_reason = $1
+                    WHERE id = $2
+                    """,
+                    size_reason, media_id,
+                )
+            await asyncio.to_thread(_delete_from_quarantine, s3_key)
+            return
+
         if media_type == "photo":
             approved, reason = await asyncio.to_thread(
                 _rekognition_check, s3_key
@@ -175,6 +216,12 @@ def _copy_to_production(quarantine_key: str, production_key: str, media_type: st
             import io
             from PIL import Image
 
+            try:
+                import pillow_heif
+                pillow_heif.register_heif_opener()
+            except ImportError:
+                pass
+
             # Download raw upload from quarantine
             obj = s3.get_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
             raw_data = obj["Body"].read()
@@ -194,8 +241,9 @@ def _copy_to_production(quarantine_key: str, production_key: str, media_type: st
                 ContentType="image/webp",
             )
             return
-        except Exception:
-            pass  # Fallback to S3 copy if Pillow parsing not applicable
+        except Exception as exc:
+            # Never fall back to copying raw unstripped photos with EXIF to production
+            raise ValueError(f"Failed to strip EXIF/GPS metadata from photo: {exc}")
 
     s3.copy_object(
         CopySource={
@@ -206,6 +254,7 @@ def _copy_to_production(quarantine_key: str, production_key: str, media_type: st
         Key=production_key,
         MetadataDirective="REPLACE",  # Strip S3 user metadata
     )
+
 
 
 def _delete_from_quarantine(s3_key: str) -> None:

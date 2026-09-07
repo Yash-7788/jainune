@@ -304,7 +304,7 @@ async def process_payment_captured(
     async with pool.acquire() as conn:
         async with conn.transaction():
             intent = await conn.fetchrow(
-                "SELECT user_id, plan_id, status FROM payment_intents WHERE razorpay_order_id = $1 FOR UPDATE",
+                "SELECT user_id, plan_id, status, amount FROM payment_intents WHERE razorpay_order_id = $1 FOR UPDATE",
                 order_id,
             )
             if intent is None:
@@ -319,6 +319,20 @@ async def process_payment_captured(
             if plan is None:
                 log.error("Unknown plan %s for order_id=%s", intent["plan_id"], order_id)
                 return
+
+            expected_amount = plan["amount"]
+
+            # Re-verify intent amount matches plan price (O-4)
+            if intent.get("amount") is not None and intent["amount"] != expected_amount:
+                log.error("Intent amount %s differs from plan %s price %s", intent["amount"], intent["plan_id"], expected_amount)
+                raise ValueError(f"Intent amount {intent['amount']} does not match plan price {expected_amount}")
+
+            # Re-verify captured payment amount matches plan price (O-4)
+            captured_amount = payment.get("amount")
+            if captured_amount is not None and int(captured_amount) != expected_amount:
+                log.error("Captured amount %s differs from plan %s price %s", captured_amount, intent["plan_id"], expected_amount)
+                raise ValueError(f"Captured payment amount {captured_amount} does not match expected plan price {expected_amount}")
+
 
             plan_type = plan.get("type", "subscription")
 

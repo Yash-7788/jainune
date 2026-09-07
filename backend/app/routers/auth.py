@@ -429,7 +429,14 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
 
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
 
-    # 1. Check for replay/reuse of an already-rotated token (Token Family Theft Detection)
+    # 1. Check if token was recently rotated within concurrency grace window (15s)
+    cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
+    if cached_grace:
+        import json
+        payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
+        return ok(payload)
+
+    # 2. Check for replay/reuse of an already-rotated token past grace window (Theft Detection)
     reused_user_id = await redis.get(f"auth:revoked_rt:{token_hash}")
     if reused_user_id:
         reused_uid = reused_user_id.decode() if isinstance(reused_user_id, bytes) else reused_user_id
@@ -452,7 +459,23 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
             )
 
             if not row or row["expires_at"] < datetime.now(timezone.utc):
-                # Possible theft: purge all sessions for user if token was already used
+                # Concurrency check: If winner committed while loser waited on lock
+                cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
+                if cached_grace:
+                    import json
+                    payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
+                    return ok(payload)
+
+                # Recheck revocation/reuse post-lock (O-5)
+                reused_user_id = await redis.get(f"auth:revoked_rt:{token_hash}")
+                if reused_user_id:
+                    reused_uid = reused_user_id.decode() if isinstance(reused_user_id, bytes) else reused_user_id
+                    await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", uuid.UUID(reused_uid))
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Refresh token reuse detected. All sessions revoked.",
+                    )
+
                 if row:
                     await conn.execute(
                         "DELETE FROM refresh_tokens WHERE user_id = $1",
@@ -479,18 +502,27 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 new_hash, new_expires, user_id,
             )
 
-    # 2. Mark old token hash as revoked in Redis with TTL matching validity to catch any replay
-    await redis.set(
-        f"auth:revoked_rt:{token_hash}",
-        str(user_id),
-        ex=settings.refresh_token_expire_days * 86400,
-    )
+            resp_data = AccessTokenResponse(
+                access_token=access_token,
+                refresh_token=new_refresh,
+                expires_in=settings.access_token_expire_minutes * 60,
+            ).model_dump()
 
-    return ok(AccessTokenResponse(
-        access_token=access_token,
-        refresh_token=new_refresh,
-        expires_in=settings.access_token_expire_minutes * 60,
-    ).model_dump())
+            # Set grace window (15s) and revocation record before releasing lock
+            import json
+            await redis.set(
+                f"auth:grace_rt:{token_hash}",
+                json.dumps(resp_data),
+                ex=15,
+            )
+            await redis.set(
+                f"auth:revoked_rt:{token_hash}",
+                str(user_id),
+                ex=settings.refresh_token_expire_days * 86400,
+            )
+
+    return ok(resp_data)
+
 
 
 # ── POST /v1/auth/logout ──────────────────────────────────────────────────────

@@ -134,6 +134,22 @@ async def record_interaction_action(
             # Lock user row to serialize concurrent interactions and credit deductions
             await conn.execute("SELECT id FROM users WHERE id = $1 FOR UPDATE", actor_id)
 
+            # ── Check user blocks ────────────────────────────────────────────────
+            blocked = await conn.fetchval(
+                """
+                SELECT 1 FROM user_blocks
+                WHERE (blocker_id = $1 AND blocked_id = $2)
+                   OR (blocker_id = $2 AND blocked_id = $1)
+                LIMIT 1
+                """,
+                actor_id, target_id,
+            )
+            if blocked:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot interact with a blocked user.",
+                )
+
             # ── Idempotency check ────────────────────────────────────────────────
             existing = await conn.fetchrow(
                 "SELECT id FROM interactions WHERE actor_id = $1 AND target_id = $2",
