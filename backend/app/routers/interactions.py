@@ -23,6 +23,24 @@ from app.services.core_people_finder import invalidate_feed_cache
 router = APIRouter(prefix="/v1/interactions", tags=["interactions"])
 
 
+def _calc_compatibility(caller: dict, target_row: dict) -> dict:
+    score = 72
+    shared = ["Jain Values"]
+    caller_sect = caller.get("community_sect")
+    target_sect = target_row.get("community_sect")
+    if caller_sect and target_sect and caller_sect == target_sect:
+        score += 14
+        shared.append("Same Sect")
+    caller_diet = caller.get("dietary_strictness")
+    target_diet = target_row.get("dietary_strictness")
+    if caller_diet and target_diet and caller_diet == target_diet:
+        score += 10
+        shared.append("Shared Dietary Practice")
+    if target_row.get("is_photo_verified"):
+        score += 4
+    return {"values_alignment_percentage": min(score, 99), "shared_traditions": shared}
+
+
 # ---------------------------------------------------------------------------
 # Behavior vector EMA update helper
 # ---------------------------------------------------------------------------
@@ -352,7 +370,7 @@ async def get_my_matches(
             "photos": photos_val or [],
             "prompts": [],
             "voice_snapshot": None,
-            "compatibility": {"values_alignment_percentage": 94, "shared_traditions": ["Paryushan", "Navkar Mantra"]},
+            "compatibility": _calc_compatibility(current_user, r),
             "is_verified": r.get("is_photo_verified", False),
             "chat_id": str(r["chat_id"]) if r.get("chat_id") else None,
             "matched_at": r["created_at"].isoformat() if r.get("created_at") else None,
@@ -436,7 +454,7 @@ async def get_users_who_liked_me(
                 "photos": photos_val or [],
                 "prompts": [],
                 "voice_snapshot": None,
-                "compatibility": {"values_alignment_percentage": 90, "shared_traditions": ["Jain Values"]},
+                "compatibility": _calc_compatibility(current_user, r),
                 "is_verified": r.get("is_photo_verified", False),
                 "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
             })

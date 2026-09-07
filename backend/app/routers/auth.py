@@ -154,7 +154,11 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 
 @router.post("/email/otp/request")
 async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: RedisDep) -> dict:
-    is_bot, bot_msg = verify_bot_integrity(dict(request.headers), body.turnstile_token)
+    is_bot, bot_msg = verify_bot_integrity(
+        dict(request.headers),
+        body.turnstile_token,
+        is_production=settings.environment == "production",
+    )
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
@@ -296,7 +300,11 @@ def _verify_apple_token(id_token: str) -> dict:
 
 @router.post("/google")
 async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict:
-    is_bot, bot_msg = verify_bot_integrity(dict(request.headers), body.turnstile_token)
+    is_bot, bot_msg = verify_bot_integrity(
+        dict(request.headers),
+        body.turnstile_token,
+        is_production=settings.environment == "production",
+    )
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
@@ -351,7 +359,11 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
 
 @router.post("/apple")
 async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
-    is_bot, bot_msg = verify_bot_integrity(dict(request.headers), body.turnstile_token)
+    is_bot, bot_msg = verify_bot_integrity(
+        dict(request.headers),
+        body.turnstile_token,
+        is_production=settings.environment == "production",
+    )
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 

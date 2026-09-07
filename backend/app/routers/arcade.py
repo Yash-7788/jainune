@@ -351,6 +351,7 @@ async def spin_serendipity_wheel(
                     SELECT id, first_name, city
                     FROM users
                     WHERE id != $1 AND account_status = 'active'
+                    ORDER BY id
                     OFFSET $2 LIMIT 1
                     """,
                     current_user["user_id"],

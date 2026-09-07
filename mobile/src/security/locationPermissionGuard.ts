@@ -111,12 +111,19 @@ export async function verifyCoordinatesWithServer(
   }
 
   try {
+    const { getAccessToken } = require("../api/client");
+    const token = await getAccessToken().catch(() => null);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const response = await fetch(`${API_BASE_URL}/v1/location/verify`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
+      headers,
       body: JSON.stringify({
         latitude: coords.latitude,
         longitude: coords.longitude,

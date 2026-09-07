@@ -10,10 +10,12 @@ Active Launch Zones:
 from __future__ import annotations
 
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
+from app.core.security import sliding_window_rate_limit
+from app.dependencies import RedisDep
 import asyncpg
 
 from app.main import ok
@@ -48,6 +50,8 @@ class LocationZoneResponse(BaseModel):
 @router.post("/verify", summary="Verify GPS coordinates against active operational zones")
 async def verify_location(
     body: VerifyLocationRequest,
+    request: Request,
+    redis: RedisDep,
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     """
@@ -56,6 +60,14 @@ async def verify_location(
     - If coordinates are inside Mumbai MMR, Pune PCMC, or Bengaluru: returns allowed=True.
     - If outside: returns allowed=False and automatically logs entry to location_waitlist.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"rl:loc_verify:{client_ip}"
+    if not await sliding_window_rate_limit(redis, rate_key, limit=15, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many location verification requests. Please wait a minute.",
+        )
+
     # 1. Anti-spoofing & integrity gate
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,

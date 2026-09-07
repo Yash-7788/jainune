@@ -73,11 +73,18 @@ async def websocket_chat(
     redis = get_redis()
 
     # ── 1. Origin validation & Accept ─────────────────────────────────────────
+    from urllib.parse import urlparse
     from app.core.config import settings
     origin = websocket.headers.get("origin")
     if origin:
-        allowed = settings.allowed_origins + ["jainune://", "localhost", "127.0.0.1"]
-        if not any(a in origin for a in allowed):
+        parsed = urlparse(origin)
+        host = (parsed.netloc or parsed.path).split(":")[0].lower()
+        allowed_hosts = {
+            (urlparse(a).netloc or a).split(":")[0].lower()
+            for a in settings.allowed_origins
+        }
+        allowed_hosts.update({"localhost", "127.0.0.1"})
+        if host not in allowed_hosts and not origin.startswith("jainune://"):
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Origin not allowed.")
             return
 

@@ -15,7 +15,7 @@ android {
     namespace "com.jainune"
 
     defaultConfig {
-        applicationId "com.jainune"
+        applicationId "com.jainune.app"
         minSdkVersion 24       // Android 7.0 — covers 99%+ of current devices
         targetSdkVersion 35    // Android 15 (Target API 35/36 compliant)
         versionCode 1

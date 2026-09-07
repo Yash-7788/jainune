@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_pool
 from app.core.redis import get_redis
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import get_current_user
 from app.models.schemas.payment import SubscriptionStatusResponse, SubscriptionTier
 from app.models.schemas.user import UserProfileResponse, UpdatePromptsBody
@@ -334,12 +335,19 @@ async def get_public_profile(
     user_id: UUID,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis = Depends(get_redis),
 ):
     """
     Public card view — only fields visible to other users.
     Used by the chat/profile deep-link flow.
     """
     caller_id = current_user.get("user_id") or current_user.get("id")
+    rate_key = f"rl:user_public:{caller_id}"
+    if not await sliding_window_rate_limit(redis, rate_key, limit=30, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for profile views.",
+        )
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """

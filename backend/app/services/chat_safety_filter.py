@@ -295,13 +295,40 @@ async def filter_chat_content(
             requires_subscription=False,
         )
 
-    # Mask detected sensitive segments to '#'
-    masked_content = content
-    masked_content = _RE_PHONE.sub(_mask_match, masked_content)
-    masked_content = _RE_FULL_PLATFORMS.sub(_mask_match, masked_content)
-    masked_content = _RE_SHORTHAND.sub(_mask_match, masked_content)
+    # Mask detected sensitive segments to '#' based on matches in normalized text
+    spans: list[tuple[int, int]] = []
+    for regex in [_RE_PHONE, _RE_FULL_PLATFORMS, _RE_SHORTHAND]:
+        for m in regex.finditer(normalized):
+            spans.append(m.span())
     if has_address:
-        masked_content = _RE_ADDRESS.sub(_mask_match, masked_content)
+        for m in _RE_ADDRESS.finditer(normalized):
+            spans.append(m.span())
+
+    if spans:
+        # Merge overlapping spans
+        spans.sort(key=lambda s: s[0])
+        merged_spans: list[tuple[int, int]] = []
+        for s, e in spans:
+            if not merged_spans or s > merged_spans[-1][1]:
+                merged_spans.append((s, e))
+            else:
+                merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], e))
+
+        # If lengths match exactly (homoglyphs 1:1), apply directly to content; otherwise mask normalized
+        if len(content) == len(normalized):
+            chars = list(content)
+            for s, e in merged_spans:
+                for i in range(s, min(e, len(chars))):
+                    chars[i] = "#"
+            masked_content = "".join(chars)
+        else:
+            chars = list(normalized)
+            for s, e in merged_spans:
+                for i in range(s, min(e, len(chars))):
+                    chars[i] = "#"
+            masked_content = "".join(chars)
+    else:
+        masked_content = content
 
     return ModerationResult(
         content=masked_content,

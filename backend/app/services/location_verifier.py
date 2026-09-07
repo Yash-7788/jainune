@@ -1,8 +1,8 @@
 """
 Location verification service — geofencing for initial operational launch zones:
-  1. Mumbai Metropolitan Region (MMR) — 75 km radius
-  2. Pune & Pimpri-Chinchwad (PCMC)   — 50 km radius
-  3. Bengaluru Metropolitan Area       — 60 km radius
+  1. Mumbai Metropolitan Region (MMR) — 100 km radius
+  2. Pune & Pimpri-Chinchwad (PCMC)   — 100 km radius
+  3. Bengaluru Metropolitan Area       — 100 km radius
 """
 
 from __future__ import annotations

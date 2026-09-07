@@ -39,7 +39,7 @@ public class MainActivity extends ReactActivity {
 
   @Override
   protected String getMainComponentName() {
-    return "jainune";
+    return "main";
   }
 
   @Override

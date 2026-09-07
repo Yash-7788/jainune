@@ -30,6 +30,10 @@ except (FileNotFoundError, OSError):
         raise RuntimeError(f"FATAL: Production JWT public key missing at {settings.jwt_public_key_path}")
     _RSA_PUBLIC_KEY = b""
 
+if settings.environment == "production":
+    if not settings.otp_pepper_secret or settings.otp_pepper_secret == "default_test_pepper_secret_32_bytes_len":
+        raise RuntimeError("FATAL: Insecure or default otp_pepper_secret in production environment.")
+
 
 # ── OTP ─────────────────────────────────────────────────────────────────────
 
