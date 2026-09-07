@@ -89,10 +89,10 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 - ✅ **Vector NaN Trap Elimination**: Replaced uninitialized `[0]*128` zero-vectors with normalized uniform unit vectors (`[0.088388]*128`, norm=1.0) and wrapped SQL cosine distance in `COALESCE`, permanently eliminating divide-by-zero `NaN` float outputs from candidate scoring and JSON serialization.
 
 
-### Phase 4: Pentest, OWASP & Attack Surface (5–6 Runs)
-- Comprehensive IDOR audit: verify all UUID endpoints check caller ownership.
-- Rate limit evasion tests via header manipulation (`X-Forwarded-For` spoofing).
-- SQL injection / PostGIS query string audit.
+### Phase 4: Pentest, OWASP & Attack Surface (Runs 1–3 Complete)
+- ✅ **Comprehensive IDOR Audit**: Enforced caller ownership checks across all UUID endpoints (`delete_media`, `get_media_status`, `chats._assert_participant`, `subscriptions.verify_payment`, self-block, self-report, and self-interaction rejections).
+- ✅ **Rate Limit Evasion Tests via Header Manipulation**: Hardened `get_trusted_client_ip` using stdlib `ipaddress.ip_address` to sanitize candidate IPs against CRLF/Redis key injection and prevent spoofing by ignoring `X-Forwarded-For`/`CF-Connecting-IP` in production unless matched by Cloudflare edge origin secret.
+- ✅ **SQL Injection / PostGIS Query String Audit**: Verified 100% parameterization (`$1, $2, ...`) across spatial distance/bounding queries (`ST_Distance`, `ST_DWithin`), bound dynamic UPDATE clauses to an immutable schema column whitelist (`_allowed_cols`), and parameterized promotional campaign limits.
 - Malicious media payload tests (ZIP bombs, corrupted WebP headers, EXIF GPS leaks).
 
 ### Phase 5: Mobile Real-Device Stress & Native Edge Cases (5–7 Runs)

@@ -1113,6 +1113,252 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("UPDATE users SET fcm_token = NULL" in s for s in executed_sqls))
 
 
+    async def test_32_idor_boundary_protections(self):
+        """Verify strict IDOR rejection across media, chat, payment, reporting, and interaction boundaries."""
+        from app.routers.media import delete_media
+        from app.routers.chats import _assert_participant
+        from app.routers.subscriptions import verify_payment, VerifyPaymentBody
+        from app.routers.users import block_user
+        from app.routers.interactions import record_interaction_action
+        from app.services.dignity_engine import file_report
+        from app.models.schemas.interaction import InteractionActionRequest
+
+        user_a = uuid.uuid4()
+        user_b = uuid.uuid4()
+        chat_id = uuid.uuid4()
+        media_id = uuid.uuid4()
+
+        mock_conn = _create_mock_conn()
+        mock_db = MagicMock()
+        mock_db.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        # 1. Media IDOR: deleting unowned media returns 404
+        mock_conn.fetchrow.return_value = None
+        with patch("app.routers.media.sliding_window_rate_limit", new_callable=AsyncMock):
+            with self.assertRaises(HTTPException) as ctx:
+                await delete_media(media_id=media_id, current_user={"id": str(user_a)}, db=mock_db, redis=mock_redis)
+            self.assertEqual(ctx.exception.status_code, 404)
+
+        # 2. Chat IDOR: unauthorized participant access returns 404
+        mock_conn.fetchrow.return_value = None
+        with self.assertRaises(HTTPException) as ctx:
+            await _assert_participant(chat_id=chat_id, user_id=user_a, db=mock_db)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+        # 3. Subscription IDOR: verifying another user's payment intent returns 403
+        mock_conn.fetchrow.return_value = {
+            "user_id": str(user_b),
+            "status": "created",
+            "amount": 29900,
+            "plan_id": "gold_monthly",
+        }
+        body = VerifyPaymentBody(
+            razorpay_order_id="order_foreign_123",
+            razorpay_payment_id="pay_123",
+            razorpay_signature="sig_123",
+        )
+        with patch("app.routers.subscriptions.sliding_window_rate_limit", new_callable=AsyncMock):
+            with self.assertRaises(HTTPException) as ctx:
+                await verify_payment(
+                    body=body,
+                    current_user={"user_id": str(user_a)},
+                    pool=mock_db,
+                    redis=mock_redis,
+                )
+            self.assertEqual(ctx.exception.status_code, 403)
+
+        # 4. Self-reporting is rejected with ValueError
+        with self.assertRaises(ValueError) as ctx_err:
+            await file_report(
+                reporter_id=user_a,
+                reported_id=user_a,
+                reason="harassment",
+                detail="self",
+                pool=mock_db,
+            )
+        self.assertIn("Cannot report yourself", str(ctx_err.exception))
+
+        # 5. Self-blocking returns 400
+        with self.assertRaises(HTTPException) as ctx:
+            await block_user(
+                user_id=user_a,
+                current_user={"user_id": str(user_a)},
+                pool=mock_db,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # 6. Self-interaction returns 400
+        with patch("app.routers.interactions.sliding_window_rate_limit", new_callable=AsyncMock):
+            with self.assertRaises(HTTPException) as ctx:
+                await record_interaction_action(
+                    body=InteractionActionRequest(target_id=user_a, action="like"),
+                    current_user={"id": str(user_a)},
+                    db=mock_db,
+                    redis=mock_redis,
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_33_rate_limit_evasion_and_header_spoofing(self):
+        """Verify client IP resolver prevents header spoofing and sanitizes candidate IPs with native ipaddress."""
+        from app.core.security import get_trusted_client_ip, _clean_ip
+        from app.core.config import settings
+
+        # Direct IP validation and CRLF sanitization
+        self.assertEqual(_clean_ip("203.0.113.195"), "203.0.113.195")
+        self.assertEqual(_clean_ip("2001:db8::1"), "2001:db8::1")
+        self.assertIsNone(_clean_ip("203.0.113.195\r\nSET evil 1"))
+        self.assertIsNone(_clean_ip("not_an_ip_address"))
+        self.assertIsNone(_clean_ip("999.999.999.999"))
+
+        # Mock request objects
+        class MockClient:
+            def __init__(self, host):
+                self.host = host
+
+        class MockRequest:
+            def __init__(self, headers, host="192.168.1.50"):
+                self.headers = headers
+                self.client = MockClient(host)
+
+        # 1. In production without origin secret match, proxy headers are ignored (spoofing prevented)
+        with patch.object(settings, "environment", "production"), \
+             patch.object(settings, "cloudflare_origin_secret", "prod_secret_token"):
+            # Attacker provides spoofed X-Forwarded-For and CF-Connecting-IP
+            req_spoofed = MockRequest(
+                headers={
+                    "x-forwarded-for": "198.51.100.77",
+                    "cf-connecting-ip": "198.51.100.88",
+                },
+                host="10.0.0.5",
+            )
+            self.assertEqual(get_trusted_client_ip(req_spoofed), "10.0.0.5")
+
+            # 2. Legitimate reverse proxy with matching edge origin secret is trusted
+            req_legit_cf = MockRequest(
+                headers={
+                    "x-edge-secret": "prod_secret_token",
+                    "cf-connecting-ip": "203.0.113.42",
+                },
+                host="10.0.0.5",
+            )
+            self.assertEqual(get_trusted_client_ip(req_legit_cf), "203.0.113.42")
+
+            req_legit_xff = MockRequest(
+                headers={
+                    "x-origin-secret": "prod_secret_token",
+                    "x-forwarded-for": "203.0.113.99, 10.0.0.1",
+                },
+                host="10.0.0.5",
+            )
+            self.assertEqual(get_trusted_client_ip(req_legit_xff), "203.0.113.99")
+
+            # 3. Corrupted or injection proxy header with matching secret falls back to client host
+            req_corrupted = MockRequest(
+                headers={
+                    "x-edge-secret": "prod_secret_token",
+                    "cf-connecting-ip": "corrupted_ip\r\nINJECT",
+                },
+                host="10.0.0.5",
+            )
+            self.assertEqual(get_trusted_client_ip(req_corrupted), "10.0.0.5")
+
+    async def test_34_sql_injection_and_postgis_parameterization(self):
+        """Verify strict SQL query parameterization, PostGIS placeholder binding, and column whitelisting."""
+        from pydantic import ValidationError
+        from app.routers.users import UpdateProfileBody, update_my_profile
+        from app.services.messaging_service import broadcast_promotional_campaign
+        from app.services.core_people_finder import fetch_recommended_feed
+
+        # 1. Column injection blocked by Pydantic extra='forbid'
+        with self.assertRaises(ValidationError):
+            UpdateProfileBody(first_name="Aarav", injected_column="malicious_val")
+
+        # 2. Whitelist enforcement in update_my_profile dynamic SET clause
+        mock_conn = _create_mock_conn()
+        mock_conn.execute.return_value = "UPDATE 1"
+        mock_conn.fetchrow.return_value = {"id": uuid.uuid4(), "first_name": "Aarav"}
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        executed_queries = []
+        async def mock_execute(sql, *args):
+            executed_queries.append((sql, args))
+            return "UPDATE 1"
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+
+        user_id = uuid.uuid4()
+        await update_my_profile(
+            body=UpdateProfileBody(first_name="Aarav", bio="New bio"),
+            current_user={"user_id": user_id},
+            pool=mock_pool,
+        )
+
+        self.assertEqual(len(executed_queries), 1)
+        sql, args = executed_queries[0]
+        # Must be parameterized with $1, $2, $3 and no raw strings
+        self.assertIn("first_name = $2", sql)
+        self.assertIn("bio = $3", sql)
+        self.assertIn("WHERE id = $1", sql)
+        self.assertEqual(args[0], user_id)
+        self.assertEqual(args[1], "Aarav")
+        self.assertEqual(args[2], "New bio")
+
+        # 3. Messaging campaign limit is parameterized as $N
+        executed_campaign_queries = []
+        async def mock_fetch(sql, *args):
+            executed_campaign_queries.append((sql, args))
+            return []
+
+        mock_conn.fetch = AsyncMock(side_effect=mock_fetch)
+        await broadcast_promotional_campaign(
+            pool=mock_pool,
+            campaign_name="Diwali Special",
+            title="Celebrate",
+            message="Join community",
+            channels=["sms"],
+            limit=250,
+        )
+        c_sql, c_args = executed_campaign_queries[0]
+        self.assertIn("LIMIT $2", c_sql)
+        self.assertEqual(c_args[-1], 250)
+
+        # 4. PostGIS ST_Distance and ST_DWithin in candidate feed query execution
+        executed_feed_queries = []
+        async def mock_feed_fetch(sql, *args):
+            executed_feed_queries.append((sql, args))
+            return []
+
+        mock_conn.fetch = AsyncMock(side_effect=mock_feed_fetch)
+        user_data = {
+            "id": user_id,
+            "gender": "man",
+            "show_me": "women",
+            "date_of_birth": "1995-01-01",
+            "location": "POINT(77.5946 12.9716)",
+            "dietary_strictness": "pure_jain",
+            "eats_root_vegetables": False,
+            "eats_onion_garlic": False,
+            "community_sect": "shwetambar",
+            "open_to_relocation": True,
+            "max_distance_km": 50,
+            "behavior_vector": [0.088388] * 128,
+        }
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = None  # Cache miss
+
+        await fetch_recommended_feed(user_id=user_id, user_data=user_data, db=mock_pool, redis=mock_redis, limit=10)
+        self.assertGreaterEqual(len(executed_feed_queries), 1)
+        feed_sql, feed_args = executed_feed_queries[0]
+        self.assertIn("ST_Distance(", feed_sql)
+        self.assertIn("ST_DWithin(", feed_sql)
+        self.assertIn("$1::geography", feed_sql)
+        self.assertIn("$10 * 1000", feed_sql)
+        self.assertEqual(feed_args[0], "POINT(77.5946 12.9716)")
+        self.assertEqual(feed_args[9], 50)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -409,12 +409,13 @@ async def broadcast_promotional_campaign(
         )
     """
 
+    params.append(limit)
     query = f"""
         SELECT u.id, u.phone_number, u.email, u.first_name
         FROM users u
         WHERE {where_clause}
         ORDER BY u.created_at DESC
-        LIMIT {limit}
+        LIMIT ${len(params)}
     """
     async with pool.acquire() as conn:
         users = await conn.fetch(query, *params)

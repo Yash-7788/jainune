@@ -1,5 +1,6 @@
-import hmac
 import hashlib
+import ipaddress
+import hmac
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -217,12 +218,23 @@ async def validate_access_token_raw(
         if await redis.exists(f"token:blacklist:{jti}"):
             raise ValueError("Token has been revoked.")
 
+def _clean_ip(ip_str: str | None) -> str | None:
+    if not ip_str:
+        return None
+    candidate = ip_str.strip()
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
 def get_trusted_client_ip(request) -> str:
     """
     Extracts authentic client IP.
-    Trusts reverse-proxy headers (CF-Connecting-IP / X-Forwarded-For) ONLY if
+    Trusts reverse-proxy headers (CF-Connecting-IP / X-Real-IP / X-Forwarded-For) ONLY if
     edge origin lock is verified with cloudflare_origin_secret.
     Otherwise falls back strictly to direct peer IP request.client.host to prevent rate-limit evasion.
+    All candidate IPs are validated with ipaddress.ip_address to prevent Redis key injection.
     """
     if not request:
         return "127.0.0.1"
@@ -233,20 +245,25 @@ def get_trusted_client_ip(request) -> str:
 
     # Only trust reverse-proxy headers if origin lock matches
     if origin_secret and edge_token == origin_secret:
-        cf_ip = headers.get("cf-connecting-ip")
-        if cf_ip:
-            return cf_ip.strip()
+        for header_key in ("cf-connecting-ip", "x-real-ip"):
+            ip_val = _clean_ip(headers.get(header_key))
+            if ip_val:
+                return ip_val
         forwarded = headers.get("x-forwarded-for")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            ip_val = _clean_ip(forwarded.split(",")[0])
+            if ip_val:
+                return ip_val
 
     if getattr(settings, "environment", "development") != "production":
-        cf_ip = headers.get("cf-connecting-ip")
+        cf_ip = _clean_ip(headers.get("cf-connecting-ip"))
         if cf_ip:
-            return cf_ip.strip()
+            return cf_ip
 
     if hasattr(request, "client") and request.client and getattr(request.client, "host", None):
-        return request.client.host
+        client_ip = _clean_ip(request.client.host)
+        if client_ip:
+            return client_ip
 
     return "127.0.0.1"
 

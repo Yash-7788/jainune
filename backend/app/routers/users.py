@@ -200,9 +200,10 @@ async def update_my_profile(
     Patch mutable profile fields.
     Only fields explicitly set (not None) are written to the DB.
     """
-    updates = body.model_dump(exclude_none=True)
+    _allowed_cols = frozenset(UpdateProfileBody.model_fields.keys())
+    updates = {k: v for k, v in body.model_dump(exclude_none=True).items() if k in _allowed_cols}
     if not updates:
-        raise HTTPException(status_code=400, detail="No fields provided")
+        raise HTTPException(status_code=400, detail="No valid fields provided")
 
     # Build dynamic SET clause
     set_clauses = [f"{col} = ${i + 2}" for i, col in enumerate(updates)]
