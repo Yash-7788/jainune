@@ -275,11 +275,20 @@ export async function uploadToPresignedUrl(
  * Never exposes HTTP codes to the user.
  */
 export function extractError(err: unknown): { title: string; message: string } {
+  const apiError = (err as Record<string, any>)?._apiError;
+  const rawCode =
+    apiError?.code ||
+    (axios.isAxiosError(err) ? (err.response?.data as ApiResponse | undefined)?.error?.code : undefined);
+
+  if (rawCode && rawCode in ERROR_MAP) {
+    return getFriendlyError(rawCode as ErrorCode);
+  }
+  if (apiError?.message && typeof apiError.message === "string") {
+    return { title: "Notice", message: apiError.message };
+  }
   if (axios.isAxiosError(err)) {
-    const data = err.response?.data as ApiResponse | undefined;
-    const errorCode = data?.error?.code as ErrorCode | undefined;
-    if (errorCode) return getFriendlyError(errorCode);
     if (!err.response) return getFriendlyError("CONNECTION_PROBLEM");
+    if (err.code === "ECONNABORTED") return getFriendlyError("TIMEOUT");
   }
   if ((err as Record<string, unknown>)?._sessionExpired) {
     return getFriendlyError("SESSION_EXPIRED");

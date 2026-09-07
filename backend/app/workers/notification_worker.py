@@ -55,8 +55,8 @@ def notify_new_match(self, match_id: str) -> None:
                     u_a.first_name AS name_a, u_a.fcm_token AS token_a,
                     u_b.first_name AS name_b, u_b.fcm_token AS token_b
                 FROM matches m
-                JOIN users u_a ON u_a.id = m.user_a_id
-                JOIN users u_b ON u_b.id = m.user_b_id
+                JOIN users u_a ON u_a.id = COALESCE(m.user_a, m.user_a_id, m.user_id_1)
+                JOIN users u_b ON u_b.id = COALESCE(m.user_b, m.user_b_id, m.user_id_2)
                 WHERE m.id = $1
                 """,
                 m_uuid,
@@ -204,8 +204,8 @@ def notify_match_expiring(self, match_id: str) -> None:
                     u_a.first_name AS name_a, u_a.fcm_token AS token_a,
                     u_b.first_name AS name_b, u_b.fcm_token AS token_b
                 FROM matches m
-                JOIN users u_a ON u_a.id = m.user_a_id
-                JOIN users u_b ON u_b.id = m.user_b_id
+                JOIN users u_a ON u_a.id = COALESCE(m.user_a, m.user_a_id, m.user_id_1)
+                JOIN users u_b ON u_b.id = COALESCE(m.user_b, m.user_b_id, m.user_id_2)
                 WHERE m.id = $1 AND m.status IN ('active', 'matched')
                 """,
                 m_uuid,

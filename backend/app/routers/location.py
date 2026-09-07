@@ -83,6 +83,25 @@ async def verify_location(
     is_allowed, zone = verify_location_zone(body.latitude, body.longitude)
 
     if is_allowed and zone:
+        import uuid
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
+                        location_zone = $3,
+                        updated_at = NOW()
+                    WHERE id = $4
+                    """,
+                    body.longitude,
+                    body.latitude,
+                    zone["id"],
+                    uuid.UUID(str(user_id)),
+                )
+        except Exception:
+            pass
+
         return ok({
             "allowed": True,
             "zone_id": zone["id"],

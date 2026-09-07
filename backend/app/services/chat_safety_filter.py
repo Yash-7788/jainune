@@ -246,6 +246,12 @@ async def filter_chat_content(
                 content=content,
                 is_moderated=False,
             )
+    else:
+        single_char_key = f"chat:safety:single_chars:{chat_id}:{user_id}"
+        try:
+            await redis.delete(single_char_key)
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # 2. Scan for Violations

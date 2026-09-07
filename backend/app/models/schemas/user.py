@@ -325,6 +325,17 @@ class UserProfileResponse(BaseModel):
 class UpdatePromptsBody(BaseModel):
     prompts: List[PromptItem] = Field(..., min_length=1, max_length=3)
 
+    @field_validator("prompts")
+    @classmethod
+    def validate_unique_positions_and_keys(cls, v: List[PromptItem]) -> List[PromptItem]:
+        positions = [p.position for p in v]
+        if len(positions) != len(set(positions)):
+            raise ValueError("Prompt positions must be unique (1, 2, 3).")
+        keys = [p.prompt_key for p in v]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Prompt questions must be unique.")
+        return v
+
 
 class MediaPositionItem(BaseModel):
     media_id: UUID

@@ -113,8 +113,22 @@ async def websocket_chat(
         await websocket.close(code=4001, reason="Invalid or expired credentials.")
         return
 
-    # ── 3. Participant check ─────────────────────────────────────────────────
+    # ── 3. Participant and account status check ──────────────────────────────
     async with db.acquire() as conn:
+        caller_row = await conn.fetchrow(
+            "SELECT account_status, suspend_until, deleted_at FROM users WHERE id = $1",
+            user_id,
+        )
+        from datetime import datetime, timezone
+        if not caller_row or caller_row.get("account_status") in ("banned", "deleted") or caller_row.get("deleted_at") is not None:
+            await websocket.close(code=4003, reason="Account is banned or deleted.")
+            return
+
+        suspend_until = caller_row.get("suspend_until")
+        if caller_row.get("account_status") == "suspended" or (suspend_until and suspend_until > datetime.now(timezone.utc)):
+            await websocket.close(code=4003, reason="Account is suspended.")
+            return
+
         row = await conn.fetchrow(
             """
             SELECT c.id, c.match_id, c.is_unmatched,
@@ -131,6 +145,14 @@ async def websocket_chat(
 
         if row.get("is_unmatched"):
             await websocket.close(code=4003, reason="Chat has been unmatched and closed.")
+            return
+
+        other_row = await conn.fetchrow(
+            "SELECT account_status, deleted_at FROM users WHERE id = $1",
+            row["other_id"],
+        )
+        if not other_row or other_row.get("account_status") in ("banned", "deleted") or other_row.get("deleted_at") is not None:
+            await websocket.close(code=4003, reason="Recipient account is no longer active.")
             return
 
         blocked = await conn.fetchval(

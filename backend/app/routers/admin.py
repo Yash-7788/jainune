@@ -163,10 +163,10 @@ async def ban_user(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Permanently ban a user. Logs the action in admin_audit_log."""
+    """Permanently ban a user. Logs the action in admin_audit_log and revokes active sessions."""
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            res = await conn.execute(
                 """
                 UPDATE users
                    SET account_status = 'banned', updated_at = NOW()
@@ -174,6 +174,11 @@ async def ban_user(
                 """,
                 user_id,
             )
+            if res == "UPDATE 0":
+                raise HTTPException(status_code=404, detail="User not found")
+
+            await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
@@ -184,6 +189,13 @@ async def ban_user(
                 user_id,
                 body.reason,
             )
+
+    try:
+        r = get_redis()
+        await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
+    except Exception:
+        pass
+
     return {"banned": True, "user_id": user_id}
 
 
@@ -201,7 +213,7 @@ async def suspend_user(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            res = await conn.execute(
                 """
                 UPDATE users
                    SET account_status   = 'suspended',
@@ -212,6 +224,9 @@ async def suspend_user(
                 suspend_until,
                 user_id,
             )
+            if res == "UPDATE 0":
+                raise HTTPException(status_code=404, detail="User not found")
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
@@ -222,6 +237,13 @@ async def suspend_user(
                 user_id,
                 body.reason,
             )
+
+    try:
+        r = get_redis()
+        await r.delete(f"user:session:{user_id}")
+    except Exception:
+        pass
+
     return {"suspended": True, "user_id": user_id, "until": suspend_until}
 
 
@@ -234,7 +256,7 @@ async def reinstate_user(
     """Lift a suspension or ban. Superadmin only."""
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            res = await conn.execute(
                 """
                 UPDATE users
                    SET account_status = 'active',
@@ -244,6 +266,9 @@ async def reinstate_user(
                 """,
                 user_id,
             )
+            if res == "UPDATE 0":
+                raise HTTPException(status_code=404, detail="User not found")
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log

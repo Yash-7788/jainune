@@ -329,7 +329,7 @@ async def send_message(
             "SELECT account_status FROM users WHERE id = $1",
             other_id,
         )
-        if recipient_status == "deleted":
+        if recipient_status in ("deleted", "banned"):
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
                 detail="Recipient account is no longer active.",

@@ -310,7 +310,7 @@ async def delete_media(
     from app.services.account_service import _delete_s3_keys_sync
     import asyncio
 
-    user_id = uuid.UUID(str(current_user["user_id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:media:delete:{user_id}", 30, 60, redis)
 
@@ -344,15 +344,33 @@ async def reorder_media(
     db: DBDep,
     redis: RedisDep = None,
 ) -> dict:
-    user_id = uuid.UUID(str(current_user["user_id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:media:reorder:{user_id}", 30, 60, redis)
 
+    if not body.positions:
+        return {"success": True, "message": "Photos reordered successfully."}
+
+    positions = [item.position for item in body.positions]
+    media_ids = [item.media_id for item in body.positions]
+    if len(positions) != len(set(positions)):
+        raise HTTPException(status_code=400, detail="Duplicate positions in reorder request.")
+    if len(media_ids) != len(set(media_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate media IDs in reorder request.")
+
     async with db.acquire() as conn:
         async with conn.transaction():
+            case_clauses = []
+            params = []
+            idx = 1
             for item in body.positions:
-                await conn.execute(
-                    "UPDATE user_media SET position = $1 WHERE id = $2 AND user_id = $3 AND media_type = 'photo'",
-                    item.position, item.media_id, user_id,
-                )
+                case_clauses.append(f"WHEN id = ${idx} THEN ${idx + 1}")
+                params.extend([item.media_id, item.position])
+                idx += 2
+            params.extend([media_ids, user_id])
+            query = f"""
+                UPDATE user_media SET position = CASE {' '.join(case_clauses)} END
+                WHERE id = ANY(${idx}::uuid[]) AND user_id = ${idx + 1} AND media_type = 'photo'
+            """
+            await conn.execute(query, *params)
     return {"success": True, "message": "Photos reordered successfully."}
