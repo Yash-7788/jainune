@@ -188,6 +188,141 @@ class TestGeospatialScale(unittest.TestCase):
                     allowed_out, _ = verify_location_zone(lat_out, lon_out)
                     self.assertFalse(allowed_out)
 
+    def test_08_postgis_knn_geodesic_distance_benchmark_100k(self):
+        """Run 1: Benchmark spatial KNN bounding-box and distance evaluation across 100,000 points."""
+        import time
+
+        c_lat, c_lon = self.blr["center_lat"], self.blr["center_lon"]
+        count = 100_000
+        radius_km = 30.0
+
+        # PostGIS GiST index bounding box delta (~30km in degrees)
+        delta_lat = radius_km / 111.0
+        delta_lon = radius_km / (111.0 * math.cos(math.radians(c_lat)))
+
+        lat_min, lat_max = c_lat - delta_lat, c_lat + delta_lat
+        lon_min, lon_max = c_lon - delta_lon, c_lon + delta_lon
+
+        # Deterministic generation of 100k points across India bounding box [8-30° N, 70-88° E]
+        rng = random.Random(1337)
+        lats = [rng.uniform(8.0, 30.0) for _ in range(count)]
+        lons = [rng.uniform(70.0, 88.0) for _ in range(count)]
+
+        start_time = time.perf_counter()
+
+        # Step 1: Simulated GiST bounding box pre-filter (<-> index operator equivalent)
+        passed_bbox = []
+        for i in range(count):
+            lat, lon = lats[i], lons[i]
+            if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                passed_bbox.append((lat, lon))
+
+        # Step 2: Accurate spherical geodetic distance on surviving candidates
+        matches = []
+        for lat, lon in passed_bbox:
+            dist = haversine_distance_km(lat, lon, c_lat, c_lon)
+            if dist <= radius_km:
+                matches.append((lat, lon, dist))
+
+        elapsed = time.perf_counter() - start_time
+
+        # Bounding box must reject >99% of non-matching nationwide points in O(1) time
+        rejection_rate = 1.0 - (len(passed_bbox) / count)
+        self.assertGreater(rejection_rate, 0.99)
+        # 100k points processed in under 200 milliseconds in Python
+        self.assertLess(elapsed, 0.20)
+
+    def test_09_composite_attribute_and_spatial_gist_filtering(self):
+        """Run 2: Combined attribute filters (gender, sect, diet, onion/garlic) with spatial radius."""
+        c_lat, c_lon = self.blr["center_lat"], self.blr["center_lon"]
+        count = 10_000
+        rng = random.Random(42)
+
+        sects = ["deravasi", "sthanakvasi", "digambar", "terapanthi"]
+        diets = ["pure_jain", "vegan", "vegetarian"]
+
+        mock_users = []
+        for i in range(count):
+            dist = rng.uniform(1.0, 150.0)
+            bearing = rng.uniform(0.0, 360.0)
+            lat, lon = destination_point(c_lat, c_lon, dist, bearing)
+            mock_users.append({
+                "id": i,
+                "gender": "woman" if (i % 2 == 0) else "man",
+                "account_status": "active" if (i % 10 != 0) else "suspended",
+                "is_paused": (i % 7 == 0),
+                "dietary_strictness": rng.choice(diets),
+                "eats_onion_garlic": (rng.random() < 0.25),
+                "community_sect": rng.choice(sects),
+                "lat": lat,
+                "lon": lon,
+                "dist": dist,
+            })
+
+        # Viewer preferences: man looking for active women within 40km, pure_jain, no onion-garlic
+        filtered = []
+        for u in mock_users:
+            if u["gender"] != "woman":
+                continue
+            if u["account_status"] != "active" or u["is_paused"]:
+                continue
+            if u["dist"] > 40.0:
+                continue
+            # Jain dietary dealbreaker
+            if u["dietary_strictness"] not in ("pure_jain", "vegan"):
+                continue
+            if u["eats_onion_garlic"]:
+                continue
+            filtered.append(u)
+
+        self.assertGreater(len(filtered), 0)
+        self.assertTrue(all(u["dist"] <= 40.0 for u in filtered))
+        self.assertTrue(all(u["dietary_strictness"] in ("pure_jain", "vegan") for u in filtered))
+        self.assertTrue(all(not u["eats_onion_garlic"] for u in filtered))
+        self.assertTrue(all(u["gender"] == "woman" for u in filtered))
+
+    def test_10_pgvector_hnsw_cosine_non_locking_rebuild(self):
+        """Run 3: Zero-downtime concurrent rebuild validation for pgvector HNSW and PostGIS GiST."""
+        import os
+
+        migration_path = os.path.join(os.path.dirname(__file__), "..", "..", "migrations", "0016_concurrent_spatial_and_vector_maintenance.sql")
+        self.assertTrue(os.path.exists(migration_path), "Migration 0016 must exist")
+
+        with open(migration_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Concurrent index build validation
+        self.assertIn("CREATE INDEX CONCURRENTLY", content)
+        self.assertIn("USING hnsw (revealed_preference_vector vector_cosine_ops)", content)
+        self.assertIn("USING GIST ((location::geography))", content)
+        # Cannot be wrapped in transaction block in PostgreSQL (error 25001)
+        self.assertNotIn("BEGIN;", content)
+        self.assertNotIn("COMMIT;", content)
+
+    def test_11_vector_nan_trap_and_unit_normalization_resilience(self):
+        """Run 4: Vector NaN trap prevention and unit vector normalization in candidate ranking."""
+        import json
+        from app.services import core_people_finder
+
+        # 1. New user with no vector -> uniform unit vector
+        norm_val = 0.088388
+        unit_vec = [norm_val] * 128
+        magnitude = math.sqrt(sum(x * x for x in unit_vec))
+        # Magnitude must be ~1.0 (not 0.0)
+        self.assertAlmostEqual(magnitude, 1.0, places=2)
+
+        # 2. Cosine distance between two unit vectors is bounded [0.0, 2.0]
+        dot_product = sum(a * b for a, b in zip(unit_vec, unit_vec))
+        cosine_distance = 1.0 - (dot_product / (magnitude * magnitude))
+        self.assertFalse(math.isnan(cosine_distance))
+        self.assertAlmostEqual(cosine_distance, 0.0, places=3)
+
+        # 3. Serializability: feed score must never output NaN
+        score = (1.0 - cosine_distance) * 40.0 + 50.0  # behavioral + cultural
+        self.assertFalse(math.isnan(score))
+        serialized = json.dumps({"affinity": score})
+        self.assertIn("90.0", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

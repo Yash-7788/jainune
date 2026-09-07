@@ -749,9 +749,9 @@ async def step22_complete(
                 """,
                 current_user.id,
             )
-            # Initialize behavior vector row with uniform zero-vector (128d)
-            # The vector is represented as a list of 128 zeros in pgvector format
-            zero_vec = "[" + ",".join(["0"] * 128) + "]"
+            # Initialize behavior vector row with uniform unit vector (128d, norm=1.0)
+            # Prevents division-by-zero NaN in pgvector cosine distance operator <=>
+            unit_vec = "[" + ",".join(["0.088388"] * 128) + "]"
             await conn.execute(
                 """
                 INSERT INTO user_behavior_vectors (user_id, revealed_preference_vector)
@@ -759,7 +759,7 @@ async def step22_complete(
                 ON CONFLICT (user_id) DO NOTHING
                 """,
                 current_user.id,
-                zero_vec,
+                unit_vec,
             )
 
     # Purge any onboarding-step cache keys from Redis

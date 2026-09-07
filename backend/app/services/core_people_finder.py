@@ -207,12 +207,17 @@ async def _run_pipeline(
     }
     target_gender: Optional[str] = gender_map.get(user_data.get("show_me", "everyone"))
 
-    # Behavior vector (128-d). Fallback to zero-vector for new users.
+    # Behavior vector (128-d). Fallback to uniform unit vector for new users (norm = 1.0)
+    # to prevent divide-by-zero NaN in pgvector cosine distance operator <=>.
     behavior_vector = user_data.get("revealed_preference_vector")
+    unit_val = "0.088388"
     if not behavior_vector:
-        behavior_vector = "[" + ",".join(["0"] * 128) + "]"
+        behavior_vector = "[" + ",".join([unit_val] * 128) + "]"
     elif isinstance(behavior_vector, list):
-        behavior_vector = "[" + ",".join(str(v) for v in behavior_vector) + "]"
+        if all(v == 0 for v in behavior_vector):
+            behavior_vector = "[" + ",".join([unit_val] * 128) + "]"
+        else:
+            behavior_vector = "[" + ",".join(str(v) for v in behavior_vector) + "]"
 
     # PostGIS geography point for ST_DWithin  (WKB hex)
     user_location = user_data.get("location")  # asyncpg returns geometry as WKBElement
@@ -258,7 +263,7 @@ async def _run_pipeline(
             -- L1: pgvector HNSW cosine ANN score (1 = identical, 0 = orthogonal)
             CASE
                 WHEN b.revealed_preference_vector IS NOT NULL
-                THEN (1.0 - (b.revealed_preference_vector <=> $2::vector))
+                THEN GREATEST(0.0, LEAST(1.0, COALESCE(1.0 - (b.revealed_preference_vector <=> $2::vector), 0.0)))
                 ELSE 0.0
             END AS behavioral_affinity,
             -- L2: Cultural composite score (deterministic, no randomness)
@@ -320,7 +325,7 @@ async def _run_pipeline(
                 WHERE (ub.blocker_id = $8 AND ub.blocked_id = u.id)
                    OR (ub.blocker_id = u.id AND ub.blocked_id = $8)
             )
-        ORDER BY b.revealed_preference_vector <=> $2::vector ASC
+        ORDER BY COALESCE(b.revealed_preference_vector <=> $2::vector, 2.0) ASC
         LIMIT 200
     )
     SELECT
@@ -561,9 +566,11 @@ async def fetch_daily_compatible(
                       WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
                          OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
                   )
-                ORDER BY b.revealed_preference_vector <=>
-                    (SELECT revealed_preference_vector FROM user_behavior_vectors WHERE user_id = $1)
-                ASC
+                ORDER BY COALESCE(
+                    b.revealed_preference_vector <=>
+                    (SELECT revealed_preference_vector FROM user_behavior_vectors WHERE user_id = $1),
+                    2.0
+                ) ASC
                 LIMIT 1
                 """,
                 user_id,
