@@ -21,7 +21,7 @@ import hashlib
 import hmac
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 try:
     import razorpay
@@ -628,17 +628,38 @@ async def get_effective_user_tier(
 
     if tier != "free":
         if not valid_until or valid_until < datetime.now(tz=timezone.utc):
-            # Expired: lazy downgrade
-            await conn.execute(
-                """
-                UPDATE users
-                   SET subscription_tier        = 'free',
-                       subscription_valid_until = NULL,
-                       updated_at               = NOW()
-                 WHERE id = $1
-                """,
-                user_id,
-            )
+            # Expired: lazy downgrade in own savepoint so caller rollback can't desync state
+            tx = None
+            if hasattr(conn, "transaction") and callable(conn.transaction):
+                try:
+                    res = conn.transaction()
+                    if hasattr(res, "__aenter__") and hasattr(res, "__aexit__"):
+                        tx = res
+                except Exception:
+                    pass
+            if tx is not None:
+                async with tx:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                           SET subscription_tier        = 'free',
+                               subscription_valid_until = NULL,
+                               updated_at               = NOW()
+                         WHERE id = $1
+                        """,
+                        user_id,
+                    )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier        = 'free',
+                           subscription_valid_until = NULL,
+                           updated_at               = NOW()
+                     WHERE id = $1
+                    """,
+                    user_id,
+                )
             return "free"
 
     return tier

@@ -33,6 +33,7 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import get_current_user, require_admin, require_superadmin
+from app.services.messaging_service import _mask_phone
 from app.services.dignity_engine import recompute_trust_score
 
 log = logging.getLogger(__name__)
@@ -117,7 +118,6 @@ async def list_users(
     for r in rows:
         d = dict(r)
         if not is_superadmin and d.get("phone_number"):
-            from app.services.messaging_service import _mask_phone
             d["phone_number"] = _mask_phone(d["phone_number"])
         users_list.append(d)
 

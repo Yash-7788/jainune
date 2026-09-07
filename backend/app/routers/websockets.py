@@ -49,7 +49,7 @@ async def create_ws_ticket(
     await sliding_window_rate_limit(f"ratelimit:ws_ticket:{user_id}", 30, 60, redis)
     ticket = f"wst_{secrets.token_urlsafe(32)}"
     ticket_key = f"ws:ticket:{ticket}"
-    await redis.set(ticket_key, str(current_user["id"]), ex=30)
+    await redis.set(ticket_key, user_id, ex=30)
     return {"ticket": ticket, "expires_in_seconds": 30}
 
 

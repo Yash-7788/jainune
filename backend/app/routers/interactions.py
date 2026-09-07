@@ -11,14 +11,17 @@ On mutual like or super_connect:
 """
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.core.security import sliding_window_rate_limit
+from app.core.security import get_ist_now, get_ist_today_str, sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.interaction import InteractionActionRequest, InteractionActionResponse
 from app.services.core_people_finder import invalidate_feed_cache
+from app.services import payment_service
 
 router = APIRouter(prefix="/v1/interactions", tags=["interactions"])
 
@@ -160,16 +163,12 @@ async def record_interaction_action(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Target profile not found or no longer available.",
                 )
-            if not isinstance(target_row, MagicMock if "MagicMock" in globals() else ()):
-                try:
-                    t_data = dict(target_row)
-                    if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
-                        raise HTTPException(
-                            status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Target profile not found or no longer available.",
-                        )
-                except (TypeError, ValueError):
-                    pass
+            t_data = dict(target_row)
+            if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Target profile not found or no longer available.",
+                )
 
             # ── Idempotency check ────────────────────────────────────────────────
             existing = await conn.fetchrow(
@@ -183,13 +182,9 @@ async def record_interaction_action(
                 )
 
             # ── Daily like limit enforcement & super-connect credit deduction ────
-            from app.services.payment_service import get_effective_user_tier
-            tier = await get_effective_user_tier(actor_id, conn)
+            tier = await payment_service.get_effective_user_tier(actor_id, conn)
 
             if body.action == "like":
-                from datetime import timedelta
-                from app.core.security import get_ist_now, get_ist_today_str
-
                 ist_now = get_ist_now()
                 today_str = get_ist_today_str()
                 like_key = f"daily_likes:{actor_id}:{today_str}"
@@ -197,17 +192,19 @@ async def record_interaction_action(
                 # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
                 limit = 10 if tier == "free" else (50 if tier == "gold" else None)
                 if limit is not None:
-                    current_likes = await redis.incr(like_key)
-                    if current_likes == 1:
-                        # Expire strictly at upcoming IST midnight
-                        tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
-                        await redis.expire(like_key, max(ttl_seconds, 60))
-                    if current_likes > limit:
+                    # Read before incrementing to avoid inflating count on rejection
+                    current_likes = int(await redis.get(like_key) or 0)
+                    if current_likes >= limit:
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,
                             detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
                         )
+                    new_count = await redis.incr(like_key)
+                    if new_count == 1:
+                        # Expire strictly at upcoming IST midnight
+                        tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
+                        await redis.expire(like_key, max(ttl_seconds, 60))
             elif body.action == "super_connect":
                 # Concurrency lock to prevent double-spending super connect credits
                 await conn.execute(
@@ -351,8 +348,6 @@ async def get_my_matches(
     redis: RedisDep = None,
 ) -> dict:
     """Fetch all active mutual matches for the authenticated user."""
-    import json
-    from datetime import date
     user_id = uuid.UUID(str(current_user["id"]))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:interactions:matches:{user_id}", 30, 60, redis)
@@ -404,8 +399,8 @@ async def get_my_matches(
             "id": str(r["id"]),
             "first_name": r["first_name"] or "Someone",
             "age": age,
-            "city": r["city"] or "Bangalore",
-            "state": r["state"] or "Karnataka",
+            "city": r["city"] or "",
+            "state": r["state"] or "",
             "distance_display": "Nearby",
             "dietary_strictness": r["dietary_strictness"] or "pure_jain",
             "community_sect": r["community_sect"] or "shwetambar_murtipujak",
@@ -429,9 +424,6 @@ async def get_users_who_liked_me(
     redis: RedisDep = None,
 ) -> dict:
     """Fetch incoming likes from other users (server-side redacted for free tier)."""
-    import json
-    from datetime import date
-    from app.services.payment_service import get_effective_user_tier
     user_id = uuid.UUID(str(current_user["id"]))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:interactions:liked_me:{user_id}", 30, 60, redis)
@@ -473,7 +465,7 @@ async def get_users_who_liked_me(
     LIMIT 50
     """
     async with db.acquire() as conn:
-        tier = await get_effective_user_tier(user_id, conn)
+        tier = await payment_service.get_effective_user_tier(user_id, conn)
         rows = await conn.fetch(query, user_id)
 
     is_subscriber = tier in ("jainune_plus", "gold", "platinum")
@@ -491,8 +483,8 @@ async def get_users_who_liked_me(
                 "id": str(r["id"]),
                 "first_name": r["first_name"] or "Someone",
                 "age": age,
-                "city": r["city"] or "Bangalore",
-                "state": r["state"] or "Karnataka",
+                "city": r["city"] or "",
+                "state": r["state"] or "",
                 "distance_display": "Nearby",
                 "dietary_strictness": r["dietary_strictness"] or "pure_jain",
                 "community_sect": r["community_sect"] or "shwetambar_murtipujak",

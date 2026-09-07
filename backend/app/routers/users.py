@@ -10,6 +10,7 @@ GET  /v1/users/{user_id}/public → public card view (for open profiles)
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 from uuid import UUID
@@ -132,8 +133,6 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
         raise HTTPException(status_code=404, detail="User not found")
     
     data = dict(row)
-    # Parse json_agg strings if returned as string
-    import json
     if isinstance(data.get("photos"), str):
         data["photos"] = json.loads(data["photos"])
     if isinstance(data.get("prompts"), str):
@@ -152,8 +151,9 @@ async def get_my_profile(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """Return the authenticated user's full profile."""
+    user_id = UUID(str(current_user.get("id") or current_user.get("user_id")))
     async with pool.acquire() as conn:
-        data = await _get_user_row(current_user["user_id"], conn)
+        data = await _get_user_row(user_id, conn)
     return data
 
 

@@ -8,6 +8,7 @@ POST /v1/chats/{chat_id}/read        → mark all messages as read
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Optional
 
@@ -413,7 +414,6 @@ async def send_message(
     )
 
     # Publish to Redis pub/sub for WebSocket fan-out (both chat_id and match_id if distinct)
-    import json
     payload_str = json.dumps({
         "type": "message",
         "payload": {

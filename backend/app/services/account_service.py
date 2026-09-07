@@ -86,7 +86,7 @@ async def purge_user_account(
     email = user_row["email"] if user_row else None
 
     # AUDIT-2: Block hard-delete while subscription is active — force soft-delete instead
-    if user_row and isinstance(user_row, dict) and user_row.get("subscription_tier") and user_row["subscription_tier"] != "free":
+    if user_row and user_row.get("subscription_tier") and user_row["subscription_tier"] != "free":
         from datetime import datetime, timezone
         valid_until = user_row.get("subscription_valid_until")
         now = datetime.now(timezone.utc)

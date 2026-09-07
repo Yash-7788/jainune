@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 import hashlib
 import uuid
@@ -190,18 +191,29 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
                 """
                 INSERT INTO users (phone_number, auth_provider)
                 VALUES ($1, 'phone')
-                ON CONFLICT (phone_number) DO UPDATE SET last_active_at = NOW()
+                ON CONFLICT (phone_number) DO NOTHING
                 RETURNING id
                 """,
                 body.phone_number,
             )
-            row = await conn.fetchrow(
-                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                user_id,
-            )
-            if row:
-                _assert_account_active(row)
-                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+            if user_id is None:
+                # Row exists but was not returned (conflict on banned/deleted account)
+                existing = await conn.fetchrow(
+                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE phone_number = $1",
+                    body.phone_number,
+                )
+                _assert_account_active(existing)
+                user_id = existing["id"]
+                is_new_user = False
+                onboarding_completed = _row_val(existing, "onboarding_completed", False) or False
+            else:
+                row = await conn.fetchrow(
+                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                    user_id,
+                )
+                if row:
+                    _assert_account_active(row)
+                    onboarding_completed = _row_val(row, "onboarding_completed", False) or False
         else:
             _assert_account_active(row)
             user_id = row["id"]
@@ -551,7 +563,6 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
     # 1. Check if token was recently rotated within concurrency grace window (15s)
     cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
     if cached_grace:
-        import json
         payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
         return ok(payload)
 
@@ -584,7 +595,6 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 # Concurrency check: If winner committed while loser waited on lock
                 cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
                 if cached_grace:
-                    import json
                     payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
                     return ok(payload)
 
@@ -642,10 +652,9 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 access_token=access_token,
                 refresh_token=new_refresh,
                 expires_in=settings.access_token_expire_minutes * 60,
-            ).model_dump()
+            ).model_dump(mode="json")
 
             # Set grace window (15s) and revocation record before releasing lock
-            import json
             await redis.set(
                 f"auth:grace_rt:{token_hash}",
                 json.dumps(resp_data),
@@ -700,36 +709,3 @@ async def logout_endpoint(
 
     return ok({"message": "You have been logged out successfully."})
 
-
-# ── MSG91 SMS dispatch ────────────────────────────────────────────────────────
-
-async def _send_otp_msg91(phone_number: str, otp: str) -> None:
-    # In test/dev environment with dummy key, gracefully proceed
-    if settings.debug or settings.msg91_auth_key in ("mock", "test", ""):
-        log.info("Development/Mock mode: OTP dispatched for %s", mask_phone(phone_number))
-        return
-
-    mobile = phone_number.lstrip("+")
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                "https://api.msg91.com/api/v5/otp",
-                params={
-                    "authkey": settings.msg91_auth_key,
-                    "template_id": settings.msg91_otp_template_id,
-                    "mobile": mobile,
-                    "otp": otp,
-                },
-            )
-            if resp.status_code not in (200, 201):
-                log.warning("Primary SMS gateway responded with %s for %s", resp.status_code, mask_phone(phone_number))
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="SMS gateway temporarily unavailable. Retry shortly.",
-                )
-    except httpx.RequestError as exc:
-        log.warning("SMS gateway connection error for %s: %s", mask_phone(phone_number), exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SMS gateway connection timeout.",
-        )

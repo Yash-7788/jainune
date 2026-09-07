@@ -217,6 +217,8 @@ async def validate_access_token_raw(
         jti = payload["jti"]
         if await redis.exists(f"token:blacklist:{jti}"):
             raise ValueError("Token has been revoked.")
+    return payload
+
 
 def _clean_ip(ip_str: str | None) -> str | None:
     if not ip_str:

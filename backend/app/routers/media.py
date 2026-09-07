@@ -216,7 +216,7 @@ async def presign_upload_get(
         media_type=type,
         content_type=ct,
         file_size_bytes=size,
-        position=0,
+        position=1,
     )
     return await request_upload(body, current_user, db, redis)
 
@@ -240,22 +240,27 @@ async def confirm_upload(
     user_id = uuid.UUID(str(current_user["id"]))
     await sliding_window_rate_limit(f"ratelimit:media:confirm:{user_id}", 30, 60, redis)
 
+    # Atomic: only transition pending → processing; ignore if already in another state
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, s3_key, media_type, status FROM user_media WHERE id = $1 AND user_id = $2",
+            """
+            UPDATE user_media SET status = 'processing'
+            WHERE id = $1 AND user_id = $2 AND status = 'pending'
+            RETURNING id, s3_key, media_type
+            """,
             body.media_id, user_id,
         )
 
     if not row:
-        raise HTTPException(status_code=404, detail="Media record not found.")
-    if row["status"] != "pending":
-        raise HTTPException(status_code=409, detail=f"Media already in state: {row['status']}")
-
-    async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE user_media SET status = 'processing' WHERE id = $1",
-            body.media_id,
-        )
+        # Check whether it exists at all (404) or already transitioned (409)
+        async with db.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT status FROM user_media WHERE id = $1 AND user_id = $2",
+                body.media_id, user_id,
+            )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Media record not found.")
+        raise HTTPException(status_code=409, detail=f"Media already in state: {exists}")
 
     # Enqueue moderation job (non-blocking)
     await enqueue_moderation(

@@ -9,10 +9,13 @@ POST /v1/subscriptions/webhook        → Razorpay server-to-server webhook (no 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 import asyncpg
@@ -230,19 +233,12 @@ async def sync_subscription(
         await sliding_window_rate_limit(f"ratelimit:subscriptions:sync:{user_id}", 10, 60, redis)
 
     if body and body.store_status and body.provider in ("app_store", "play_billing"):
-        res = await payment_service.process_store_subscription_event(
-            user_id=user_id,
-            store="apple" if body.provider == "app_store" else "google",
-            event_type=body.store_status,
-            pool=pool,
-            original_transaction_id=body.original_transaction_id,
+        # Store lifecycle events must come via /store-notification (authenticated server-to-server).
+        # Allowing clients to self-report store_status is a privilege escalation vector.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store subscription events must be submitted via the server-to-server webhook endpoint.",
         )
-        return {
-            "synced": True,
-            "provider": body.provider,
-            "store_status": body.store_status,
-            "result": res,
-        }
 
     order_id = body.razorpay_order_id if body and body.razorpay_order_id else None
 
@@ -356,10 +352,9 @@ async def request_refund(
         now_utc = datetime.now(timezone.utc)
         is_active_fulfilled = (
             user_row
-            and (
-                (user_row["subscription_tier"] != "free" and user_row["subscription_valid_until"] and user_row["subscription_valid_until"] > now_utc)
-                or (user_row["subscription_valid_until"] is not None and user_row["subscription_valid_until"] <= now_utc)
-            )
+            and user_row["subscription_tier"] != "free"
+            and user_row["subscription_valid_until"]
+            and user_row["subscription_valid_until"] > now_utc
             and intent["status"] == "captured"
         )
         if is_active_fulfilled:
@@ -415,7 +410,6 @@ async def razorpay_webhook(
         log.warning("Webhook HMAC mismatch — possible spoofed request")
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
-    import json
     try:
         event = json.loads(body_bytes)
     except json.JSONDecodeError:
@@ -485,13 +479,12 @@ async def store_notification_webhook(
     Apple StoreKit / Google Play RTDN server-to-server webhook.
     Handles grace periods, billing retries, account holds, and refund revocations.
     """
-    if settings.webhook_secret and x_store_token and x_store_token != settings.webhook_secret:
+    if not settings.webhook_secret or x_store_token != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="Invalid store webhook token")
 
     if not body.user_id:
         return {"received": True, "status": "missing_user_id"}
 
-    from uuid import UUID
     try:
         uid = UUID(body.user_id)
     except ValueError:
@@ -517,11 +510,11 @@ async def cancel_subscription(
     Jainune subscriptions are fixed-duration passes (non-recurring) with no auto-renewal.
     Confirms no recurring billing exists and reports active access window.
     """
-    from datetime import datetime, timezone
+    user_id = UUID(str(current_user.get("id") or current_user.get("user_id")))
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
-            current_user["user_id"],
+            user_id,
         )
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
