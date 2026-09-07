@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
@@ -443,6 +443,8 @@ async def send_message(
 @router.post(
     "/{chat_id}/read",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    response_model=None,
     summary="Mark all messages as read",
 )
 async def mark_read(
@@ -450,7 +452,7 @@ async def mark_read(
     current_user: CurrentUser,
     db: DBDep,
     redis: RedisDep = None,
-) -> None:
+) -> Response:
     user_id = uuid.UUID(str(current_user["id"]))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:chats:read:{user_id}", 60, 60, redis)
@@ -466,6 +468,8 @@ async def mark_read(
             """,
             actual_chat_id, user_id,
         )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 
 @router.post(
