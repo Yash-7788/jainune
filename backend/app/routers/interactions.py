@@ -150,15 +150,11 @@ async def record_interaction_action(
             tier = await get_effective_user_tier(actor_id, conn)
 
             if body.action == "like":
-                from datetime import datetime, timedelta, timezone
-                try:
-                    from zoneinfo import ZoneInfo
-                    ist_zone = ZoneInfo("Asia/Kolkata")
-                except Exception:
-                    ist_zone = timezone(timedelta(hours=5, minutes=30))
+                from datetime import timedelta
+                from app.core.security import get_ist_now, get_ist_today_str
 
-                ist_now = datetime.now(ist_zone)
-                today_str = ist_now.strftime("%Y-%m-%d")
+                ist_now = get_ist_now()
+                today_str = get_ist_today_str()
                 like_key = f"daily_likes:{actor_id}:{today_str}"
 
                 # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited

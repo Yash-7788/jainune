@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field
 import asyncpg
 
 from app.core.database import get_pool
+from app.core.redis import get_redis
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import get_current_user
 from app.services.dignity_engine import recompute_trust_score
 
@@ -47,6 +49,15 @@ async def require_admin(
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     """Verify caller has an admin_users row with role in (superadmin, moderator)."""
+    user_id = current_user.get("user_id") or current_user.get("id")
+    try:
+        redis = get_redis()
+        await sliding_window_rate_limit(f"ratelimit:admin:{user_id}", 120, 60, redis)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     async with pool.acquire() as conn:
         role = await conn.fetchval(
             "SELECT role FROM admin_users WHERE user_id = $1",

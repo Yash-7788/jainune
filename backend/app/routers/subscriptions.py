@@ -264,7 +264,11 @@ async def cancel_subscription(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Cancel subscription: retains benefits until valid_until, disables auto-renewal."""
+    """
+    Subscription cancellation status check.
+    Jainune subscriptions are fixed-duration passes (non-recurring) with no auto-renewal.
+    Confirms no recurring billing exists and reports active access window.
+    """
     from datetime import datetime, timezone
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -276,6 +280,6 @@ async def cancel_subscription(
         valid_until = row["subscription_valid_until"] or datetime.now(timezone.utc)
     return {
         "success": True,
-        "message": "Subscription renewal cancelled. Benefits remain active until billing period ends.",
+        "message": "Subscription is a non-recurring pass. No auto-renewal will occur.",
         "access_until": valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until),
     }

@@ -253,8 +253,9 @@ async def get_subscription_status(
     daily_likes_remaining = limits["daily_likes"]
     if daily_likes_remaining is not None:
         try:
+            from app.core.security import get_ist_today_str
             r = get_redis()
-            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_str = get_ist_today_str()
             used = await r.get(f"daily_likes:{current_user['user_id']}:{today_str}")
             used_int = int(used) if used else 0
             daily_likes_remaining = max(0, daily_likes_remaining - used_int)

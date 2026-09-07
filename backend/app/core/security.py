@@ -146,6 +146,20 @@ async def revoke_token(jti: str, ttl_seconds: int, redis: aioredis.Redis) -> Non
     await redis.set(f"token:blacklist:{jti}", "1", ex=ttl_seconds)
 
 
+def get_ist_now() -> datetime:
+    """Return current timestamp in Asia/Kolkata timezone (IST)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+
+def get_ist_today_str() -> str:
+    """Return today's date formatted as YYYY-MM-DD in IST timezone."""
+    return get_ist_now().strftime("%Y-%m-%d")
+
+
 # ── Rate Limiting ────────────────────────────────────────────────────────────
 
 async def sliding_window_rate_limit(

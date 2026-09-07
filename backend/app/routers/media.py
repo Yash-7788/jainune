@@ -103,20 +103,9 @@ async def request_upload(
         if body.file_size_bytes > _MAX_VOICE_BYTES:
             raise HTTPException(status_code=400, detail="Voice clip must be under 5 MB.")
 
-    # Limit: 6 photos, 1 voice per user
-    async with db.acquire() as conn:
-        count = await conn.fetchval(
-            "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = $2 AND status != 'rejected'",
-            user_id, body.media_type,
-        )
-    limit = 6 if body.media_type == "photo" else 1
-    if count >= limit:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Maximum {limit} {body.media_type}(s) allowed.",
-        )
+    target_position = 1 if body.media_type == "voice" else body.position
 
-    # Generate S3 key
+    # Generate S3 key and media_id
     media_id = uuid.uuid4()
     ext_map = {
         "image/jpeg": "jpg", "image/png": "png",
@@ -154,16 +143,31 @@ async def request_upload(
             detail=f"Could not generate upload URL: {e}",
         )
 
-    # Create pending DB record
+    # Limit: 6 photos, 1 voice per user (serialized via advisory xact lock per user/media_type)
     async with db.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO user_media
-                (id, user_id, media_type, s3_key, position, status, is_processed)
-            VALUES ($1, $2, $3, $4, $5, 'pending', FALSE)
-            """,
-            media_id, user_id, body.media_type, s3_key, body.position,
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))",
+                str(user_id), body.media_type,
+            )
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = $2 AND status != 'rejected'",
+                user_id, body.media_type,
+            )
+            limit = 6 if body.media_type == "photo" else 1
+            if count >= limit:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Maximum {limit} {body.media_type}(s) allowed.",
+                )
+            await conn.execute(
+                """
+                INSERT INTO user_media
+                    (id, user_id, media_type, s3_key, position, status, is_processed)
+                VALUES ($1, $2, $3, $4, $5, 'pending', FALSE)
+                """,
+                media_id, user_id, body.media_type, s3_key, target_position,
+            )
 
     return UploadRequestResponse(
         media_id=media_id,
