@@ -438,7 +438,7 @@ async def process_refund(
     async with pool.acquire() as conn:
         async with conn.transaction():
             intent = await conn.fetchrow(
-                "SELECT user_id, plan_id, status FROM payment_intents WHERE razorpay_payment_id = $1 FOR UPDATE",
+                "SELECT user_id, plan_id, status, amount FROM payment_intents WHERE razorpay_payment_id = $1 FOR UPDATE",
                 payment_id,
             )
             if intent is None:
@@ -450,6 +450,24 @@ async def process_refund(
 
             plan = PLAN_CATALOGUE.get(intent["plan_id"], {})
             plan_type = plan.get("type", "subscription")
+
+            # B-3: Differentiate partial vs full refund (preserve subscription on partial goodwill refund)
+            refund_amount = refund.get("amount")
+            intent_amount = intent.get("amount") or plan.get("amount")
+            is_full_refund = True
+            if refund_amount is not None and intent_amount is not None:
+                is_full_refund = int(refund_amount) >= int(intent_amount)
+
+            if not is_full_refund:
+                log.info(
+                    "Partial refund of %s paise on intent %s (expected %s paise) — preserving subscription for %s",
+                    refund_amount, payment_id, intent_amount, intent["user_id"],
+                )
+                await conn.execute(
+                    "UPDATE payment_intents SET status = 'partially_refunded', updated_at = NOW() WHERE razorpay_payment_id = $1",
+                    payment_id,
+                )
+                return
 
             if plan_type == "subscription":
                 # Check if user has any other active captured payment
@@ -484,7 +502,20 @@ async def process_refund(
                         """,
                         intent["user_id"],
                     )
-                    log.info("Subscription revoked on refund: user=%s payment=%s", intent["user_id"], payment_id)
+                    # B-4: Claw back super connect credits granted during upgrade
+                    credits_granted = plan.get("super_connect_credits", 0)
+                    if credits_granted > 0:
+                        await conn.execute(
+                            """
+                            UPDATE users
+                               SET super_connect_credits = GREATEST(0, COALESCE(super_connect_credits, 0) - $1),
+                                   updated_at            = NOW()
+                             WHERE id = $2
+                            """,
+                            credits_granted,
+                            intent["user_id"],
+                        )
+                    log.info("Subscription revoked on refund: user=%s payment=%s credits_clawed=%s", intent["user_id"], payment_id, credits_granted)
                     from app.core.redis import get_redis
                     try:
                         r = get_redis()

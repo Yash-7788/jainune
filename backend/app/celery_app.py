@@ -4,7 +4,7 @@ Celery application factory + beat schedule.
 Workers are launched separately from the FastAPI server:
 
   # Worker (processes tasks)
-  celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q default,notifications
+  celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q default,notifications,batch
 
   # Beat (enqueues periodic tasks)
   celery -A app.celery_app beat --loglevel=info --scheduler celery.beat.PersistentScheduler
@@ -48,9 +48,10 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     task_track_started=True,
-    # Routing: push notifications on separate queue for isolation
+    # Routing: push notifications and daily heavy batch matching on isolated queues
     task_routes={
         "app.workers.notification_worker.*": {"queue": "notifications"},
+        "app.workers.daily_compatible.*": {"queue": "batch"},
         "app.workers.*": {"queue": "default"},
     },
     # Result expiry

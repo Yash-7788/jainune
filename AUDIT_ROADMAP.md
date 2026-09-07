@@ -9,7 +9,7 @@ Production readiness divided into two sequential tiers:
 
 ## 2. Current Progress Checkpoint
 - **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
-- **Test Suite**: 159 unit tests passing with 0 errors and 0 regressions.
+- **Test Suite**: 164 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -36,6 +36,12 @@ Production readiness divided into two sequential tiers:
   - Active paid subscription check blocks hard-purge and enforces soft-delete during subscription validity (AUDIT-2).
   - Financial transaction log retention for 7 years per RBI regulations (`financial_audit_logs`, migration `0013`) (AUDIT-1).
   - Celery ephemeral reaper 72h retention window with active subscription exclusion and financial archiving.
+  - Celery `daily_compatible` worker queue isolation to `batch` queue (AUDIT-3).
+  - `daily_compatible` gender-partitioned candidate scoping, asyncio event loop yielding, and 100-user checkpointed Redis pipeline flushes (AUDIT-3).
+  - Non-refundable protections for arcade consumable packs and fulfilled passes (B-1).
+  - Razorpay payment ID resolution on order ID lookups (B-2).
+  - Partial refund preservation of subscription tier (B-3).
+  - Super connect credit clawback on subscription full refund (B-4).
 
 ---
 

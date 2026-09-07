@@ -91,28 +91,50 @@ async def _run_async() -> None:
         # --- Per-user candidate ranking via CorePeopleFinder ---
         finder = CorePeopleFinder()
         feed_queues: dict[str, list[str]] = {}
+        CHECKPOINT_BATCH_SIZE = 100
 
-        for user in user_list:
+        # Pre-partition pool by gender for O(1) candidate narrowing
+        pool_by_gender = {
+            "men": [u for u in user_list if u.get("gender") in ("men", "man")],
+            "women": [u for u in user_list if u.get("gender") in ("women", "woman")],
+        }
+
+        pipe = redis.pipeline()
+        for idx, user in enumerate(user_list, start=1):
             uid = str(user["id"])
+            req_gender = user.get("show_me", "everyone")
+            scoped_pool = pool_by_gender.get(req_gender, user_list)
+
             try:
                 candidates = await finder.rank_candidates(
                     requester=user,
-                    pool_users=user_list,
+                    pool_users=scoped_pool,
                     top_k=TOP_K,
                     conn=conn,
                 )
-                feed_queues[uid] = [str(c["id"]) for c in candidates]
+                queue = [str(c["id"]) for c in candidates]
+                feed_queues[uid] = queue
             except Exception as exc:
                 log.warning("CorePeopleFinder failed for user %s: %s", uid, exc)
+                queue = []
                 feed_queues[uid] = []
 
-        # --- Cache feed queues in Redis ---
-        pipe = redis.pipeline()
-        for uid, queue in feed_queues.items():
+            # Checkpointed Redis persistence: flush every 100 users
             key = f"feed_queue:{uid}"
             pipe.set(key, json.dumps(queue), ex=FEED_QUEUE_TTL)
-        await pipe.execute()
-        log.info("run_daily_compatible: cached %d feed queues", len(feed_queues))
+
+            if idx % CHECKPOINT_BATCH_SIZE == 0:
+                await pipe.execute()
+                pipe = redis.pipeline()
+                await asyncio.sleep(0)  # Yield to event loop to keep worker responsive
+
+        # Flush any remaining queued keys
+        try:
+            await pipe.execute()
+        except Exception as exc:
+            log.warning("Final feed_queue pipeline flush error: %s", exc)
+
+        log.info("run_daily_compatible: checkpointed %d feed queues", len(feed_queues))
 
         # --- Stable marriage on users who opted for it (looking_for != figuring_out) ---
         marriage_users = [

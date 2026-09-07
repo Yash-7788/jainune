@@ -327,6 +327,174 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res["data"]["status"], "deactivated")
             self.assertIn("72 hours", res["data"]["message"])
 
+    async def test_12_arcade_purchases_non_refundable_self_service(self):
+        """Arcade spin/roll purchases cannot be refunded self-service (B-1)."""
+        from app.routers.subscriptions import request_refund, RefundRequestBody
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id}
+        mock_conn = MagicMock()
+        mock_conn.fetchrow = AsyncMock(return_value={
+            "user_id": user_id,
+            "amount": 4900,
+            "status": "captured",
+            "razorpay_order_id": "order_arcade_1",
+            "razorpay_payment_id": "pay_arcade_1",
+            "plan_id": "arcade_3_pack",
+        })
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        body = RefundRequestBody(razorpay_payment_id="pay_arcade_1")
+        with self.assertRaises(HTTPException) as ctx:
+            await request_refund(body=body, current_user=current_user, pool=mock_pool)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("non-refundable", ctx.exception.detail)
+
+    async def test_13_refund_resolves_payment_id_from_order_input(self):
+        """Passing order_* resolves to stored razorpay_payment_id to prevent gateway crash (B-2)."""
+        from app.routers.subscriptions import request_refund, RefundRequestBody
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id}
+        mock_conn = MagicMock()
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            # intent by payment_id fails
+            None,
+            # intent by order_id succeeds
+            {
+                "user_id": user_id,
+                "amount": 49900,
+                "status": "captured",
+                "razorpay_order_id": "order_stuck_123",
+                "razorpay_payment_id": "pay_valid_456",
+                "plan_id": "jainune_plus_monthly",
+            },
+            # user_row (unfulfilled: free and never had valid_until)
+            {"subscription_tier": "free", "subscription_valid_until": None},
+        ])
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        body = RefundRequestBody(razorpay_payment_id="order_stuck_123")
+        with patch("app.services.payment_service.initiate_refund", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "refund_id": "rfnd_test"}
+            res = await request_refund(body=body, current_user=current_user, pool=mock_pool)
+            mock_init.assert_called_once_with(
+                payment_id="pay_valid_456",
+                amount_paise=49900,
+                reason="user_cancellation",
+                pool=mock_pool,
+            )
+            self.assertTrue(res["success"])
+
+    async def test_14_partial_refund_preserves_subscription_tier(self):
+        """Partial goodwill refunds mark intent partially_refunded without stripping user tier (B-3)."""
+        from app.services.payment_service import process_refund
+
+        user_id = uuid.uuid4()
+        executed_sqls = []
+
+        mock_conn = _create_mock_conn()
+        mock_conn.fetchrow = AsyncMock(return_value={
+            "user_id": user_id,
+            "plan_id": "jainune_plus_monthly",
+            "status": "captured",
+            "amount": 49900,
+        })
+
+        async def fake_execute(query, *args):
+            executed_sqls.append(query)
+            return "UPDATE 1"
+
+        mock_conn.execute.side_effect = fake_execute
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        event = {
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "payment_id": "pay_partial_1",
+                        "amount": 5000,  # ₹50 partial refund on ₹499 plan
+                    }
+                }
+            }
+        }
+
+        await process_refund(event=event, pool=mock_pool)
+        self.assertFalse(any("subscription_tier        = 'free'" in s for s in executed_sqls))
+        self.assertTrue(any("status = 'partially_refunded'" in s for s in executed_sqls))
+
+    async def test_15_full_refund_claws_back_super_connect_credits(self):
+        """Full subscription refund revokes tier and claws back super connect credits (B-4)."""
+        from app.services.payment_service import process_refund
+
+        user_id = uuid.uuid4()
+        executed_sqls = []
+
+        mock_conn = _create_mock_conn()
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            # intent
+            {
+                "user_id": user_id,
+                "plan_id": "jainune_plus_monthly",
+                "status": "captured",
+                "amount": 49900,
+            },
+            # other_active: None
+            None,
+        ])
+
+        async def fake_execute(query, *args):
+            executed_sqls.append(query)
+            return "UPDATE 1"
+
+        mock_conn.execute.side_effect = fake_execute
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        event = {
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "payment_id": "pay_full_1",
+                        "amount": 49900,
+                    }
+                }
+            }
+        }
+
+        await process_refund(event=event, pool=mock_pool)
+        self.assertTrue(any("subscription_tier        = 'free'" in s for s in executed_sqls))
+        self.assertTrue(any("super_connect_credits = GREATEST(0" in s for s in executed_sqls))
+
+    async def test_16_daily_compatible_batching_and_queue_isolation(self):
+        """daily_compatible is isolated on dedicated batch queue and yields properly."""
+        from app.celery_app import celery_app
+        from app.services.core_people_finder import CorePeopleFinder
+
+        if hasattr(celery_app.conf.update, "call_args") and celery_app.conf.update.call_args:
+            called_args = celery_app.conf.update.call_args[0]
+            called_kwargs = celery_app.conf.update.call_args[1]
+            routes = called_kwargs.get("task_routes") or (called_args[0].get("task_routes") if called_args else {})
+            self.assertEqual(routes["app.workers.daily_compatible.*"]["queue"], "batch")
+        else:
+            self.assertEqual(celery_app.conf.task_routes["app.workers.daily_compatible.*"]["queue"], "batch")
+
+        finder = CorePeopleFinder()
+        req = {"id": uuid.uuid4(), "show_me": "women", "dietary_strictness": "pure_jain", "community_sect": "shwetambar"}
+        pool = [
+            {"id": uuid.uuid4(), "gender": "women", "dietary_strictness": "pure_jain", "community_sect": "shwetambar"}
+            for _ in range(300)
+        ]
+        candidates = await finder.rank_candidates(requester=req, pool_users=pool, top_k=10)
+        self.assertEqual(len(candidates), 10)
+
 
 if __name__ == "__main__":
     unittest.main()

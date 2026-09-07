@@ -704,6 +704,8 @@ class CorePeopleFinder:
                 score += 15
 
             ranked.append((score, cand))
+            if len(ranked) % 250 == 0:
+                await asyncio.sleep(0)
 
         ranked.sort(key=lambda x: x[0], reverse=True)
         return [item[1] for item in ranked[:top_k]]

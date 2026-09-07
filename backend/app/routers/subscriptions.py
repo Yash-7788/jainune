@@ -297,7 +297,7 @@ async def request_refund(
     async with pool.acquire() as conn:
         intent = await conn.fetchrow(
             """
-            SELECT user_id, amount, status, razorpay_order_id FROM payment_intents
+            SELECT user_id, amount, status, razorpay_order_id, razorpay_payment_id, plan_id FROM payment_intents
             WHERE razorpay_payment_id = $1
             """,
             body.razorpay_payment_id,
@@ -305,7 +305,7 @@ async def request_refund(
         if not intent:
             intent = await conn.fetchrow(
                 """
-                SELECT user_id, amount, status, razorpay_order_id FROM payment_intents
+                SELECT user_id, amount, status, razorpay_order_id, razorpay_payment_id, plan_id FROM payment_intents
                 WHERE razorpay_order_id = $1
                 """,
                 body.razorpay_payment_id,
@@ -316,8 +316,21 @@ async def request_refund(
             raise HTTPException(status_code=403, detail="Payment does not belong to authenticated user")
         if intent["status"] == "refunded":
             return {"success": True, "message": "Payment has already been refunded.", "status": "already_refunded"}
+        if intent["status"] != "captured":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only captured transactions can be refunded. Uncaptured or failed debits auto-reverse via bank within 5 business days.",
+            )
 
-        # Prevent refund abuse on active, fulfilled passes
+        # B-1: Arcade micro-transactions are digital consumables — non-refundable once credited
+        plan = payment_service.PLAN_CATALOGUE.get(intent.get("plan_id"))
+        if plan and plan.get("type") == "arcade":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Serendipity Arcade micro-transactions are non-refundable once credited.",
+            )
+
+        # B-1: Prevent refund abuse on active or previously-fulfilled passes
         user_row = await conn.fetchrow(
             "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
             user_id,
@@ -325,20 +338,31 @@ async def request_refund(
         now_utc = datetime.now(timezone.utc)
         is_active_fulfilled = (
             user_row
-            and user_row["subscription_tier"] != "free"
-            and user_row["subscription_valid_until"]
-            and user_row["subscription_valid_until"] > now_utc
+            and (
+                (user_row["subscription_tier"] != "free" and user_row["subscription_valid_until"] and user_row["subscription_valid_until"] > now_utc)
+                or (user_row["subscription_valid_until"] is not None and user_row["subscription_valid_until"] <= now_utc)
+            )
             and intent["status"] == "captured"
         )
         if is_active_fulfilled:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Active Jainune+ passes are non-refundable once fulfilled. If you experienced a billing issue, please contact support@jainune.com.",
+                detail="Active or fulfilled Jainune+ passes are non-refundable once fulfilled. If you experienced a billing issue, please contact support@jainune.com.",
+            )
+
+        # B-2: Resolve valid Razorpay payment ID (pay_*) to prevent gateway crash on order_* inputs
+        payment_id_to_refund = intent.get("razorpay_payment_id") or (
+            body.razorpay_payment_id if body.razorpay_payment_id.startswith("pay_") else None
+        )
+        if not payment_id_to_refund:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot refund transaction without a valid gateway payment ID (pay_*). Please contact support@jainune.com.",
             )
 
     try:
         result = await payment_service.initiate_refund(
-            payment_id=body.razorpay_payment_id,
+            payment_id=payment_id_to_refund,
             amount_paise=intent["amount"],
             reason=body.reason or "customer_recovery_unfulfilled",
             pool=pool,
