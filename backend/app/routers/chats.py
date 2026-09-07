@@ -206,21 +206,24 @@ async def get_messages(
                 before_uuid = uuid.UUID(cursor_val)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid cursor.")
-            before_ts = await conn.fetchval(
-                "SELECT created_at FROM messages WHERE id = $1", before_uuid
+            before_row = await conn.fetchrow(
+                "SELECT created_at, id FROM messages WHERE id = $1", before_uuid
             )
-            rows = await conn.fetch(
-                """
-                SELECT id, chat_id, sender_id, message_type, content,
-                       media_url, is_read, created_at,
-                       is_moderated, moderation_type, moderation_disclaimer
-                FROM messages
-                WHERE chat_id = $1 AND created_at < $2
-                ORDER BY created_at DESC
-                LIMIT $3
-                """,
-                actual_chat_id, before_ts, limit + 1,
-            )
+            if not before_row:
+                rows = []
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, chat_id, sender_id, message_type, content,
+                           media_url, is_read, created_at,
+                           is_moderated, moderation_type, moderation_disclaimer
+                    FROM messages
+                    WHERE chat_id = $1 AND (created_at, id) < ($2, $3)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    """,
+                    actual_chat_id, before_row["created_at"], before_row["id"], limit + 1,
+                )
         else:
             rows = await conn.fetch(
                 """
@@ -229,7 +232,7 @@ async def get_messages(
                        is_moderated, moderation_type, moderation_disclaimer
                 FROM messages
                 WHERE chat_id = $1
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT $2
                 """,
                 actual_chat_id, limit + 1,
