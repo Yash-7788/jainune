@@ -147,7 +147,7 @@ export default function EditProfileScreen() {
         setRecording(null);
         if (!uri) throw new Error("Audio recording failed");
 
-        const presign = await presignUpload("audio/m4a", 1024 * 1024);
+        const presign = await presignUpload("audio/m4a", 1024 * 1024, "voice");
         await uploadToPresignedUrl(presign.upload_url, uri, "audio/m4a");
         const res = await updateVoiceSnapshot(presign.media_id);
         setVoiceSnapshotUrl(res.voice_snapshot_url || presign.cdn_url);

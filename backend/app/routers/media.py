@@ -26,7 +26,10 @@ _MAX_PHOTO_BYTES = 10 * 1024 * 1024   # 10 MB
 _MAX_VOICE_BYTES = 5 * 1024 * 1024    # 5 MB
 
 _ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
-_ALLOWED_VOICE_CT = {"audio/mp4", "audio/mpeg", "audio/ogg", "audio/webm"}
+_ALLOWED_VOICE_CT = {
+    "audio/mp4", "audio/mpeg", "audio/ogg", "audio/webm",
+    "audio/m4a", "audio/x-m4a", "audio/aac",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +111,9 @@ async def request_upload(
     ext_map = {
         "image/jpeg": "jpg", "image/png": "png",
         "image/webp": "webp", "image/heic": "heic",
-        "audio/mp4": "m4a", "audio/mpeg": "mp3",
-        "audio/ogg": "ogg", "audio/webm": "webm",
+        "audio/mp4": "m4a", "audio/m4a": "m4a", "audio/x-m4a": "m4a",
+        "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/webm": "webm",
+        "audio/aac": "aac",
     }
     ext = ext_map.get(body.content_type, "bin")
     s3_key = f"uploads/{user_id}/{body.media_type}/{media_id}.{ext}"
