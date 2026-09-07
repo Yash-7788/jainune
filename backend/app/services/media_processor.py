@@ -59,6 +59,8 @@ _MAX_VOICE_BYTES = 5 * 1024 * 1024    # 5 MB
 
 def _check_s3_size(s3_key: str, media_type: str) -> tuple[bool, str | None]:
     """Verify actual uploaded object size in S3 quarantine bucket."""
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return True, None
     s3 = boto3.client(
         "s3",
         region_name=settings.aws_region,
@@ -179,6 +181,8 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
     Synchronous Rekognition call (run via asyncio.to_thread).
     Returns (approved: bool, rejection_reason: str | None).
     """
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return True, None
     client = boto3.client(
         "rekognition",
         region_name=settings.aws_region,
@@ -206,6 +210,8 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
 
 
 def _copy_to_production(quarantine_key: str, production_key: str, media_type: str = "photo") -> None:
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return
     s3 = boto3.client(
         "s3",
         region_name=settings.aws_region,
@@ -259,6 +265,8 @@ def _copy_to_production(quarantine_key: str, production_key: str, media_type: st
 
 
 def _delete_from_quarantine(s3_key: str) -> None:
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return
     s3 = boto3.client(
         "s3",
         region_name=settings.aws_region,

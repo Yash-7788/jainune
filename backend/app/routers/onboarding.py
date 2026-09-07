@@ -700,10 +700,8 @@ async def step22_complete(
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
         if row["onboarding_completed"]:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Onboarding already completed.",
-            )
+            # Idempotent re-entry: return success to prevent lockout on network retry
+            return _status(22, True, None)
 
         # Check mandatory fields
         required = [

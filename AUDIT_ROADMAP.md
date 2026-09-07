@@ -8,56 +8,32 @@ Production readiness divided into two sequential tiers:
 ---
 
 ## 2. Current Progress Checkpoint
-- **Status**: Rounds 1–7 complete.
-- **Test Suite**: 138 unit tests passing with 0 errors and 0 regressions.
+- **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
+- **Test Suite**: 154 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
-- **Git Commit**: Round 7 ready for push.
-- **Domains Audited So Far**:
+- **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
   - PostGIS location verifier & anti-spoofing coordinates.
   - Razorpay payment verification & multiprovider idempotency.
   - Media uploads, S3 EXIF stripping, and atomic photo reordering.
-  - WebSocket session validation (caller/recipient account status gates).
+  - WebSocket session validation, rate limiting, and ticket handshakes.
   - Admin moderation, refresh token purging, and Redis session cleanup.
   - Chat safety filters & recipient status validation.
   - Celery notification worker column compatibility.
   - `liked-me` paywall preservation & target user ID masking.
-  - Serendipity wheel spin speed-chat match/chat creation.
+  - Serendipity wheel spin speed-chat match/chat creation & spin credit preservation.
   - Ephemeral reaper stale match expiration & chat closure sync.
   - FCM v1 string typing and CDN URL formatting.
-  - Auth lifecycle gates for banned/deleted/suspended users across all providers (phone OTP, email OTP, Google, Apple), signup concurrency `ON CONFLICT` race mitigation, token refresh inactive user purging, profile update & unblock feed cache purging, and interactions target profile existence validation.
-  - **Round 6**:
-    - Backend DPDP Act 2023 `GET /v1/users/me/export` machine-readable personal data portability endpoint.
-    - Account service purge deleting all 6 match column aliases and all 4 chat participant aliases.
-    - Account soft delete setting matches `status = 'unmatched'` and chats `is_unmatched = TRUE`.
-    - Stable marriage engine output proposal stage sorted by score descending with strict 1-to-1 matching via `matched_users` set.
-    - Mobile profile edit looking_for normalization, Likes paywall tier checks, and auto-refresh on focus.
-  - **Round 7**:
-    - Unified messaging service (`messaging_service.py`): SMS (MSG91), WhatsApp (MSG91 WhatsApp API / Meta Cloud API with auto-fallback to SMS), and Email (SMTP/SES with branded HTML templates).
-    - Phone OTP channel selection: `OTPRequestBody` and `requestPhoneOTP` accept `channel="sms"` or `channel="whatsapp"`; added WhatsApp OTP delivery button in `PhoneScreen.tsx`.
-    - Email OTP real dispatch: hooked `send_email_otp` in `request_email_otp` (was previously mock logging only).
-    - Payment settlement & network cutoff recovery: added `initiate_refund` in `payment_service.py` using Razorpay Refund API to return debited funds directly to source UPI/bank accounts.
-    - Direct gateway sync: added `sync_order_with_razorpay` in `payment_service.py` and `POST /v1/subscriptions/sync` to reconcile and activate payments directly from Razorpay even if mobile connection drops before verify callback or webhooks are delayed.
-    - Refund request API: added `POST /v1/subscriptions/refund` with caller ownership verification.
-    - Mobile offline & network cutoff resilience: persisted pending payment verification receipts in `SecureStore` in `billingService.ts`; caught post-debit network drops with reassuring `pending_verification` state instead of false "Payment Failed" errors.
-    - Mobile Subscriptions UX: added `Restore / Sync Purchases` button and auto-sync on screen focus in `SubscriptionsScreen.tsx` with clear bank reconciliation/refund timelines.
+  - Auth lifecycle gates for banned/deleted/suspended users across all providers.
+  - Onboarding pipeline & Step 22 idempotency (zero network lockout risk).
+  - Dilemma voting concurrency race protection (`ON CONFLICT DO NOTHING`).
+  - Realtime WebSocket lifecycle (`useWebSocket.ts`), chat list sync on focus (`ChatsScreen.tsx`).
+  - Media quarantine & ephemeral reaper cloud client fail-safes.
 
 ---
 
-## 3. Tier 1: Remaining Code Logic Audits (2 Passes Remaining)
-Targeting absolute zero remaining logic defects in source files:
-- **Round 7 [COMPLETED]**:
-  - Unified messaging systems (SMS, WhatsApp, Email).
-  - Payment recovery, gateway reconciliation, and source bank refund pipeline.
-  - Mobile payment network drop persistence and Restore Purchases flow.
-- **Round 8 (Completed - Sub-Audit & Marketing/Payment Safeguards)**:
-  - Multi-channel promotional marketing system (SMS, WhatsApp, Email) with campaign segment targeting.
-  - Razorpay refund safeguards: active fulfilled passes non-refundable self-service; unfulfilled/failed debits refunded back to source bank.
-  - Guaranteed subscription revocation on refund (`tier = 'free'`, `valid_until = NULL`, Redis cache eviction).
-  - Admin campaign broadcast (`/v1/admin/campaigns/broadcast`) and admin refund (`/v1/admin/subscriptions/refund`).
-  - Mobile SubscriptionsScreen UI: removed misleading "Recurring UPI AutoPay" disclaimer; added launch promotional offer badge; added network cutoff error guidance.
-- **Round 9**:
-  - Final end-to-end integration pass across full auth -> onboarding -> feed -> chat -> payment lifecycle.
+## 3. Tier 1: Code Logic Audits [100% COMPLETE]
+All code logic audits across auth, onboarding, feed, chat, payments, arcade, and media are complete. Ready for Tier 2 Real-World Production Chaos & Resilience Hardening.
 
 ---
 

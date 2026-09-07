@@ -105,7 +105,9 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
       }).start(() => {
         setIsSpinning(false);
         setSpins(res.remaining_spins);
-        if (res.paired_user) {
+        if (!res.success && res.message) {
+          Alert.alert("Spin Preserved", res.message);
+        } else if (res.paired_user) {
           setLastWon(`✨ Paired with ${res.paired_user.first_name} (${res.paired_user.city})!`);
         } else {
           setLastWon(`${prize.icon} ${prize.label}`);

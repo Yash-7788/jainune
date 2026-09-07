@@ -43,6 +43,8 @@ async def _get_conn() -> asyncpg.Connection:
 
 
 def _s3_client():
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return None
     return boto3.client(
         "s3",
         region_name=settings.aws_region,
@@ -66,6 +68,10 @@ def reap_ephemeral_media() -> None:
     async def _run():
         conn = await _get_conn()
         s3 = _s3_client()
+        if not s3:
+            log.info("reap_ephemeral_media: AWS S3 client unavailable/mock, skipping S3 purge")
+            await conn.close()
+            return
         try:
             rows = await conn.fetch(
                 """

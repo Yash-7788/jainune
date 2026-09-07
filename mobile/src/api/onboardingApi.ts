@@ -225,7 +225,12 @@ export async function submitStep21(
 // Step 22: complete onboarding
 export async function submitStep22(): Promise<OnboardingStatus> {
   const res = await apiPatch<OnboardingStatus>("/onboarding/step/22", { confirmed: true });
-  if (!res.success) throw { _apiError: res.error };
+  if (!res.success) {
+    if (res.error?.code === "CONFLICT" || res.error?.message?.toLowerCase().includes("already completed")) {
+      return { current_step: 22, total_steps: 22, completed: true, next_step_hint: null };
+    }
+    throw { _apiError: res.error };
+  }
   return res.data;
 }
 

@@ -17,7 +17,7 @@ import {
   RefreshControl,
   Platform,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import { getChats, ChatThread } from "../../api/chatApi";
 import { extractError } from "../../api/client";
@@ -70,6 +70,12 @@ export default function ChatsScreen() {
   }, []);
 
   useEffect(() => { load(); }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      load(true);
+    }, [load])
+  );
 
   if (loading) {
     return (

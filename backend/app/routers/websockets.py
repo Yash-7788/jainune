@@ -24,7 +24,7 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 
 import secrets
 from app.core.database import get_pool
@@ -113,6 +113,15 @@ async def websocket_chat(
         await websocket.close(code=4001, reason="Invalid or expired credentials.")
         return
 
+    # Sliding window connection rate limit: 30 connects per 60s per user to prevent DoS
+    try:
+        await sliding_window_rate_limit(f"ratelimit:ws_connect:{user_id}", 30, 60, redis)
+    except HTTPException:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded.")
+        return
+    except Exception:
+        pass
+
     # ── 3. Participant and account status check ──────────────────────────────
     async with db.acquire() as conn:
         caller_row = await conn.fetchrow(
@@ -190,17 +199,28 @@ async def websocket_chat(
 
     async def _consumer() -> None:
         """Relay WebSocket frames → Redis channel (typing/read_receipt events)."""
-        try:
-            while True:
+        while True:
+            try:
                 data = await websocket.receive_json()
-                msg_type = data.get("type", "")
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                continue
 
-                if msg_type == "ping":
+            if not isinstance(data, dict):
+                continue
+
+            msg_type = data.get("type", "")
+            if msg_type == "ping":
+                try:
                     await websocket.send_json({"type": "pong"})
-                    continue
+                except Exception:
+                    break
+                continue
 
-                if msg_type in ("typing", "read_receipt"):
-                    # Fan out to other participant via the same Redis channel
+            if msg_type in ("typing", "read_receipt"):
+                # Fan out to other participant via the same Redis channel
+                try:
                     await redis.publish(
                         f"chat:{real_chat_id}",
                         json.dumps({
@@ -211,10 +231,8 @@ async def websocket_chat(
                             },
                         }),
                     )
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
+                except Exception:
+                    pass
 
     try:
         producer_task = asyncio.create_task(_producer())

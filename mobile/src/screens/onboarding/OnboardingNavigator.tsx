@@ -40,7 +40,7 @@ export type OnboardingStackParams = {
   Step04: undefined;
   Step05: undefined;
   Step06: undefined;
-  Step07: { dietaryStrictness: string };
+  Step07: { dietaryStrictness?: string } | undefined;
   Step08: undefined;
   Step09: undefined;
   Step10: undefined;

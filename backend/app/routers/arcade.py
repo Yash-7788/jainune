@@ -158,15 +158,24 @@ async def vote_on_dilemma(
             return {"already_voted": True, "choice": existing}
 
         async with conn.transaction():
-            await conn.execute(
+            inserted = await conn.fetchval(
                 """
                 INSERT INTO dilemma_votes (dilemma_id, user_id, choice)
                 VALUES ($1, $2, $3)
+                ON CONFLICT (dilemma_id, user_id) DO NOTHING
+                RETURNING id
                 """,
                 dilemma_id,
                 current_user["user_id"],
                 body.choice,
             )
+            if inserted is None:
+                existing_choice = await conn.fetchval(
+                    "SELECT choice FROM dilemma_votes WHERE dilemma_id = $1 AND user_id = $2",
+                    dilemma_id,
+                    current_user["user_id"],
+                )
+                return {"already_voted": True, "choice": existing_choice or body.choice}
 
             # Atomically update denormalized counter
             col = "total_votes_a" if body.choice == "A" else "total_votes_b"
@@ -373,38 +382,65 @@ async def spin_serendipity_wheel(
                 target_gender,
             )
 
+            if not candidate:
+                # No eligible candidate found right now: refund spin credit and preserve wallet balance
+                await conn.execute(
+                    """
+                    UPDATE user_arcade_wallet
+                       SET available_spins = available_spins + 1,
+                           updated_at = NOW()
+                     WHERE user_id = $1
+                    """,
+                    current_user["user_id"],
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO arcade_transactions
+                        (user_id, action_type, spins_delta, status)
+                    VALUES ($1, 'refund_spin_no_candidate', 1, 'refunded')
+                    """,
+                    current_user["user_id"],
+                )
+                return {
+                    "success": False,
+                    "action": "spin",
+                    "remaining_spins": remaining + 1,
+                    "chat_id": None,
+                    "paired_user": None,
+                    "message": "No new serendipity candidates available right now. Spin credit has been preserved!",
+                }
+
             chat_id = None
-            if candidate:
-                cand_id = candidate["id"]
-                pair = sorted([str(user_id), str(cand_id)])
-                u1 = uuid.UUID(pair[0])
-                u2 = uuid.UUID(pair[1])
-                match_row = await conn.fetchrow(
-                    """
-                    INSERT INTO matches
-                        (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
-                    VALUES ($1, $2, $1, $2, $1, $2, 'serendipity_spin', 'active')
-                    ON CONFLICT (user_a, user_b) DO UPDATE
-                        SET match_type = EXCLUDED.match_type
-                    RETURNING id
-                    """,
-                    u1, u2,
-                )
-                from datetime import datetime, timezone, timedelta
-                chat_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-                chat_row = await conn.fetchrow(
-                    """
-                    INSERT INTO chats
-                        (match_id, participant_1_id, participant_2_id, participant_a, participant_b, is_ephemeral, expires_at)
-                    VALUES ($1, $2, $3, $2, $3, TRUE, $4)
-                    ON CONFLICT (match_id) DO UPDATE
-                        SET is_ephemeral = TRUE, expires_at = EXCLUDED.expires_at, is_unmatched = FALSE
-                    RETURNING id
-                    """,
-                    match_row["id"], u1, u2, chat_expires_at,
-                )
-                chat_id = chat_row["id"]
-                await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
+            cand_id = candidate["id"]
+            pair = sorted([str(user_id), str(cand_id)])
+            u1 = uuid.UUID(pair[0])
+            u2 = uuid.UUID(pair[1])
+            match_row = await conn.fetchrow(
+                """
+                INSERT INTO matches
+                    (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
+                VALUES ($1, $2, $1, $2, $1, $2, 'serendipity_spin', 'active')
+                ON CONFLICT (user_a, user_b) DO UPDATE
+                    SET match_type = EXCLUDED.match_type
+                RETURNING id
+                """,
+                u1, u2,
+            )
+            from datetime import datetime, timezone, timedelta
+            chat_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+            chat_row = await conn.fetchrow(
+                """
+                INSERT INTO chats
+                    (match_id, participant_1_id, participant_2_id, participant_a, participant_b, is_ephemeral, expires_at)
+                VALUES ($1, $2, $3, $2, $3, TRUE, $4)
+                ON CONFLICT (match_id) DO UPDATE
+                    SET is_ephemeral = TRUE, expires_at = EXCLUDED.expires_at, is_unmatched = FALSE
+                RETURNING id
+                """,
+                match_row["id"], u1, u2, chat_expires_at,
+            )
+            chat_id = chat_row["id"]
+            await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
 
     return {
         "success": True,
@@ -415,7 +451,7 @@ async def spin_serendipity_wheel(
             "id": str(candidate["id"]),
             "first_name": candidate["first_name"],
             "city": candidate["city"],
-        } if candidate else None,
+        },
         "message": "Wheel spin successful! 15-minute speed chat enabled.",
     }
 
