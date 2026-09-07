@@ -256,6 +256,8 @@ def verify_payment_signature(
     signature: str,
 ) -> bool:
     """HMAC-SHA256 verification per Razorpay docs."""
+    if not settings.razorpay_key_secret or not signature or not order_id or not payment_id:
+        return False
     message = f"{order_id}|{payment_id}"
     expected = hmac.HMAC(
         settings.razorpay_key_secret.encode(),
@@ -272,6 +274,8 @@ def verify_payment_signature(
 
 def verify_webhook_signature(body: bytes, signature: str) -> bool:
     """Verify X-Razorpay-Signature header."""
+    if not settings.razorpay_webhook_secret or not signature or not body:
+        return False
     expected = hmac.HMAC(
         settings.razorpay_webhook_secret.encode(),
         body,

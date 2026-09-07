@@ -52,9 +52,9 @@ class CreateOrderBody(BaseModel):
 class VerifyPaymentBody(BaseModel):
     """Client posts Razorpay callback data for server-side HMAC verification."""
 
-    razorpay_order_id: str = Field(..., min_length=1)
-    razorpay_payment_id: str = Field(..., min_length=1)
-    razorpay_signature: str = Field(..., min_length=1)
+    razorpay_order_id: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", min_length=5, max_length=128)
+    razorpay_payment_id: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", min_length=5, max_length=128)
+    razorpay_signature: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", min_length=5, max_length=256)
 
 
 # ---------------------------------------------------------------------------

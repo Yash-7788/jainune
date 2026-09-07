@@ -98,6 +98,11 @@ export async function syncPendingPayment(): Promise<PurchaseResult> {
     }
   } catch {}
 
+  // Expire stale pending payment records older than 24 hours
+  if (pending && Date.now() - (pending.timestamp || 0) > 86400000) {
+    await clearPendingPayment();
+  }
+
   return { success: false };
 }
 

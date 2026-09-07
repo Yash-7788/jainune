@@ -112,8 +112,17 @@ async def list_users(
             *params[:-2],
         )
 
+    users_list = []
+    is_superadmin = admin.get("admin_role") == "superadmin"
+    for r in rows:
+        d = dict(r)
+        if not is_superadmin and d.get("phone_number"):
+            from app.services.messaging_service import _mask_phone
+            d["phone_number"] = _mask_phone(d["phone_number"])
+        users_list.append(d)
+
     return {
-        "users": [dict(r) for r in rows],
+        "users": users_list,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -126,7 +135,7 @@ async def get_user_detail(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Full user record including PII — for moderator review."""
+    """Full user record including PII — for moderator review with role-based redaction."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -145,6 +154,11 @@ async def get_user_detail(
 
     res = dict(row)
     if admin.get("admin_role") != "superadmin":
+        from app.services.messaging_service import _mask_phone, _mask_email
+        if res.get("phone_number"):
+            res["phone_number"] = _mask_phone(res["phone_number"])
+        if res.get("email"):
+            res["email"] = _mask_email(res["email"])
         for sensitive_col in (
             "revealed_preference_vector",
             "behavior_vector",
@@ -511,23 +525,29 @@ async def get_dashboard_stats(
 
 
 class BroadcastCampaignBody(BaseModel):
-    campaign_name: str = Field(..., min_length=3, max_length=64)
+    campaign_name: str = Field(..., min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     title: str = Field(..., min_length=3, max_length=120)
     message: str = Field(..., min_length=5, max_length=1000)
     channels: list[str] = Field(default=["email"], description="List containing email, whatsapp, and/or sms")
     target_segment: str = Field(default="free", pattern="^(free|plus|all)$")
     offer_badge: Optional[str] = Field(None, max_length=40)
-    cta_url: Optional[str] = Field(None, max_length=500)
+    cta_url: Optional[str] = Field(None, max_length=500, pattern=r"^https?://[a-zA-Z0-9.-]+.*$")
     limit: int = Field(default=500, ge=1, le=5000)
 
 
 @router.post("/campaigns/broadcast", status_code=status.HTTP_200_OK)
 async def trigger_campaign_broadcast(
     body: BroadcastCampaignBody,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_superadmin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Admin-triggered broadcast of promotional or festival campaign across channels."""
+    """Superadmin-only broadcast of promotional or festival campaign across channels with rate limiting."""
+    try:
+        r = get_redis()
+        await sliding_window_rate_limit(f"ratelimit:admin:broadcast:{admin['user_id']}", 5, 3600, r)
+    except Exception:
+        pass
+
     from app.services.messaging_service import broadcast_promotional_campaign
     res = await broadcast_promotional_campaign(
         pool=pool,
@@ -540,7 +560,7 @@ async def trigger_campaign_broadcast(
         cta_url=body.cta_url,
         limit=body.limit,
     )
-    log.info("Campaign %s triggered by admin %s: %s", body.campaign_name, admin["user_id"], res)
+    log.info("Campaign %s triggered by superadmin %s: %s", body.campaign_name, admin["user_id"], res)
     return {"success": True, "results": res}
 
 
@@ -550,7 +570,7 @@ async def trigger_campaign_broadcast(
 
 
 class AdminRefundBody(BaseModel):
-    razorpay_payment_id: str = Field(..., min_length=5, max_length=64)
+    razorpay_payment_id: str = Field(..., pattern=r"^(pay|order)_[a-zA-Z0-9_-]+$", min_length=5, max_length=64)
     reason: str = Field(..., min_length=3, max_length=256)
     amount_paise: Optional[int] = Field(None, ge=100)
 
@@ -565,6 +585,12 @@ async def admin_refund_subscription(
     Superadmin-authorized refund. Initiates gateway refund and immediately revokes
     the user's subscription access back to free tier.
     """
+    try:
+        r = get_redis()
+        await sliding_window_rate_limit(f"ratelimit:admin:refund:{admin['user_id']}", 20, 3600, r)
+    except Exception:
+        pass
+
     from app.services import payment_service
     res = await payment_service.initiate_refund(
         payment_id=body.razorpay_payment_id,
@@ -572,7 +598,7 @@ async def admin_refund_subscription(
         reason=f"admin_action: {body.reason}",
         pool=pool,
     )
-    log.info("Admin %s initiated refund for payment %s", admin["user_id"], body.razorpay_payment_id)
+    log.info("Superadmin %s initiated refund for payment %s", admin["user_id"], body.razorpay_payment_id)
     return res
 
 

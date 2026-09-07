@@ -207,7 +207,7 @@ async def verify_payment(
 
 
 class SyncSubscriptionBody(BaseModel):
-    razorpay_order_id: Optional[str] = Field(None, max_length=64)
+    razorpay_order_id: Optional[str] = Field(None, pattern=r"^order_[a-zA-Z0-9_-]+$", max_length=64)
 
 
 @router.post("/sync", status_code=status.HTTP_200_OK)
@@ -215,12 +215,17 @@ async def sync_subscription(
     body: Optional[SyncSubscriptionBody] = None,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: Optional[aioredis.Redis] = Depends(get_redis_client),
 ):
     """
     Directly reconciles payment status with Razorpay.
     Recovers from network drops, dropped webhooks, or unverified payments.
+    Rate limited to prevent gateway quota abuse.
     """
     user_id = current_user["user_id"]
+    if redis:
+        await sliding_window_rate_limit(f"ratelimit:subscriptions:sync:{user_id}", 10, 60, redis)
+
     order_id = body.razorpay_order_id if body and body.razorpay_order_id else None
 
     async with pool.acquire() as conn:
@@ -266,7 +271,7 @@ async def sync_subscription(
 
 
 class RefundRequestBody(BaseModel):
-    razorpay_payment_id: str = Field(..., min_length=5, max_length=64)
+    razorpay_payment_id: str = Field(..., pattern=r"^(pay|order)_[a-zA-Z0-9_-]+$", min_length=5, max_length=64)
     reason: Optional[str] = Field("user_cancellation", max_length=256)
 
 
@@ -275,6 +280,7 @@ async def request_refund(
     body: RefundRequestBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: Optional[aioredis.Redis] = Depends(get_redis_client),
 ):
     """
     Customer refund request for unfulfilled or failed transactions (Last Resort):
@@ -282,6 +288,10 @@ async def request_refund(
     Refunds are permitted only for stuck, unfulfilled, or duplicate debits.
     When refund is issued, subscription is unconditionally revoked.
     """
+    user_id = current_user["user_id"]
+    if redis:
+        await sliding_window_rate_limit(f"ratelimit:subscriptions:refund:{user_id}", 5, 300, redis)
+
     from datetime import datetime, timezone
     user_id = current_user["user_id"]
     async with pool.acquire() as conn:

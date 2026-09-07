@@ -263,6 +263,17 @@ export default function SubscriptionsScreen() {
               <Text style={styles.cancelBtnText}>Cancel Subscription</Text>
             )}
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.restoreBtn, { marginTop: spacing.sm }]}
+            onPress={handleRestorePurchases}
+            disabled={syncing}
+          >
+            {syncing ? (
+              <ActivityIndicator size="small" color={colors.saffron} />
+            ) : (
+              <Text style={styles.restoreBtnText}>🔄 Restore / Sync Purchases</Text>
+            )}
+          </TouchableOpacity>
         </View>
       )}
 

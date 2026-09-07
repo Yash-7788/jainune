@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import email.message
+import html
 import logging
+import re
 import smtplib
 from typing import Any, Optional
 
@@ -23,14 +25,35 @@ from app.core.config import settings
 log = logging.getLogger(__name__)
 
 
+def _sanitize_phone(phone: str) -> str:
+    raw = str(phone or "").strip()
+    if not re.match(r"^\+[1-9]\d{7,14}$", raw):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid phone number. Expected E.164 format (e.g. +919876543210).",
+        )
+    return raw
+
+
+def _sanitize_email(email_addr: str) -> str:
+    cleaned = str(email_addr or "").strip().lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", cleaned):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid recipient email address format.",
+        )
+    return cleaned
+
+
 def _mask_phone(phone: str) -> str:
-    if len(phone) >= 8:
-        return phone[:4] + "*" * (len(phone) - 8) + phone[-4:]
+    cleaned = re.sub(r"[^\d+]", "", str(phone or ""))
+    if len(cleaned) >= 8:
+        return cleaned[:4] + "*" * (len(cleaned) - 8) + cleaned[-4:]
     return "***"
 
 
 def _mask_email(email_str: str) -> str:
-    parts = email_str.split("@")
+    parts = str(email_str or "").split("@")
     if len(parts) == 2:
         user, domain = parts
         masked = (user[0] + "*" * (len(user) - 1)) if len(user) > 1 else "*"
@@ -40,11 +63,15 @@ def _mask_email(email_str: str) -> str:
 
 async def send_sms_otp(phone_number: str, otp: str) -> None:
     """Dispatches 6-digit verification code via MSG91 SMS gateway."""
+    phone_clean = _sanitize_phone(phone_number)
+    if not re.match(r"^\d{6}$", otp):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP format.")
+
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
-        log.info("[MOCK SMS] Dispatched OTP %s to %s", otp, _mask_phone(phone_number))
+        log.info("[MOCK SMS] Dispatched OTP %s to %s", otp, _mask_phone(phone_clean))
         return
 
-    mobile = phone_number.lstrip("+")
+    mobile = phone_clean.lstrip("+")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
@@ -57,13 +84,13 @@ async def send_sms_otp(phone_number: str, otp: str) -> None:
                 },
             )
             if resp.status_code not in (200, 201):
-                log.warning("SMS gateway responded with %s for %s", resp.status_code, _mask_phone(phone_number))
+                log.warning("SMS gateway responded with %s for %s", resp.status_code, _mask_phone(phone_clean))
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="SMS gateway temporarily unavailable. Retry shortly.",
                 )
     except httpx.RequestError as exc:
-        log.warning("SMS gateway connection error for %s: %s", _mask_phone(phone_number), exc)
+        log.warning("SMS gateway connection error for %s: %s", _mask_phone(phone_clean), exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="SMS gateway connection timeout.",
@@ -72,11 +99,15 @@ async def send_sms_otp(phone_number: str, otp: str) -> None:
 
 async def send_whatsapp_otp(phone_number: str, otp: str) -> None:
     """Dispatches 6-digit verification code via WhatsApp Business gateway."""
+    clean_phone = _sanitize_phone(phone_number)
+    if not re.match(r"^\d{6}$", otp):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP format.")
+
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
-        log.info("[MOCK WHATSAPP] Dispatched OTP %s to %s", otp, _mask_phone(phone_number))
+        log.info("[MOCK WHATSAPP] Dispatched OTP %s to %s", otp, _mask_phone(clean_phone))
         return
 
-    mobile = phone_number.lstrip("+")
+    mobile = clean_phone.lstrip("+")
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             resp = await client.post(
@@ -95,17 +126,19 @@ async def send_whatsapp_otp(phone_number: str, otp: str) -> None:
                 },
             )
             if resp.status_code not in (200, 201):
-                log.warning("WhatsApp gateway responded with %s for %s; falling back to SMS", resp.status_code, _mask_phone(phone_number))
-                await send_sms_otp(phone_number, otp)
+                log.warning("WhatsApp gateway responded with %s for %s; falling back to SMS", resp.status_code, _mask_phone(clean_phone))
+                await send_sms_otp(clean_phone, otp)
     except httpx.RequestError as exc:
-        log.warning("WhatsApp gateway error for %s (%s); falling back to SMS", _mask_phone(phone_number), exc)
-        await send_sms_otp(phone_number, otp)
+        log.warning("WhatsApp gateway error for %s (%s); falling back to SMS", _mask_phone(clean_phone), exc)
+        await send_sms_otp(clean_phone, otp)
 
 
 def _send_smtp_email_sync(to_email: str, subject: str, html_body: str, text_body: str) -> None:
-    """Synchronous SMTP email delivery."""
+    """Synchronous SMTP email delivery with CRLF injection protection."""
     msg = email.message.EmailMessage()
-    msg["Subject"] = subject
+    # Prevent CRLF header injection in email subject
+    clean_subject = re.sub(r"[\r\n]+", " ", str(subject or "")).strip()
+    msg["Subject"] = clean_subject
     msg["From"] = f"{settings.email_from_name} <{settings.email_from_address}>"
     msg["To"] = to_email
     msg.set_content(text_body)
@@ -119,15 +152,16 @@ def _send_smtp_email_sync(to_email: str, subject: str, html_body: str, text_body
 
 
 async def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> None:
-    """Sends transactional email via SMTP or logs in mock mode."""
+    """Sends transactional email via SMTP or logs in mock mode with recipient sanitization."""
+    clean_to = _sanitize_email(to_email)
     if not settings.smtp_host or settings.debug:
-        log.info("[MOCK EMAIL] To: %s | Subject: %s | Text: %s", _mask_email(to_email), subject, text_body[:80])
+        log.info("[MOCK EMAIL] To: %s | Subject: %s | Text: %s", _mask_email(clean_to), subject, text_body[:80])
         return
 
     try:
-        await asyncio.to_thread(_send_smtp_email_sync, to_email, subject, html_body, text_body)
+        await asyncio.to_thread(_send_smtp_email_sync, clean_to, subject, html_body, text_body)
     except Exception as exc:
-        log.error("Failed to deliver transactional email to %s: %s", _mask_email(to_email), exc)
+        log.error("Failed to deliver transactional email to %s: %s", _mask_email(clean_to), exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Email delivery service temporarily unavailable.",
@@ -136,6 +170,10 @@ async def send_email(to_email: str, subject: str, html_body: str, text_body: str
 
 async def send_email_otp(to_email: str, otp: str) -> None:
     """Renders and delivers secure 6-digit OTP verification email."""
+    clean_to = _sanitize_email(to_email)
+    if not re.match(r"^\d{6}$", otp):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP format.")
+
     subject = f"{otp} is your Jainune verification code"
     text_body = f"Welcome to Jainune.\n\nYour verification code is: {otp}\n\nThis code expires in 10 minutes. Do not share this code with anyone.\n\nJai Jinendra,\nTeam Jainune"
     html_body = f"""
@@ -180,12 +218,15 @@ async def send_promotional_sms(
     message: str,
     flow_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Sends promotional SMS via MSG91 Flow / Campaign API."""
+    """Sends promotional SMS via MSG91 Flow / Campaign API with phone and content sanitization."""
+    clean_phone = _sanitize_phone(phone_number)
+    clean_message = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", str(message or "")).strip()
+
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
-        log.info("[MOCK PROMO SMS] To: %s | Message: %s", _mask_phone(phone_number), message[:60])
+        log.info("[MOCK PROMO SMS] To: %s | Message: %s", _mask_phone(clean_phone), clean_message[:60])
         return {"success": True, "channel": "sms", "mock": True}
 
-    mobile = phone_number.lstrip("+")
+    mobile = clean_phone.lstrip("+")
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
@@ -198,12 +239,12 @@ async def send_promotional_sms(
                     "flow_id": flow_id or settings.msg91_promotional_flow_id or settings.msg91_otp_template_id,
                     "sender": "JAINUN",
                     "mobiles": mobile,
-                    "message": message,
+                    "message": clean_message,
                 },
             )
             return {"success": resp.status_code in (200, 201), "channel": "sms", "status_code": resp.status_code}
     except Exception as exc:
-        log.warning("Promotional SMS failed for %s: %s", _mask_phone(phone_number), exc)
+        log.warning("Promotional SMS failed for %s: %s", _mask_phone(clean_phone), exc)
         return {"success": False, "channel": "sms", "error": str(exc)}
 
 
@@ -213,12 +254,18 @@ async def send_promotional_whatsapp(
     parameters: dict[str, str],
     fallback_message: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Dispatches promotional WhatsApp template message with SMS fallback."""
+    """Dispatches promotional WhatsApp template message with sanitization and SMS fallback."""
+    clean_phone = _sanitize_phone(phone_number)
+    clean_params = {
+        str(k): re.sub(r"[\x00-\x1F\x7F]", " ", str(v or "")).strip()
+        for k, v in parameters.items()
+    }
+
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
-        log.info("[MOCK PROMO WHATSAPP] To: %s | Template: %s", _mask_phone(phone_number), template_name)
+        log.info("[MOCK PROMO WHATSAPP] To: %s | Template: %s", _mask_phone(clean_phone), template_name)
         return {"success": True, "channel": "whatsapp", "mock": True}
 
-    mobile = phone_number.lstrip("+")
+    mobile = clean_phone.lstrip("+")
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
@@ -235,7 +282,7 @@ async def send_promotional_whatsapp(
                         "components": [
                             {
                                 "type": "body",
-                                "parameters": [{"type": "text", "text": v} for v in parameters.values()],
+                                "parameters": [{"type": "text", "text": v} for v in clean_params.values()],
                             }
                         ],
                     },
@@ -248,7 +295,7 @@ async def send_promotional_whatsapp(
         log.warning("WhatsApp promotional error: %s; fallback to SMS", exc)
 
     if fallback_message:
-        return await send_promotional_sms(phone_number, fallback_message)
+        return await send_promotional_sms(clean_phone, fallback_message)
     return {"success": False, "channel": "whatsapp"}
 
 
@@ -261,20 +308,32 @@ async def send_promotional_email(
     cta_title: Optional[str] = None,
     cta_url: Optional[str] = None,
 ) -> bool:
-    """Delivers branded promotional / marketing email with Jain aesthetic."""
+    """Delivers branded promotional / marketing email with strict HTML escaping and URL protocol whitelisting."""
+    clean_to = _sanitize_email(to_email)
+    safe_title = html.escape(str(title or "").strip())
+    safe_body = html.escape(str(body_text or "").strip()).replace("\n", "<br/>")
+    safe_badge = html.escape(str(offer_badge or "").strip()) if offer_badge else ""
+    safe_cta_title = html.escape(str(cta_title or "Explore Jainune+").strip())
+
+    # Strict URL validation: allow only http:// and https:// (mitigate javascript: / phishing XSS)
+    raw_url = str(cta_url or "https://jainune.com").strip()
+    if not re.match(r"^https?://[a-zA-Z0-9.-]+", raw_url, re.IGNORECASE):
+        raw_url = "https://jainune.com"
+    safe_cta_url = html.escape(raw_url, quote=True)
+
     badge_html = f"""
     <div style="display: inline-block; background-color: #FEF3C7; color: #92400E; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 9999px; margin-bottom: 16px; border: 1px solid #FCD34D;">
-        {offer_badge}
+        {safe_badge}
     </div>
-    """ if offer_badge else ""
+    """ if safe_badge else ""
 
     cta_html = f"""
     <div style="margin: 28px 0; text-align: center;">
-        <a href="{cta_url or 'https://jainune.com'}" style="background-color: #D97706; color: #FFFFFF; font-weight: 600; text-decoration: none; padding: 14px 28px; border-radius: 12px; display: inline-block; font-size: 15px;">
-            {cta_title or 'Explore Jainune+'}
+        <a href="{safe_cta_url}" style="background-color: #D97706; color: #FFFFFF; font-weight: 600; text-decoration: none; padding: 14px 28px; border-radius: 12px; display: inline-block; font-size: 15px;">
+            {safe_cta_title}
         </a>
     </div>
-    """ if cta_title or cta_url else ""
+    """
 
     html_body = f"""<!DOCTYPE html>
 <html>
@@ -284,8 +343,8 @@ async def send_promotional_email(
         <span style="font-size: 20px; font-weight: 800; letter-spacing: -0.5px; color: #D97706;">JAINUNE</span>
       </div>
       {badge_html}
-      <h2 style="font-size: 22px; font-weight: 700; color: #1C1917; margin: 0 0 16px 0; line-height: 28px;">{title}</h2>
-      <p style="font-size: 15px; line-height: 24px; color: #44403C; margin: 0 0 16px 0; white-space: pre-line;">{body_text}</p>
+      <h2 style="font-size: 22px; font-weight: 700; color: #1C1917; margin: 0 0 16px 0; line-height: 28px;">{safe_title}</h2>
+      <p style="font-size: 15px; line-height: 24px; color: #44403C; margin: 0 0 16px 0;">{safe_body}</p>
       {cta_html}
       <hr style="border: none; border-top: 1px solid #F5F5F4; margin: 28px 0;" />
       <p style="font-size: 12px; color: #A8A29E; text-align: center; line-height: 18px; margin: 0;">
@@ -296,12 +355,12 @@ async def send_promotional_email(
   </body>
 </html>"""
 
-    plain_text = f"Jai Jinendra\n\n{title}\n\n{body_text}\n\n{cta_title or 'Visit'}: {cta_url or 'https://jainune.com'}\n\nTeam Jainune"
+    plain_text = f"Jai Jinendra\n\n{title}\n\n{body_text}\n\n{cta_title or 'Visit'}: {raw_url}\n\nTeam Jainune"
     try:
-        await send_email(to_email, subject, html_body, plain_text)
+        await send_email(clean_to, subject, html_body, plain_text)
         return True
     except Exception as exc:
-        log.warning("Promotional email delivery failed for %s: %s", _mask_email(to_email), exc)
+        log.warning("Promotional email delivery failed for %s: %s", _mask_email(clean_to), exc)
         return False
 
 

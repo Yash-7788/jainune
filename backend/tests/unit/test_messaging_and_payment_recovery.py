@@ -338,6 +338,111 @@ class TestMessagingAndPaymentRecovery(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ref_res["success"])
             mock_refund.assert_called_once()
 
+    async def test_15_sanitization_phone_and_email(self):
+        """Verify phone and email sanitizers strictly enforce valid formats and reject injection."""
+        from app.services.messaging_service import _sanitize_phone, _sanitize_email
+
+        self.assertEqual(_sanitize_phone("+919876543210"), "+919876543210")
+        with self.assertRaises(HTTPException):
+            _sanitize_phone("not_a_phone")
+        with self.assertRaises(HTTPException):
+            _sanitize_phone("+1234")  # too short
+        with self.assertRaises(HTTPException):
+            _sanitize_phone("+919876543210; DROP TABLE users;")
+
+        self.assertEqual(_sanitize_email("user@example.com"), "user@example.com")
+        with self.assertRaises(HTTPException):
+            _sanitize_email("user\r\nBcc: evil@attacker.com")
+        with self.assertRaises(HTTPException):
+            _sanitize_email("invalid-email-address")
+
+    async def test_16_otp_format_validation(self):
+        """Verify OTP sending functions reject non-6-digit payloads."""
+        with self.assertRaises(HTTPException):
+            await send_sms_otp("+919876543210", "12345")
+        with self.assertRaises(HTTPException):
+            await send_sms_otp("+919876543210", "1234567")
+        with self.assertRaises(HTTPException):
+            await send_sms_otp("+919876543210", "abcdef")
+        with self.assertRaises(HTTPException):
+            await send_whatsapp_otp("+919876543210", "12a456")
+        with self.assertRaises(HTTPException):
+            await send_email_otp("test@jainune.com", "12345")
+
+    async def test_17_crlf_and_html_injection_prevention(self):
+        """Verify promotional email sanitizes HTML and blocks javascript: URI execution."""
+        with patch("app.services.messaging_service.send_email", new_callable=AsyncMock) as mock_email:
+            mock_email.return_value = None
+            ok = await send_promotional_email(
+                to_email="test@jainune.com",
+                subject="Big News",
+                title="<script>alert('xss')</script>",
+                body_text="Click here: <b>bold</b>",
+                cta_url="javascript:alert(1)",
+            )
+            self.assertTrue(ok)
+            mock_email.assert_called_once()
+            args, kwargs = mock_email.call_args
+            to_e, subj, html_b, text_b = args
+            self.assertNotIn("<script>", html_b)
+            self.assertIn("&lt;script&gt;", html_b)
+            self.assertNotIn("javascript:alert(1)", html_b)
+            self.assertIn("https://jainune.com", html_b)
+
+    async def test_18_verify_payment_body_schema_hardening(self):
+        """Verify VerifyPaymentBody rejects malformed patterns or injection payloads."""
+        from app.models.schemas.payment import VerifyPaymentBody
+        from pydantic import ValidationError
+
+        valid = VerifyPaymentBody(
+            razorpay_order_id="order_valid_123",
+            razorpay_payment_id="pay_valid_123",
+            razorpay_signature="sig_valid_123",
+        )
+        self.assertEqual(valid.razorpay_order_id, "order_valid_123")
+
+        with self.assertRaises(ValidationError):
+            VerifyPaymentBody(
+                razorpay_order_id="order_123; DROP TABLE",
+                razorpay_payment_id="pay_123",
+                razorpay_signature="sig_123",
+            )
+
+    async def test_19_admin_pii_redaction_for_moderators(self):
+        """Verify list_users and get_user_detail mask phone numbers and email for moderator roles."""
+        from app.routers.admin import list_users, get_user_detail
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        user_uuid = uuid.uuid4()
+
+        mock_conn.fetch = AsyncMock(return_value=[
+            {"id": user_uuid, "phone_number": "+919876543210", "first_name": "Priya", "account_status": "active", "subscription_tier": "free", "trust_score": 90, "created_at": "2026-01-01"}
+        ])
+        mock_conn.fetchval = AsyncMock(return_value=1)
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Moderator sees masked phone
+        mod_admin = {"user_id": uuid.uuid4(), "admin_role": "moderator"}
+        res = await list_users(admin=mod_admin, pool=mock_pool)
+        self.assertEqual(res["users"][0]["phone_number"], "+919*****3210")
+
+        # Superadmin sees unmasked phone
+        super_admin = {"user_id": uuid.uuid4(), "admin_role": "superadmin"}
+        super_res = await list_users(admin=super_admin, pool=mock_pool)
+        self.assertEqual(super_res["users"][0]["phone_number"], "+919876543210")
+
+        # Detail view masking
+        mock_conn.fetchrow = AsyncMock(return_value={
+            "id": user_uuid,
+            "phone_number": "+919876543210",
+            "email": "priya@example.com",
+            "first_name": "Priya",
+        })
+        mod_detail = await get_user_detail(user_id=user_uuid, admin=mod_admin, pool=mock_pool)
+        self.assertEqual(mod_detail["phone_number"], "+919*****3210")
+        self.assertEqual(mod_detail["email"], "p****@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()
