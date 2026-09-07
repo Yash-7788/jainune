@@ -9,7 +9,7 @@ Production readiness divided into two sequential tiers:
 
 ## 2. Current Progress Checkpoint
 - **Status**: Tier 1 Code Logic Hardening 100% COMPLETE. Tier 2 Production Hardening Phase IN PROGRESS.
-- **Test Suite**: 172 unit tests passing with 0 errors and 0 regressions.
+- **Test Suite**: 173 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -50,6 +50,7 @@ Production readiness divided into two sequential tiers:
   - Reverse-proxy rate limit evasion defense via `get_trusted_client_ip()` origin-locked resolution across auth, location, and onboarding (Tier 2).
   - Arcade wallet double-spend serialized via `SELECT ... FOR UPDATE` row locks in `spin_serendipity_wheel` and `roll_lucky_dice` (Tier 2).
   - Automated FCM v1 / Expo unregistered and dead device token nullification from PostgreSQL (Tier 2).
+  - Resilient MSG91 SMS 503 / DLT template congestion automatic failover to WhatsApp OTP (Tier 2).
 
 ---
 
