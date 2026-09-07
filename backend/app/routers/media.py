@@ -210,8 +210,6 @@ async def presign_upload_get(
     redis: RedisDep,
     type: str = Query("photo", pattern="^(photo|voice)$"),
 ) -> UploadRequestResponse:
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-    await sliding_window_rate_limit(f"ratelimit:media:upload:{user_id}", 20, 60, redis)
     ct = "image/jpeg" if type == "photo" else "audio/m4a"
     size = 2 * 1024 * 1024 if type == "photo" else 1024 * 1024
     body = UploadRequestBody(
