@@ -20,6 +20,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 
 router = APIRouter(prefix="/v1/telemetry", tags=["telemetry"])
@@ -111,6 +112,8 @@ async def ingest_events(
     prevent enumeration attacks.
     """
     actor_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:telemetry:{actor_id}", 120, 60, redis)
+
     server_ts = int(time.time() * 1000)
 
     accepted = 0

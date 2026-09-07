@@ -18,13 +18,14 @@ import random
 from typing import Optional
 from uuid import UUID
 
+import asyncpg
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-import asyncpg
-
 from app.core.database import get_pool
-from app.dependencies import get_current_user
+from app.core.security import sliding_window_rate_limit
+from app.dependencies import get_current_user, get_redis_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/arcade", tags=["Arcade"])
@@ -69,11 +70,13 @@ async def get_dilemma_feed(
     offset: int = Query(default=0, ge=0),
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Returns dilemmas the current user has not voted on yet, newest-first.
     Already-voted dilemmas appear at the end with user_choice populated.
     """
+    await sliding_window_rate_limit(f"ratelimit:arcade:feed:{current_user['user_id']}", 60, 60, redis)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -128,11 +131,13 @@ async def vote_on_dilemma(
     body: VoteBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Cast a vote on a dilemma. One vote per user per dilemma (idempotent).
     Increments the appropriate counter on the dilemmas table atomically.
     """
+    await sliding_window_rate_limit(f"ratelimit:arcade:vote:{current_user['user_id']}", 60, 60, redis)
     async with pool.acquire() as conn:
         # Check dilemma exists
         exists = await conn.fetchval(
@@ -182,11 +187,13 @@ async def get_dilemma_results(
     dilemma_id: UUID,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Returns aggregate vote breakdown.
     User must have voted to see results (prevents anchoring bias).
     """
+    await sliding_window_rate_limit(f"ratelimit:arcade:results:{current_user['user_id']}", 60, 60, redis)
     async with pool.acquire() as conn:
         dilemma = await conn.fetchrow(
             """
@@ -282,8 +289,10 @@ class ArcadeWalletResponse(BaseModel):
 async def get_arcade_wallet(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """Fetch current user's arcade token balance (spins and dice rolls)."""
+    await sliding_window_rate_limit(f"ratelimit:arcade:wallet:{current_user['user_id']}", 60, 60, redis)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -304,11 +313,13 @@ async def get_arcade_wallet(
 async def spin_serendipity_wheel(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Consume 1 spin credit from wallet and trigger instantaneous random Bangalore pairing.
     (SUBSCRIPTION_SPEC.md §4.2: Kinetic Wheel Spin)
     """
+    await sliding_window_rate_limit(f"ratelimit:arcade:spin:{current_user['user_id']}", 30, 60, redis)
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Atomic deduction
@@ -371,11 +382,13 @@ async def spin_serendipity_wheel(
 async def roll_lucky_dice(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Consume 1 dice roll credit from wallet and generate lucky match ticket.
     (SUBSCRIPTION_SPEC.md §4.3: Lucky Match Dice Roll)
     """
+    await sliding_window_rate_limit(f"ratelimit:arcade:roll:{current_user['user_id']}", 30, 60, redis)
     import random
     async with pool.acquire() as conn:
         async with conn.transaction():

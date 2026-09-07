@@ -14,7 +14,8 @@ from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.dependencies import CurrentUser, DBDep
+from app.core.security import sliding_window_rate_limit
+from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.user import ReorderMediaBody
 from app.services.media_processor import enqueue_moderation
 
@@ -71,6 +72,7 @@ async def request_upload(
     body: UploadRequestBody,
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep,
 ) -> UploadRequestResponse:
     """
     Returns a presigned S3 PUT URL for the quarantine bucket.
@@ -81,6 +83,7 @@ async def request_upload(
     Content-type and size constraints are enforced via S3 presigned policy conditions.
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:media:upload:{user_id}", 20, 60, redis)
 
     # Validate content type
     if body.media_type == "photo":
@@ -177,6 +180,7 @@ async def request_upload(
 async def presign_upload_get(
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep,
     type: str = Query("photo", pattern="^(photo|voice)$"),
 ) -> UploadRequestResponse:
     ct = "image/jpeg" if type == "photo" else "audio/mp4"
@@ -187,7 +191,7 @@ async def presign_upload_get(
         file_size_bytes=size,
         position=0,
     )
-    return await request_upload(body, current_user, db)
+    return await request_upload(body, current_user, db, redis)
 
 
 @router.post(
@@ -199,6 +203,7 @@ async def confirm_upload(
     body: ConfirmUploadBody,
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep,
 ) -> dict:
     """
     Client calls this after the direct-to-S3 PUT succeeds.
@@ -206,6 +211,7 @@ async def confirm_upload(
     CDN URL is populated once moderation passes.
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:media:confirm:{user_id}", 30, 60, redis)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(

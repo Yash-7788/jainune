@@ -155,6 +155,9 @@ async def sliding_window_rate_limit(
     redis: aioredis.Redis,
 ) -> None:
     """Sliding-window rate limiter using Redis sorted set."""
+    if redis is None or not hasattr(redis, "pipeline"):
+        return
+
     import time
     now_ms = int(time.time() * 1000)
     window_start = now_ms - (window_seconds * 1000)

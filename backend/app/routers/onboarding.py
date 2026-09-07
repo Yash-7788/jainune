@@ -715,6 +715,21 @@ async def step22_complete(
                 detail="Location (step 11) is required to complete onboarding.",
             )
 
+        has_photo = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM user_media
+                WHERE user_id = $1 AND media_type = 'photo' AND status != 'rejected'
+            )
+            """,
+            current_user.id,
+        )
+        if not has_photo:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="At least one photo (step 19) is required to complete onboarding.",
+            )
+
         async with conn.transaction():
             # Mark onboarding complete and activate account
             await conn.execute(

@@ -13,7 +13,9 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
+from app.services.payment_service import get_effective_user_tier
 from app.models.schemas.chat import (
     ChatHistoryResponse,
     ChatListResponse,
@@ -280,6 +282,8 @@ async def send_message(
     Applies Roblox-style chat safety filters and moderation.
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:chats:msg:{user_id}", 60, 60, redis)
+
     chat = await _assert_participant(chat_id, user_id, db)
     actual_chat_id = chat["id"]
 
@@ -327,18 +331,9 @@ async def send_message(
                 detail="Recipient account is no longer active.",
             )
 
-        # Check user subscription status
-        user_sub = await conn.fetchrow(
-            "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
-            user_id,
-        )
+        effective_tier = await get_effective_user_tier(user_id, conn)
 
-    is_subscribed = False
-    if user_sub:
-        tier = user_sub.get("subscription_tier") or "free"
-        valid_until = user_sub.get("subscription_valid_until")
-        if tier in ("jainune_plus", "gold", "platinum") and valid_until and valid_until > datetime.now(timezone.utc):
-            is_subscribed = True
+    is_subscribed = effective_tier in ("jainune_plus", "gold", "platinum")
 
     # Filter content if text message
     final_content = body.content

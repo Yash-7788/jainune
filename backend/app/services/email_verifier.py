@@ -26,7 +26,7 @@ _ALLOWED_POPULAR_DOMAINS = {
     # Yahoo
     "yahoo.com", "yahoo.co.in", "yahoo.in", "yahoo.co.uk", "ymail.com", "rocketmail.com", "myyahoo.com",
     # Apple
-    "icloud.com", "me.com", "mac.com",
+    "icloud.com", "me.com", "mac.com", "privaterelay.appleid.com", "appleid.apple.com",
     # Proton
     "proton.me", "protonmail.com",
     # Zoho

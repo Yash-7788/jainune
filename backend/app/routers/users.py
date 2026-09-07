@@ -342,12 +342,7 @@ async def get_public_profile(
     Used by the chat/profile deep-link flow.
     """
     caller_id = current_user.get("user_id") or current_user.get("id")
-    rate_key = f"rl:user_public:{caller_id}"
-    if not await sliding_window_rate_limit(redis, rate_key, limit=30, window_seconds=60):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded for profile views.",
-        )
+    await sliding_window_rate_limit(f"ratelimit:user_public:{caller_id}", 30, 60, redis)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """

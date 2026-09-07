@@ -61,12 +61,7 @@ async def verify_location(
     - If outside: returns allowed=False and automatically logs entry to location_waitlist.
     """
     client_ip = request.client.host if request.client else "unknown"
-    rate_key = f"rl:loc_verify:{client_ip}"
-    if not await sliding_window_rate_limit(redis, rate_key, limit=15, window_seconds=60):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many location verification requests. Please wait a minute.",
-        )
+    await sliding_window_rate_limit(f"ratelimit:loc_verify:{client_ip}", 15, 60, redis)
 
     # 1. Anti-spoofing & integrity gate
     valid_gps, spoof_error = verify_location_anti_spoofing(

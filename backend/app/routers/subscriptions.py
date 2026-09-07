@@ -16,7 +16,9 @@ import asyncpg
 
 from app.core.config import settings
 from app.core.database import get_pool
-from app.dependencies import get_current_user
+from app.core.security import sliding_window_rate_limit
+from app.dependencies import get_current_user, get_redis_client
+import redis.asyncio as aioredis
 from app.models.schemas.payment import (
     CreateOrderBody,
     OrderResponse,
@@ -52,11 +54,15 @@ async def create_order(
     body: CreateOrderBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Server-side Razorpay order creation.
     The returned order_id + amount are passed to Razorpay Checkout on the client.
     """
+    await sliding_window_rate_limit(
+        f"ratelimit:subscriptions:order:{current_user['user_id']}", 10, 60, redis
+    )
     try:
         result = await payment_service.create_order(
             user_id=current_user["user_id"],
@@ -79,6 +85,7 @@ async def verify_payment(
     body: VerifyPaymentBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
     Client posts callback data for server-side HMAC check.
@@ -88,6 +95,9 @@ async def verify_payment(
       - Redis distributed lock on order_id (anti-race/double-spend)
       - Idempotent return if already captured
     """
+    await sliding_window_rate_limit(
+        f"ratelimit:subscriptions:verify:{current_user['user_id']}", 20, 60, redis
+    )
     # 1. Verify caller owns the order
     async with pool.acquire() as conn:
         intent = await conn.fetchrow(

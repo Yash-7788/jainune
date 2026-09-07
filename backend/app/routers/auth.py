@@ -326,7 +326,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google account identification missing.")
 
     if email:
-        is_disp, reason = is_disposable_email(email)
+        is_disp, reason = is_disposable_email(email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
@@ -385,7 +385,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple account identification missing.")
 
     if email:
-        is_disp, reason = is_disposable_email(email)
+        is_disp, reason = is_disposable_email(email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
