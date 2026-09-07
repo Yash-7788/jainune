@@ -298,7 +298,7 @@ async def process_payment_captured(
     3. Mark intent as captured.
     """
     payment = event.get("payload", {}).get("payment", {}).get("entity", {})
-    order_id: str = payment.get("order_id", "")
+    order_id: str = payment.get("order_id", "") or event.get("payload", {}).get("order", {}).get("entity", {}).get("id", "")
     payment_id: str = payment.get("id", "")
 
     if not order_id:
@@ -428,9 +428,15 @@ async def process_refund(
     event: dict[str, Any],
     pool: asyncpg.Pool,
 ) -> None:
-    """Handle payment.refunded — isolate subscription downgrade vs arcade deduction."""
+    """Handle payment.refunded / refund.processed / refund.created — isolate subscription downgrade vs arcade deduction."""
     refund = event.get("payload", {}).get("refund", {}).get("entity", {})
-    payment_id: str = refund.get("payment_id") or event.get("payment_id", "")
+    payment_id: str = (
+        refund.get("payment_id")
+        or event.get("payment_id", "")
+        or event.get("payload", {}).get("payment", {}).get("entity", {}).get("id", "")
+        or event.get("payload", {}).get("payment", {}).get("entity", {}).get("order_id", "")
+        or event.get("payload", {}).get("order", {}).get("entity", {}).get("id", "")
+    )
 
     if not payment_id:
         return
@@ -438,7 +444,7 @@ async def process_refund(
     async with pool.acquire() as conn:
         async with conn.transaction():
             intent = await conn.fetchrow(
-                "SELECT user_id, plan_id, status, amount FROM payment_intents WHERE razorpay_payment_id = $1 FOR UPDATE",
+                "SELECT user_id, plan_id, status, amount, razorpay_payment_id FROM payment_intents WHERE (razorpay_payment_id = $1 OR razorpay_order_id = $1) FOR UPDATE",
                 payment_id,
             )
             if intent is None:
@@ -464,7 +470,7 @@ async def process_refund(
                     refund_amount, payment_id, intent_amount, intent["user_id"],
                 )
                 await conn.execute(
-                    "UPDATE payment_intents SET status = 'partially_refunded', updated_at = NOW() WHERE razorpay_payment_id = $1",
+                    "UPDATE payment_intents SET status = 'partially_refunded', updated_at = NOW() WHERE razorpay_payment_id = $1 OR razorpay_order_id = $1",
                     payment_id,
                 )
                 return
@@ -559,7 +565,7 @@ async def process_refund(
                 log.info("Arcade credits revoked on refund: user=%s", intent["user_id"])
 
             await conn.execute(
-                "UPDATE payment_intents SET status = 'refunded', updated_at = NOW() WHERE razorpay_payment_id = $1",
+                "UPDATE payment_intents SET status = 'refunded', updated_at = NOW() WHERE razorpay_payment_id = $1 OR razorpay_order_id = $1",
                 payment_id,
             )
 
@@ -599,7 +605,17 @@ async def get_effective_user_tier(
     """
     Returns the real-time active subscription tier for a user.
     If valid_until has expired, lazily auto-downgrades to 'free'.
+    If account is on hold (store billing retry failed), suspends access to 'free'.
     """
+    from app.core.redis import get_redis
+    try:
+        r = get_redis()
+        billing_status = await r.get(f"user:{user_id}:billing_status")
+        if billing_status in (b"account_hold", "account_hold"):
+            return "free"
+    except Exception:
+        pass
+
     row = await conn.fetchrow(
         "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
         user_id,
@@ -626,6 +642,95 @@ async def get_effective_user_tier(
             return "free"
 
     return tier
+
+
+async def process_store_subscription_event(
+    user_id: Any,
+    store: str,  # 'apple' or 'google'
+    event_type: str,  # 'in_grace_period', 'billing_retry', 'account_hold', 'revoked', 'renewed'
+    pool: asyncpg.Pool,
+    original_transaction_id: Optional[str] = None,
+    validity_days: int = 30,
+) -> dict[str, Any]:
+    """
+    Handles Apple StoreKit 2 and Google Play RTDN subscription lifecycle events:
+    - in_grace_period / billing_retry: Keep tier active, mark billing status.
+    - account_hold: Temporarily suspend premium tier access until payment fixes.
+    - revoked: Apple/Google customer refund or revoked entitlement. Downgrade to free & claw back super likes.
+    - renewed / active: Clear hold/grace period, restore tier & extend valid_until.
+    """
+    from app.core.redis import get_redis
+    r = None
+    try:
+        r = get_redis()
+    except Exception:
+        pass
+
+    async with pool.acquire() as conn:
+        user_row = await conn.fetchrow(
+            "SELECT id, subscription_tier, subscription_valid_until, super_connect_credits FROM users WHERE id = $1",
+            user_id,
+        )
+        if not user_row:
+            raise ValueError(f"User {user_id} not found")
+
+        if event_type in ("in_grace_period", "billing_retry"):
+            if r:
+                await r.set(f"user:{user_id}:billing_status", "in_grace_period", ex=86400 * 16)
+            log.info("Store subscription grace period active: user=%s store=%s", user_id, store)
+            return {"status": "in_grace_period", "tier": user_row["subscription_tier"]}
+
+        elif event_type == "account_hold":
+            if r:
+                await r.set(f"user:{user_id}:billing_status", "account_hold", ex=86400 * 60)
+            log.warning("Store subscription account hold placed: user=%s store=%s", user_id, store)
+            return {"status": "account_hold", "tier": "free"}
+
+        elif event_type == "revoked":
+            if r:
+                await r.delete(f"user:{user_id}:billing_status")
+                await r.delete(f"user:{user_id}:subscription")
+                await r.delete(f"user:{user_id}:tier")
+
+            # Downgrade to free & claw back 5 credits (B-4)
+            await conn.execute(
+                """
+                UPDATE users
+                   SET subscription_tier        = 'free',
+                       subscription_valid_until = NULL,
+                       super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - 5),
+                       updated_at               = NOW()
+                 WHERE id = $1
+                """,
+                user_id,
+            )
+            log.info("Store subscription revoked / refunded: user=%s store=%s", user_id, store)
+            return {"status": "revoked", "tier": "free"}
+
+        elif event_type in ("renewed", "active"):
+            if r:
+                await r.delete(f"user:{user_id}:billing_status")
+            now_utc = datetime.now(timezone.utc)
+            current_valid = user_row["subscription_valid_until"]
+            base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
+            new_valid = base_time + timedelta(days=validity_days)
+            await conn.execute(
+                """
+                UPDATE users
+                   SET subscription_tier        = 'jainune_plus',
+                       subscription_valid_until = $1,
+                       updated_at               = NOW()
+                 WHERE id = $2
+                """,
+                new_valid,
+                user_id,
+            )
+            log.info("Store subscription renewed: user=%s store=%s valid_until=%s", user_id, store, new_valid)
+            return {"status": "active", "tier": "jainune_plus", "valid_until": new_valid.isoformat()}
+
+        else:
+            log.warning("Unknown store event type: %s", event_type)
+            return {"status": "ignored", "event_type": event_type}
 
 
 async def sync_order_with_razorpay(

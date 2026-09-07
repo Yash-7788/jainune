@@ -152,7 +152,7 @@ async def send_push(
                         "priority": "high",
                     },
                 )
-                if "DeviceNotRegistered" in resp.text:
+                if any(err in resp.text for err in ("DeviceNotRegistered", "DeviceTokenNotForTopic", "BadDeviceToken")):
                     await prune_invalid_device_token(device_token, conn=db_conn)
                 return resp.status_code == 200
         except Exception as exc:
@@ -194,8 +194,13 @@ async def send_push(
             )
             if resp.status_code == 200:
                 return True
-            # FCM v1 returns 404 / UNREGISTERED when app uninstalled or token rotated
-            if resp.status_code in (404, 410) or "UNREGISTERED" in resp.text:
+            # FCM v1 / Apple APNs return 400/404/410 or specific error codes when token dead or revoked
+            if (
+                resp.status_code in (400, 404, 410)
+                and any(err in resp.text for err in ("UNREGISTERED", "BadDeviceToken", "DeviceTokenNotForTopic", "ExpiredToken"))
+            ):
+                await prune_invalid_device_token(device_token, conn=db_conn)
+            elif resp.status_code in (404, 410) or "UNREGISTERED" in resp.text:
                 await prune_invalid_device_token(device_token, conn=db_conn)
             log.warning(
                 "FCM send failed: status=%d body=%s token_prefix=%s",

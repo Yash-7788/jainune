@@ -272,6 +272,18 @@ async def get_subscription_status(
         except Exception:
             pass
 
+    billing_status = "active"
+    in_grace_period = False
+    try:
+        r = get_redis()
+        bs = await r.get(f"user:{current_user['user_id']}:billing_status")
+        if bs:
+            billing_status = bs.decode("utf-8") if isinstance(bs, bytes) else str(bs)
+            if billing_status in ("in_grace_period", "billing_retry"):
+                in_grace_period = True
+    except Exception:
+        pass
+
     return {
         "user_id": row["id"],
         "tier": SubscriptionTier(tier),
@@ -279,6 +291,8 @@ async def get_subscription_status(
         "daily_likes_remaining": daily_likes_remaining,
         "super_likes_remaining": row["super_connect_credits"] if row.get("super_connect_credits") is not None else limits["super_likes"],
         "can_see_who_liked": limits["can_see_who_liked"],
+        "in_grace_period": in_grace_period,
+        "billing_status": billing_status,
     }
 
 

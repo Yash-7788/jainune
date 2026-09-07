@@ -208,6 +208,9 @@ async def verify_payment(
 
 class SyncSubscriptionBody(BaseModel):
     razorpay_order_id: Optional[str] = Field(None, pattern=r"^order_[a-zA-Z0-9_-]+$", max_length=64)
+    provider: Optional[str] = Field(None, pattern=r"^(razorpay|app_store|play_billing)$")
+    store_status: Optional[str] = Field(None, pattern=r"^(active|in_grace_period|billing_retry|account_hold|revoked|expired)$")
+    original_transaction_id: Optional[str] = Field(None, max_length=128)
 
 
 @router.post("/sync", status_code=status.HTTP_200_OK)
@@ -218,13 +221,28 @@ async def sync_subscription(
     redis: Optional[aioredis.Redis] = Depends(get_redis_client),
 ):
     """
-    Directly reconciles payment status with Razorpay.
+    Directly reconciles payment status with Razorpay or mobile App Stores.
     Recovers from network drops, dropped webhooks, or unverified payments.
     Rate limited to prevent gateway quota abuse.
     """
     user_id = current_user["user_id"]
     if redis:
         await sliding_window_rate_limit(f"ratelimit:subscriptions:sync:{user_id}", 10, 60, redis)
+
+    if body and body.store_status and body.provider in ("app_store", "play_billing"):
+        res = await payment_service.process_store_subscription_event(
+            user_id=user_id,
+            store="apple" if body.provider == "app_store" else "google",
+            event_type=body.store_status,
+            pool=pool,
+            original_transaction_id=body.original_transaction_id,
+        )
+        return {
+            "synced": True,
+            "provider": body.provider,
+            "store_status": body.store_status,
+            "result": res,
+        }
 
     order_id = body.razorpay_order_id if body and body.razorpay_order_id else None
 
@@ -406,10 +424,11 @@ async def razorpay_webhook(
     event_name: str = event.get("event", "")
     log.info("Razorpay webhook received: %s", event_name)
 
-    if event_name == "payment.captured":
+    if event_name in ("payment.captured", "order.paid"):
         payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
+        order_entity = event.get("payload", {}).get("order", {}).get("entity", {})
         payment_id = payment_entity.get("id")
-        order_id = payment_entity.get("order_id")
+        order_id = payment_entity.get("order_id") or order_entity.get("id")
         from app.core.redis import get_redis
         r = None
         order_lock_key = f"lock:payment:order:{order_id}" if order_id else None
@@ -438,15 +457,54 @@ async def razorpay_webhook(
                     await r.delete(order_lock_key)
                 except Exception:
                     pass
-    elif event_name == "payment.refunded":
+    elif event_name in ("payment.refunded", "refund.processed", "refund.created"):
         await payment_service.process_refund(event, pool)
-    elif event_name == "payment.failed":
+    elif event_name in ("payment.failed", "payment.dispute.created"):
         await payment_service.process_payment_failed(event, pool)
     else:
         log.debug("Unhandled webhook event: %s", event_name)
 
     # Always return 200 to acknowledge receipt
     return {"received": True}
+
+
+class StoreNotificationBody(BaseModel):
+    store: str = Field(..., pattern=r"^(apple|google)$")
+    user_id: Optional[str] = None
+    event_type: str = Field(..., pattern=r"^(active|in_grace_period|billing_retry|account_hold|revoked|expired)$")
+    original_transaction_id: Optional[str] = None
+
+
+@router.post("/store-notification", status_code=status.HTTP_200_OK)
+async def store_notification_webhook(
+    body: StoreNotificationBody,
+    pool: asyncpg.Pool = Depends(get_pool),
+    x_store_token: Optional[str] = Header(None, alias="X-Store-Webhook-Token"),
+):
+    """
+    Apple StoreKit / Google Play RTDN server-to-server webhook.
+    Handles grace periods, billing retries, account holds, and refund revocations.
+    """
+    if settings.webhook_secret and x_store_token and x_store_token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="Invalid store webhook token")
+
+    if not body.user_id:
+        return {"received": True, "status": "missing_user_id"}
+
+    from uuid import UUID
+    try:
+        uid = UUID(body.user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    res = await payment_service.process_store_subscription_event(
+        user_id=uid,
+        store=body.store,
+        event_type=body.event_type,
+        pool=pool,
+        original_transaction_id=body.original_transaction_id,
+    )
+    return {"received": True, "result": res}
 
 
 @router.post("/cancel", status_code=status.HTTP_200_OK)
@@ -473,3 +531,4 @@ async def cancel_subscription(
         "message": "Subscription is a non-recurring pass. No auto-renewal will occur.",
         "access_until": valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until),
     }
+

@@ -933,6 +933,186 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res.success)
         self.assertTrue(any("SELECT super_connect_credits FROM users WHERE id = $1 FOR UPDATE" in s for s in executed_sqls))
 
+    async def test_29_razorpay_webhook_chaos_and_refund_aliases(self):
+        """Webhook routes order.paid and refund aliases (refund.processed, refund.created) correctly."""
+        import json
+        from app.routers.subscriptions import razorpay_webhook
+        from app.services import payment_service
+
+        mock_pool = MagicMock()
+        mock_conn = _create_mock_conn()
+        user_id = uuid.uuid4()
+        executed_sqls = []
+
+        async def mock_execute(sql, *args):
+            executed_sqls.append(sql)
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+        mock_conn.fetchrow.return_value = {
+            "user_id": user_id,
+            "plan_id": "jainune_plus_monthly",
+            "status": "captured",
+            "amount": 49900,
+            "razorpay_payment_id": "pay_test123",
+        }
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        # 1. order.paid event alias
+        req = AsyncMock()
+        req.body.return_value = json.dumps({
+            "event": "order.paid",
+            "payload": {
+                "order": {"entity": {"id": "order_test123", "amount": 49900, "status": "paid"}},
+                "payment": {"entity": {"id": "pay_test123", "order_id": "order_test123"}},
+            }
+        }).encode("utf-8")
+
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = True
+
+        with patch("app.services.payment_service.verify_webhook_signature", return_value=True), \
+             patch("app.core.redis.get_redis", return_value=mock_redis), \
+             patch("app.services.payment_service.process_payment_captured", new_callable=AsyncMock) as mock_capture:
+            resp = await razorpay_webhook(request=req, x_razorpay_signature="valid_sig", pool=mock_pool)
+            self.assertTrue(resp.get("received"))
+            mock_capture.assert_called_once()
+
+        # 2. refund.processed event alias with nested refund payment_id
+        refund_event = {
+            "event": "refund.processed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_test123",
+                        "payment_id": "pay_test123",
+                        "amount": 49900,
+                    }
+                }
+            }
+        }
+        await payment_service.process_refund(refund_event, mock_pool)
+        self.assertTrue(any("SET subscription_tier        = 'free'" in s for s in executed_sqls))
+
+    async def test_30_storekit_and_play_billing_lifecycle(self):
+        """StoreKit and Play Billing state transitions: grace period, account hold, and revocation."""
+        from datetime import datetime, timezone, timedelta
+        from app.services import payment_service
+
+        user_id = uuid.uuid4()
+        mock_pool = MagicMock()
+        mock_conn = _create_mock_conn()
+        executed_sqls = []
+
+        async def mock_execute(sql, *args):
+            executed_sqls.append(sql)
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+        mock_conn.fetchrow.return_value = {
+            "id": user_id,
+            "subscription_tier": "jainune_plus",
+            "subscription_valid_until": datetime.now(timezone.utc) + timedelta(days=20),
+            "super_connect_credits": 5,
+        }
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        mock_redis = AsyncMock()
+        redis_store = {}
+
+        async def mock_r_set(k, v, **kwargs):
+            redis_store[k] = v
+
+        async def mock_r_get(k):
+            return redis_store.get(k)
+
+        async def mock_r_del(k):
+            redis_store.pop(k, None)
+
+        mock_redis.set = AsyncMock(side_effect=mock_r_set)
+        mock_redis.get = AsyncMock(side_effect=mock_r_get)
+        mock_redis.delete = AsyncMock(side_effect=mock_r_del)
+
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            # Grace period retains tier and records status
+            res_grace = await payment_service.process_store_subscription_event(
+                user_id=user_id,
+                store="apple",
+                event_type="in_grace_period",
+                pool=mock_pool,
+            )
+            self.assertEqual(res_grace["status"], "in_grace_period")
+            self.assertEqual(redis_store.get(f"user:{user_id}:billing_status"), "in_grace_period")
+
+            # Account hold suspends tier to free in effective tier calculation
+            res_hold = await payment_service.process_store_subscription_event(
+                user_id=user_id,
+                store="google",
+                event_type="account_hold",
+                pool=mock_pool,
+            )
+            self.assertEqual(res_hold["status"], "account_hold")
+            tier_during_hold = await payment_service.get_effective_user_tier(user_id, mock_conn)
+            self.assertEqual(tier_during_hold, "free")
+
+            # Revocation downgrades to free and claws back credits
+            res_revoked = await payment_service.process_store_subscription_event(
+                user_id=user_id,
+                store="apple",
+                event_type="revoked",
+                pool=mock_pool,
+            )
+            self.assertEqual(res_revoked["status"], "revoked")
+            self.assertTrue(any("SET subscription_tier        = 'free'" in s for s in executed_sqls))
+            self.assertTrue(any("super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - 5)" in s for s in executed_sqls))
+
+    async def test_31_apns_bad_device_token_pruning(self):
+        """APNs BadDeviceToken / DeviceTokenNotForTopic error triggers token nullification."""
+        from app.services.push_notifications import send_push
+
+        mock_db = MagicMock()
+        mock_conn = _create_mock_conn()
+        mock_db.acquire.return_value.__aenter__.return_value = mock_conn
+
+        executed_sqls = []
+        async def mock_execute(sql, *args):
+            executed_sqls.append(sql)
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+
+        # 1. FCM APNs BadDeviceToken response
+        mock_resp_fcm = MagicMock()
+        mock_resp_fcm.status_code = 400
+        mock_resp_fcm.text = '{"error": {"code": 400, "message": "The registration token is not valid: BadDeviceToken"}}'
+
+        # 2. Expo DeviceTokenNotForTopic response
+        mock_resp_expo = MagicMock()
+        mock_resp_expo.status_code = 200
+        mock_resp_expo.text = '{"data": [{"status": "error", "message": "DeviceTokenNotForTopic"}]}'
+
+        with patch("app.services.push_notifications._get_access_token", return_value="mock_access_token"), \
+             patch("httpx.AsyncClient.post", side_effect=[mock_resp_fcm, mock_resp_expo]), \
+             patch("app.core.database.get_pool", return_value=mock_db):
+
+            res_fcm = await send_push(
+                device_token="bad_apns_token_hex_64_characters",
+                title="Hello",
+                body="World",
+                db_conn=mock_conn,
+            )
+            self.assertFalse(res_fcm)
+
+            res_expo = await send_push(
+                device_token="ExponentPushToken[invalid_topic]",
+                title="Hello",
+                body="World",
+                db_conn=mock_conn,
+            )
+            self.assertTrue(res_expo)
+
+        # Both dead tokens must have triggered pruning
+        self.assertGreaterEqual(len(executed_sqls), 2)
+        self.assertTrue(all("UPDATE users SET fcm_token = NULL" in s for s in executed_sqls))
+
 
 if __name__ == "__main__":
     unittest.main()
+

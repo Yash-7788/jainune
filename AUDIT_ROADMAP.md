@@ -54,6 +54,9 @@ Production readiness divided into two sequential tiers:
   - Asyncpg connection pool 5s acquire timeout with 503 Service Unavailable + Retry-After headers under 500 req/s bursts (Tier 2 Phase 1).
   - Redis pool enlarged to 2000 max connections and WebSocket pub/sub leak-proof slow-consumer (5s) and zombie heartbeat (60s) teardowns (Tier 2 Phase 1).
   - Super connect credit double-spend serialized via `SELECT ... FOR UPDATE` row lock in `record_interaction_action` (Tier 2 Phase 1).
+  - Razorpay webhook chaos handled: `order.paid`, `refund.processed`, `refund.created` aliases, and payload normalization (Tier 2 Phase 2).
+  - Apple StoreKit & Google Play subscription lifecycle: grace period, account hold tier suspension, and refund revocation clawbacks (Tier 2 Phase 2).
+  - Apple APNs / Expo bad device token detection and automated pruning from PostgreSQL (Tier 2 Phase 2).
 
 ---
 
@@ -70,11 +73,12 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 - ✅ Redis pub/sub memory leak and channel backlog audit: 60s zombie heartbeat timeout eliminates unclosed socket subscriptions.
 - ✅ High-concurrency wallet deduction races: `SELECT ... FOR UPDATE` row locks on arcade spins, dice rolls, and super connect credits.
 
-### Phase 2: Third-Party Failures & Webhook Chaos (5–6 Runs)
-- **Razorpay**: Dropped webhooks, delayed payment confirmations, forged webhook signatures, and refund webhooks.
-- **MSG91**: Complete SMS gateway downtime, timeout retry storms, and Indian DLT template rejection fallbacks.
-- **Apple StoreKit & Google Play Billing**: Subscription grace periods, billing retries, account holds, and refund revocations.
-- **FCM / APNs**: Stale/invalid device token cleanup worker, Apple APNs bad device token handling.
+### Phase 2: Third-Party Failures & Webhook Chaos [100% COMPLETE]
+- ✅ **Razorpay**: Dropped webhooks, delayed payment confirmations, forged webhook signatures, refund webhook aliases (`refund.processed`, `refund.created`), `order.paid` synchronization, and dual `razorpay_payment_id`/`razorpay_order_id` resolution.
+- ✅ **MSG91**: Complete SMS gateway 503 downtime, timeout retry storms, and Indian DLT template rejection automatic failover to WhatsApp OTP.
+- ✅ **Apple StoreKit & Google Play Billing**: Subscription grace periods (`in_grace_period`), billing retry status, account holds (`account_hold` tier suspension to free), and refund revocations with super connect credit clawbacks.
+- ✅ **FCM / APNs**: Stale/invalid device token cleanup worker, Apple APNs `BadDeviceToken`, `DeviceTokenNotForTopic`, `ExpiredToken`, and Expo rejection token nullification from PostgreSQL.
+
 
 ### Phase 3: PostGIS Spatial & pgvector Scale (3–4 Runs)
 - Benchmark spatial KNN queries (`<->` operator) with 100,000 mock user points.

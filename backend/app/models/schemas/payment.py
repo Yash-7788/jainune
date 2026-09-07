@@ -93,6 +93,8 @@ class SubscriptionStatusResponse(BaseModel):
     daily_likes_remaining: Optional[int]
     super_likes_remaining: Optional[int]
     can_see_who_liked: bool
+    in_grace_period: bool = False
+    billing_status: str = "active"
 
 
 class AdminUserMiniResponse(BaseModel):
