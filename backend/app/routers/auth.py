@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import asyncio
+from typing import Any
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -60,6 +63,42 @@ def mask_email(email: str) -> str:
         masked = (user[0] + "*" * (len(user) - 1)) if len(user) > 1 else "*"
         return f"{masked}@{domain}"
     return "***"
+
+
+def _row_val(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return default
+
+
+def _assert_account_active(row: Any) -> None:
+    if not row:
+        return
+    deleted_at = _row_val(row, "deleted_at")
+    status_val = _row_val(row, "account_status")
+    if deleted_at is not None or status_val == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account has been deleted.",
+        )
+    if status_val == "banned":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account has been permanently banned.",
+        )
+    suspend_until = _row_val(row, "suspend_until")
+    is_suspended = status_val == "suspended"
+    if is_suspended or (suspend_until and suspend_until > datetime.now(timezone.utc)):
+        detail_until = suspend_until.isoformat() if suspend_until else "further notice"
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User account is temporarily suspended until {detail_until}.",
+        )
 
 
 async def _issue_token_response(
@@ -131,7 +170,7 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, onboarding_completed FROM users WHERE phone_number = $1",
+            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE phone_number = $1",
             body.phone_number,
         )
 
@@ -140,12 +179,25 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 
         if is_new_user:
             user_id = await conn.fetchval(
-                "INSERT INTO users (phone_number, auth_provider) VALUES ($1, 'phone') RETURNING id",
+                """
+                INSERT INTO users (phone_number, auth_provider)
+                VALUES ($1, 'phone')
+                ON CONFLICT (phone_number) DO UPDATE SET last_active_at = NOW()
+                RETURNING id
+                """,
                 body.phone_number,
             )
+            row = await conn.fetchrow(
+                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                user_id,
+            )
+            if row:
+                _assert_account_active(row)
+                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
         else:
+            _assert_account_active(row)
             user_id = row["id"]
-            onboarding_completed = row["onboarding_completed"] or False
+            onboarding_completed = _row_val(row, "onboarding_completed", False) or False
 
         log.info("User verified via phone: %s", mask_phone(body.phone_number))
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
@@ -217,7 +269,7 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, onboarding_completed FROM users WHERE email = $1",
+            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1",
             clean_email,
         )
         is_new_user = row is None
@@ -226,14 +278,24 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
                 """
                 INSERT INTO users (email, is_email_verified, auth_provider)
                 VALUES ($1, TRUE, 'email')
+                ON CONFLICT (email) DO UPDATE SET last_active_at = NOW(), is_email_verified = TRUE
                 RETURNING id
                 """,
                 clean_email,
             )
-            onboarding_completed = False
+            row = await conn.fetchrow(
+                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                user_id,
+            )
+            if row:
+                _assert_account_active(row)
+                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+            else:
+                onboarding_completed = False
         else:
+            _assert_account_active(row)
             user_id = row["id"]
-            onboarding_completed = row["onboarding_completed"] or False
+            onboarding_completed = _row_val(row, "onboarding_completed", False) or False
 
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
@@ -338,23 +400,44 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, onboarding_completed FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
+            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
             str(google_sub), email,
         )
         is_new_user = row is None
         if is_new_user:
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
-                VALUES ($1, $2, $3, TRUE, 'google')
-                RETURNING id
-                """,
-                str(google_sub), email, name,
+            if email:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
+                    VALUES ($1, $2, $3, TRUE, 'google')
+                    ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
+                    RETURNING id
+                    """,
+                    str(google_sub), email, name,
+                )
+            else:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
+                    VALUES ($1, $2, TRUE, 'google')
+                    ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
+                    RETURNING id
+                    """,
+                    str(google_sub), name,
+                )
+            row = await conn.fetchrow(
+                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                user_id,
             )
-            onboarding_completed = False
+            if row:
+                _assert_account_active(row)
+                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+            else:
+                onboarding_completed = False
         else:
+            _assert_account_active(row)
             user_id = row["id"]
-            onboarding_completed = row["onboarding_completed"] or False
+            onboarding_completed = _row_val(row, "onboarding_completed", False) or False
             await conn.execute("UPDATE users SET google_id = $1 WHERE id = $2 AND google_id IS NULL", str(google_sub), user_id)
 
         log.info("User authenticated via Google: %s", mask_email(email) if email else "sub_only")
@@ -401,23 +484,44 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, onboarding_completed FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
+            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
             str(apple_sub), email,
         )
         is_new_user = row is None
         if is_new_user:
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
-                VALUES ($1, $2, $3, TRUE, 'apple')
-                RETURNING id
-                """,
-                str(apple_sub), email, first_name,
+            if email:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
+                    VALUES ($1, $2, $3, TRUE, 'apple')
+                    ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
+                    RETURNING id
+                    """,
+                    str(apple_sub), email, first_name,
+                )
+            else:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
+                    VALUES ($1, $2, TRUE, 'apple')
+                    ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
+                    RETURNING id
+                    """,
+                    str(apple_sub), first_name,
+                )
+            row = await conn.fetchrow(
+                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                user_id,
             )
-            onboarding_completed = False
+            if row:
+                _assert_account_active(row)
+                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+            else:
+                onboarding_completed = False
         else:
+            _assert_account_active(row)
             user_id = row["id"]
-            onboarding_completed = row["onboarding_completed"] or False
+            onboarding_completed = _row_val(row, "onboarding_completed", False) or False
             await conn.execute("UPDATE users SET apple_id = $1 WHERE id = $2 AND apple_id IS NULL", str(apple_sub), user_id)
 
         log.info("User authenticated via Apple: %s", mask_email(email) if email else "sub_only")
@@ -455,9 +559,12 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                SELECT user_id, expires_at FROM refresh_tokens
-                WHERE token_hash = $1
-                FOR UPDATE
+                SELECT rt.user_id, rt.expires_at,
+                       u.id AS u_id, u.account_status, u.deleted_at, u.suspend_until
+                FROM refresh_tokens rt
+                LEFT JOIN users u ON u.id = rt.user_id
+                WHERE rt.token_hash = $1
+                FOR UPDATE OF rt
                 """,
                 token_hash,
             )
@@ -489,6 +596,20 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid or expired refresh token.",
                 )
+
+            # Check account active status
+            if "u_id" in row and row["u_id"] is None:
+                await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", row["user_id"])
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account not found.",
+                )
+
+            try:
+                _assert_account_active(row)
+            except HTTPException:
+                await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", row["user_id"])
+                raise
 
             user_id = row["user_id"]
             access_token = create_access_token(user_id)

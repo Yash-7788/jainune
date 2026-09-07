@@ -224,6 +224,12 @@ async def update_my_profile(
             raise HTTPException(status_code=404, detail="User not found")
         row = await _get_user_row(current_user["user_id"], conn)
 
+    try:
+        r = get_redis()
+        await r.delete(f"feed:cache:{current_user['user_id']}")
+    except Exception:
+        pass
+
     return dict(row)
 
 
@@ -595,11 +601,22 @@ async def unblock_user(
 ):
     """Unblock a user."""
     blocker_id = current_user["user_id"]
+    if str(blocker_id) == str(user_id):
+        raise HTTPException(status_code=400, detail="Cannot unblock yourself")
+
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2",
             blocker_id, user_id,
         )
+
+    try:
+        r = get_redis()
+        await r.delete(f"feed:cache:{blocker_id}")
+        await r.delete(f"feed:cache:{user_id}")
+    except Exception:
+        pass
+
     return {"success": True, "message": "User unblocked."}
 
 
@@ -625,6 +642,11 @@ async def pause_account(
     """Pause profile from discovery feed."""
     async with pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_paused = TRUE, updated_at = NOW() WHERE id = $1", current_user["user_id"])
+    try:
+        r = get_redis()
+        await r.delete(f"feed:cache:{current_user['user_id']}")
+    except Exception:
+        pass
     return {"success": True, "is_paused": True, "message": "Profile paused from discovery feed."}
 
 
@@ -636,4 +658,9 @@ async def unpause_account(
     """Unpause profile to resume discovery feed."""
     async with pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_paused = FALSE, updated_at = NOW() WHERE id = $1", current_user["user_id"])
+    try:
+        r = get_redis()
+        await r.delete(f"feed:cache:{current_user['user_id']}")
+    except Exception:
+        pass
     return {"success": True, "is_paused": False, "message": "Profile unpaused."}

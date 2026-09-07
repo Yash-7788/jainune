@@ -8,9 +8,9 @@ Production readiness divided into two sequential tiers:
 ---
 
 ## 2. Current Progress Checkpoint
-- **Status**: Rounds 1–4 complete.
-- **Test Suite**: 115 unit tests passing with 0 errors and 0 regressions.
-- **Git Commit**: `7028762` on `main`.
+- **Status**: Rounds 1–5 complete.
+- **Test Suite**: 124 unit tests passing with 0 errors and 0 regressions.
+- **Git Commit**: Round 5 pushed on `main`.
 - **Domains Audited So Far**:
   - Dignity Engine & report brigading defense.
   - PostGIS location verifier & anti-spoofing coordinates.
@@ -24,19 +24,25 @@ Production readiness divided into two sequential tiers:
   - Serendipity wheel spin speed-chat match/chat creation.
   - Ephemeral reaper stale match expiration & chat closure sync.
   - FCM v1 string typing and CDN URL formatting.
+  - **Round 5**: Auth lifecycle gates for banned/deleted/suspended users across all providers (phone OTP, email OTP, Google, Apple), signup concurrency `ON CONFLICT` race mitigation, token refresh inactive user purging, profile update & unblock feed cache purging, and interactions target profile existence validation.
 
 ---
 
-## 3. Tier 1: Remaining Code Logic Audits (2–3 Passes)
+## 3. Tier 1: Remaining Code Logic Audits (4 Passes Remaining)
 Targeting absolute zero remaining logic defects in source files:
-- **Round 5**:
-  - `backend/app/routers/auth.py`: Token refresh race windows, phone/email OTP cooldown edge cases, and Apple/Google JWK caching timeouts.
-  - `backend/app/models/schemas/`: Field validation bounds on all PATCH bodies.
+- **Round 5 [COMPLETED]**:
+  - `auth.py`: Banned/deleted/suspended account gates, signup concurrency duplicate handling, refresh token account check.
+  - `users.py` & `location.py`: Feed cache invalidation on profile mutations, unblocking self-guard, location coordinate change cache purge.
+  - `interactions.py`: Target profile existence & active status verification prior to credits deduction.
 - **Round 6**:
-  - `backend/app/routers/legal.py` & `backend/app/routers/users.py`: DPDP data export formats, soft-delete cascaded queries, and account unpause state integrity.
-  - `backend/app/workers/daily_compatible.py`: Stable marriage pairing edge cases when pool count is odd or uneven.
+  - `backend/app/routers/legal.py` & DPDP export format compliance, data anonymization queries.
+  - `backend/app/workers/daily_compatible.py`: Gale-Shapley stable marriage pairing edge cases with uneven preference lists.
 - **Round 7**:
   - Mobile TypeScript store edge cases (`authStore.ts`, `onboardingStore.ts`, `billingService.ts`), offline state persistence, and unhandled Promise rejections.
+- **Round 8**:
+  - `backend/app/routers/arcade.py` & `app/services/dignity_engine.py`: Dilemma voting race conditions, badge award quotas.
+- **Round 9**:
+  - Final end-to-end integration pass across full auth -> onboarding -> feed -> chat -> payment lifecycle.
 
 ---
 

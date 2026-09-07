@@ -102,6 +102,11 @@ async def verify_location(
         except Exception:
             pass
 
+        try:
+            await redis.delete(f"feed:cache:{user_id}")
+        except Exception:
+            pass
+
         return ok({
             "allowed": True,
             "zone_id": zone["id"],

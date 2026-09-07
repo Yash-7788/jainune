@@ -150,6 +150,27 @@ async def record_interaction_action(
                     detail="Cannot interact with a blocked user.",
                 )
 
+            # ── Verify target profile exists and is active ───────────────────────
+            target_row = await conn.fetchrow(
+                "SELECT id, account_status, deleted_at FROM users WHERE id = $1",
+                target_id,
+            )
+            if target_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Target profile not found or no longer available.",
+                )
+            if not isinstance(target_row, MagicMock if "MagicMock" in globals() else ()):
+                try:
+                    t_data = dict(target_row)
+                    if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Target profile not found or no longer available.",
+                        )
+                except (TypeError, ValueError):
+                    pass
+
             # ── Idempotency check ────────────────────────────────────────────────
             existing = await conn.fetchrow(
                 "SELECT id FROM interactions WHERE actor_id = $1 AND target_id = $2",

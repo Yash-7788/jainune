@@ -67,20 +67,21 @@ async def get_current_user(
             detail="User account not found.",
         )
 
-    if row.get("deleted_at") is not None or row.get("account_status") == "deleted":
+    user_data = dict(row)
+    if user_data.get("deleted_at") is not None or user_data.get("account_status") == "deleted":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account has been deleted.",
         )
 
-    if row.get("account_status") == "banned":
+    if user_data.get("account_status") == "banned":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account has been permanently banned.",
         )
 
-    suspend_until = row.get("suspend_until")
-    is_suspended = row.get("account_status") == "suspended"
+    suspend_until = user_data.get("suspend_until")
+    is_suspended = user_data.get("account_status") == "suspended"
     if is_suspended or (suspend_until and suspend_until > datetime.now(timezone.utc)):
         detail_until = suspend_until.isoformat() if suspend_until else "further notice"
         raise HTTPException(
