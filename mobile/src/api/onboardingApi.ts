@@ -253,3 +253,9 @@ export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<Pr
 export async function uploadToS3(uploadUrl: string, fileUri: string, mimeType: string): Promise<void> {
   await uploadToPresignedUrl(uploadUrl, fileUri, mimeType);
 }
+
+// POST /v1/media/upload/confirm
+export async function confirmUpload(mediaId: string): Promise<void> {
+  const res = await apiPost<void>("/media/upload/confirm", { media_id: mediaId });
+  if (!res.success) throw { _apiError: res.error };
+}

@@ -19,7 +19,7 @@ import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import OnboardingStep from "../OnboardingStep";
 import { colors, spacing, typography, radii } from "../../../theme/tokens";
 import { useOnboardingStore } from "../../../store/onboardingStore";
-import { submitStep19, getPresignedUploadUrl, uploadToS3 } from "../../../api/onboardingApi";
+import { submitStep19, getPresignedUploadUrl, uploadToS3, confirmUpload } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
 
@@ -60,6 +60,7 @@ export default function Step19Screen() {
       const asset = result.assets[0];
       const { media_id, upload_url, cdn_url } = await getPresignedUploadUrl("photo");
       await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg");
+      await confirmUpload(media_id);
       setPhotos((prev) => [...prev, { mediaId: media_id, localUri: asset.uri, cdnUrl: cdn_url }]);
     } catch (err) {
       setError(extractError(err));

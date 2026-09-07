@@ -11,7 +11,7 @@ import OnboardingStep from "../OnboardingStep";
 import { VoiceIcon } from "../../../components/core/Icons";
 import { colors, spacing, typography, radii } from "../../../theme/tokens";
 import { useOnboardingStore } from "../../../store/onboardingStore";
-import { submitStep20, getPresignedUploadUrl, uploadToS3 } from "../../../api/onboardingApi";
+import { submitStep20, getPresignedUploadUrl, uploadToS3, confirmUpload } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
 
@@ -73,6 +73,7 @@ export default function Step20Screen() {
     try {
       const { media_id, upload_url } = await getPresignedUploadUrl("voice");
       await uploadToS3(upload_url, recordingUri, "audio/m4a");
+      await confirmUpload(media_id);
       await submitStep20(media_id);
       updateData({ voiceSnapshotId: media_id });
       setMediaId(media_id);

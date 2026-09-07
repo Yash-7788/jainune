@@ -397,6 +397,7 @@ export default function ChatScreen() {
       setMessages((prev) => prev.map((m) => (m.id === tempId ? sent : m)));
     } catch (err: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setDraft(content);
       const e = err?._apiError;
       if (e?.code === "CHAT_NOT_ALLOWED") {
         setChatBlocked(true);
