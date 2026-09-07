@@ -103,8 +103,6 @@ async def request_upload(
         if body.file_size_bytes > _MAX_VOICE_BYTES:
             raise HTTPException(status_code=400, detail="Voice clip must be under 5 MB.")
 
-    target_position = 1 if body.media_type == "voice" else body.position
-
     # Generate S3 key and media_id
     media_id = uuid.uuid4()
     ext_map = {
@@ -150,21 +148,42 @@ async def request_upload(
                 "SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))",
                 str(user_id), body.media_type,
             )
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = $2 AND status != 'rejected'",
+            existing_rows = await conn.fetch(
+                "SELECT position, status FROM user_media WHERE user_id = $1 AND media_type = $2",
                 user_id, body.media_type,
             )
+            active_count = sum(1 for r in existing_rows if r["status"] != "rejected")
             limit = 6 if body.media_type == "photo" else 1
-            if count >= limit:
+
+            if body.media_type == "voice":
+                target_position = 1
+            else:
+                if 1 <= body.position <= 6:
+                    target_position = body.position
+                else:
+                    used_pos = {r["position"] for r in existing_rows if r["status"] != "rejected"}
+                    free_slots = [p for p in range(1, 7) if p not in used_pos]
+                    target_position = free_slots[0] if free_slots else 1
+
+            slot_is_new = not any(r["position"] == target_position and r["status"] != "rejected" for r in existing_rows)
+            if slot_is_new and active_count >= limit:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Maximum {limit} {body.media_type}(s) allowed.",
                 )
+
             await conn.execute(
                 """
                 INSERT INTO user_media
                     (id, user_id, media_type, s3_key, position, status, is_processed)
                 VALUES ($1, $2, $3, $4, $5, 'pending', FALSE)
+                ON CONFLICT (user_id, media_type, position) DO UPDATE
+                SET id = EXCLUDED.id,
+                    s3_key = EXCLUDED.s3_key,
+                    status = 'pending',
+                    is_processed = FALSE,
+                    cdn_url = NULL,
+                    created_at = NOW()
                 """,
                 media_id, user_id, body.media_type, s3_key, target_position,
             )
