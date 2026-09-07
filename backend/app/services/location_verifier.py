@@ -90,9 +90,8 @@ def verify_location_anti_spoofing(
     if abs(lat) < 0.0001 and abs(lon) < 0.0001:
         return False, "Invalid location coordinates detected."
 
-    # Note: integer-coordinate check removed — real GPS hardware can legitimately produce
-    # readings that round to integer degrees, and the is_mocked flag + accuracy checks
-    # already cover the spoofing case more reliably.
+    if float(lat).is_integer() and float(lon).is_integer():
+        return False, "Synthetic coordinate precision detected."
 
     if accuracy_meters is not None:
         if accuracy_meters <= 0.0:

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -154,7 +155,8 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 
 @router.post("/email/otp/request")
 async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: RedisDep) -> dict:
-    is_bot, bot_msg = verify_bot_integrity(
+    is_bot, bot_msg = await asyncio.to_thread(
+        verify_bot_integrity,
         dict(request.headers),
         body.turnstile_token,
         is_production=settings.environment == "production",
@@ -303,7 +305,8 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
     client_ip = request.client.host if request.client else "unknown"
     await sliding_window_rate_limit(f"ratelimit:auth:google:{client_ip}", 20, 60, redis)
 
-    is_bot, bot_msg = verify_bot_integrity(
+    is_bot, bot_msg = await asyncio.to_thread(
+        verify_bot_integrity,
         dict(request.headers),
         body.turnstile_token,
         is_production=settings.environment == "production",
@@ -365,7 +368,8 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
     client_ip = request.client.host if request.client else "unknown"
     await sliding_window_rate_limit(f"ratelimit:auth:apple:{client_ip}", 20, 60, redis)
 
-    is_bot, bot_msg = verify_bot_integrity(
+    is_bot, bot_msg = await asyncio.to_thread(
+        verify_bot_integrity,
         dict(request.headers),
         body.turnstile_token,
         is_production=settings.environment == "production",

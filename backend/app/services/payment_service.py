@@ -466,7 +466,7 @@ async def process_refund(
                 )
                 is_active_payment = (
                     active_row is not None
-                    and active_row["razorpay_payment_id"] == payment_id
+                    and active_row.get("razorpay_payment_id") in (payment_id, None)
                 )
                 if is_active_payment:
                     await conn.execute(

@@ -125,7 +125,14 @@ async def _run_async() -> None:
                 proposals = engine.compute(marriage_users, feed_queues)
 
                 if proposals:
-                    # Write proposals to DB
+                    # Write proposals to DB with canonical pair ordering (min, max)
+                    proposal_rows = []
+                    for p in proposals:
+                        u_a = uuid.UUID(str(p["user_a"]))
+                        u_b = uuid.UUID(str(p["user_b"]))
+                        u1, u2 = min(u_a, u_b), max(u_a, u_b)
+                        proposal_rows.append((u1, u2, float(p["score"])))
+
                     await conn.executemany(
                         """
                         INSERT INTO daily_proposals (user_a_id, user_b_id, score)
@@ -133,7 +140,7 @@ async def _run_async() -> None:
                         ON CONFLICT (user_a_id, user_b_id) DO UPDATE
                             SET score = EXCLUDED.score, proposed_at = NOW()
                         """,
-                        [(uuid.UUID(str(p["user_a"])), uuid.UUID(str(p["user_b"])), float(p["score"])) for p in proposals],
+                        proposal_rows,
                     )
                     log.info("run_daily_compatible: wrote %d proposals", len(proposals))
             except Exception as exc:

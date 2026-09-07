@@ -387,7 +387,14 @@ async def send_message(
             )
             if chat.get("match_id"):
                 await conn.execute(
-                    "UPDATE matches SET last_message_at = NOW(), updated_at = NOW() WHERE id = $1",
+                    """
+                    UPDATE matches
+                    SET last_message_at = NOW(),
+                        expiry_warned = FALSE,
+                        status = CASE WHEN status = 'expired' THEN 'active' ELSE status END,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    """,
                     chat["match_id"],
                 )
 

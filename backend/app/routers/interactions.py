@@ -350,7 +350,7 @@ async def get_my_matches(
     FROM matches m
     JOIN users u ON (u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END)
     WHERE (m.user_a = $1 OR m.user_b = $1 OR m.user_id_1 = $1 OR m.user_id_2 = $1)
-      AND m.status = 'active'
+      AND m.status IN ('active', 'matched')
       AND u.account_status = 'active'
       AND u.is_paused = FALSE
       AND NOT EXISTS (

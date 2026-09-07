@@ -342,25 +342,35 @@ async def spin_serendipity_wheel(
                 current_user["user_id"],
             )
 
-            # Find active candidate via random offset sampling (avoids table-wide ORDER BY random() timeout)
-            candidate = None
-            total_active = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE id != $1 AND account_status = 'active'",
-                current_user["user_id"],
+            # Find active candidate with safety, blocklist, and preference filters
+            user_id = current_user.get("user_id") or current_user.get("id")
+            show_me = current_user.get("show_me")
+            target_gender = "man" if show_me in ("men", "man") else ("woman" if show_me in ("women", "woman") else None)
+
+            candidate = await conn.fetchrow(
+                """
+                SELECT id, first_name, city
+                FROM users u
+                WHERE u.id != $1
+                  AND u.account_status = 'active'
+                  AND u.is_paused = FALSE
+                  AND u.onboarding_completed = TRUE
+                  AND ($2::text IS NULL OR u.gender = $2::text)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_blocks ub
+                      WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                         OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM interactions i
+                      WHERE i.actor_id = $1 AND i.target_id = u.id
+                  )
+                ORDER BY random()
+                LIMIT 1
+                """,
+                user_id,
+                target_gender,
             )
-            if total_active and total_active > 0:
-                offset = random.randint(0, min(total_active - 1, 500))
-                candidate = await conn.fetchrow(
-                    """
-                    SELECT id, first_name, city
-                    FROM users
-                    WHERE id != $1 AND account_status = 'active'
-                    ORDER BY id
-                    OFFSET $2 LIMIT 1
-                    """,
-                    current_user["user_id"],
-                    offset,
-                )
 
     return {
         "success": True,

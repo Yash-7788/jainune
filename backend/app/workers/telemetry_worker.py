@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 
 import asyncpg
@@ -119,10 +120,25 @@ async def _flush_async() -> None:
                 if e.get("meta"):
                     meta_dict["meta"] = e["meta"]
 
+                # Parse UUIDs safely
+                actor_uuid = None
+                if actor_id:
+                    try:
+                        actor_uuid = uuid.UUID(str(actor_id))
+                    except (ValueError, TypeError):
+                        pass
+
+                target_uuid = None
+                if target_id:
+                    try:
+                        target_uuid = uuid.UUID(str(target_id))
+                    except (ValueError, TypeError):
+                        pass
+
                 rows.append((
                     event_type,
-                    actor_id,
-                    target_id,
+                    actor_uuid,
+                    target_uuid,
                     occ_at,
                     json.dumps(meta_dict),
                 ))
@@ -130,16 +146,35 @@ async def _flush_async() -> None:
                 log.warning("Skipping malformed telemetry event: %s", exc)
 
         if rows:
-            await conn.executemany(
-                """
-                INSERT INTO telemetry_events
-                    (event_type, user_id, target_id, occurred_at, meta)
-                VALUES ($1, $2::uuid, $3::uuid, $4::timestamptz, $5::jsonb)
-                ON CONFLICT DO NOTHING
-                """,
-                rows,
-            )
-            log.info("flush_telemetry_buffer: flushed %d events", len(rows))
+            # Validate user existence to prevent ForeignKeyViolationError dropping the batch
+            all_uids = {r[1] for r in rows if r[1]} | {r[2] for r in rows if r[2]}
+            if all_uids:
+                valid_uids_rows = await conn.fetch(
+                    "SELECT id FROM users WHERE id = ANY($1::uuid[])",
+                    list(all_uids),
+                )
+                valid_ids = {r["id"] for r in valid_uids_rows}
+            else:
+                valid_ids = set()
+
+            sanitized_rows = []
+            for ev_type, a_uuid, t_uuid, occ, meta_str in rows:
+                if a_uuid and a_uuid not in valid_ids:
+                    continue  # Actor user no longer exists in DB
+                t_final = t_uuid if (t_uuid and t_uuid in valid_ids) else None
+                sanitized_rows.append((ev_type, a_uuid, t_final, occ, meta_str))
+
+            if sanitized_rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO telemetry_events
+                        (event_type, user_id, target_id, occurred_at, meta)
+                    VALUES ($1, $2, $3, $4, $5::jsonb)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    sanitized_rows,
+                )
+                log.info("flush_telemetry_buffer: flushed %d events", len(sanitized_rows))
     except Exception as exc:
         log.error("flush_telemetry_buffer failed: %s", exc, exc_info=True)
     finally:

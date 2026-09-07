@@ -250,8 +250,8 @@ async def _run_pipeline(
             CASE
                 WHEN u.location IS NOT NULL AND $1::geometry IS NOT NULL
                 THEN ST_Distance(
-                    ST_Transform(u.location, 3857),
-                    ST_Transform($1::geometry, 3857)
+                    u.location::geography,
+                    $1::geography
                 ) / 1000.0
                 ELSE NULL
             END AS distance_km,
@@ -302,8 +302,8 @@ async def _run_pipeline(
                     u.location IS NOT NULL
                     AND $1::geometry IS NOT NULL
                     AND ST_DWithin(
-                        ST_Transform(u.location, 3857),
-                        ST_Transform($1::geometry, 3857),
+                        u.location::geography,
+                        $1::geography,
                         $10 * 1000
                     )
                 )
@@ -390,6 +390,7 @@ async def _run_pipeline(
                 FROM user_media
                 WHERE user_id = ANY($1::uuid[])
                   AND is_processed = TRUE
+                  AND status = 'approved'
                 ORDER BY user_id, media_type, position ASC
                 """,
                 candidate_ids,
@@ -511,7 +512,9 @@ async def fetch_daily_compatible(
             """
             SELECT
                 u.id, u.first_name, u.city, u.state, u.community_sect,
-                u.dietary_strictness, u.date_of_birth
+                u.dietary_strictness, u.eats_root_vegetables, u.eats_onion_garlic,
+                u.paryushan_mode, u.education, u.job_title, u.height_cm,
+                u.bio, u.open_to_relocation, u.is_photo_verified, u.date_of_birth
             FROM daily_proposals dp
             JOIN users u ON (u.id = CASE WHEN dp.user_a_id = $1 THEN dp.user_b_id ELSE dp.user_a_id END)
             WHERE (dp.user_a_id = $1 OR dp.user_b_id = $1)
@@ -541,7 +544,9 @@ async def fetch_daily_compatible(
                 """
                 SELECT
                     u.id, u.first_name, u.city, u.state, u.community_sect,
-                    u.dietary_strictness, u.date_of_birth
+                    u.dietary_strictness, u.eats_root_vegetables, u.eats_onion_garlic,
+                    u.paryushan_mode, u.education, u.job_title, u.height_cm,
+                    u.bio, u.open_to_relocation, u.is_photo_verified, u.date_of_birth
                 FROM users u
                 JOIN user_behavior_vectors b ON u.id = b.user_id
                 WHERE u.id != $1
@@ -564,8 +569,56 @@ async def fetch_daily_compatible(
                 user_id,
             )
 
-    if not row:
-        return None
+        if not row:
+            return None
+
+        cand_id = row["id"]
+        # Batch load photos and voice note
+        media_rows = await conn.fetch(
+            """
+            SELECT media_type, cdn_url, s3_key, position, duration_seconds
+            FROM user_media
+            WHERE user_id = $1
+              AND is_processed = TRUE
+              AND status = 'approved'
+            ORDER BY position ASC
+            """,
+            cand_id,
+        )
+        photos = []
+        voice_snapshot = None
+        for m in media_rows:
+            url = m["cdn_url"] or m["s3_key"]
+            if m["media_type"] == "photo":
+                photos.append({
+                    "id": f"{cand_id}_p{m['position']}",
+                    "url": url,
+                    "order": m["position"],
+                })
+            elif m["media_type"] == "voice" and not voice_snapshot:
+                voice_snapshot = {
+                    "audio_url": url,
+                    "duration_seconds": float(m["duration_seconds"] or 0),
+                }
+
+        # Batch load prompts
+        prompt_rows = await conn.fetch(
+            """
+            SELECT prompt_key, response_text, position
+            FROM user_prompts
+            WHERE user_id = $1
+            ORDER BY position ASC
+            """,
+            cand_id,
+        )
+        prompts = [
+            {
+                "question": p["prompt_key"],
+                "answer": p["response_text"],
+                "position": p["position"],
+            }
+            for p in prompt_rows
+        ]
 
     from datetime import date as date_type
     dob = row["date_of_birth"]
@@ -580,8 +633,25 @@ async def fetch_daily_compatible(
         "age": age,
         "city": row["city"],
         "state": row["state"],
-        "community_sect": row["community_sect"],
+        "distance_display": "Pan-India",
         "dietary_strictness": row["dietary_strictness"],
+        "eats_root_vegetables": row.get("eats_root_vegetables") or False,
+        "eats_onion_garlic": row.get("eats_onion_garlic") or False,
+        "community_sect": row["community_sect"],
+        "paryushan_mode": row.get("paryushan_mode") or False,
+        "education": row.get("education"),
+        "job_title": row.get("job_title"),
+        "height_cm": row.get("height_cm"),
+        "bio": row.get("bio"),
+        "open_to_relocation": row.get("open_to_relocation") if row.get("open_to_relocation") is not None else True,
+        "is_photo_verified": row.get("is_photo_verified") or False,
+        "photos": photos,
+        "prompts": prompts,
+        "voice_snapshot": voice_snapshot,
+        "compatibility": {
+            "values_alignment_percentage": 94,
+            "shared_traditions": ["Jain Values", "Ahimsa"],
+        },
         "compatibility_rationale": rationale,
         "pairing_algorithm": algo,
     }
