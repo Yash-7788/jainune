@@ -10,7 +10,7 @@
 
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
 import * as SecureStore from "expo-secure-store";
-import { ErrorCode, getFriendlyError } from "../utils/errors";
+import { ErrorCode, getFriendlyError, ERROR_MAP } from "../utils/errors";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

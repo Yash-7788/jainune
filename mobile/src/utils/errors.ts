@@ -26,7 +26,7 @@ interface FriendlyError {
   message: string;
 }
 
-const ERROR_MAP: Record<ErrorCode, FriendlyError> = {
+export const ERROR_MAP: Record<ErrorCode, FriendlyError> = {
   SESSION_EXPIRED: {
     title: "Time Flies When Having Fun!",
     message:

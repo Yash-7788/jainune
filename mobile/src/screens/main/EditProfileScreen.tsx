@@ -124,7 +124,25 @@ export default function EditProfileScreen() {
       setEatsRootVeg(data.eats_root_vegetables ?? false);
       setEatsOnionGarlic(data.eats_onion_garlic ?? false);
       setOpenToRelocation(data.open_to_relocation ?? false);
-      setLookingFor(data.looking_for || []);
+      const rawLf: any = data.looking_for;
+      const parsedLf: string[] = Array.isArray(rawLf)
+        ? rawLf.map((s: string) => {
+            const low = String(s).toLowerCase();
+            if (low.includes("marriage")) return "Marriage";
+            if (low.includes("serious") || low.includes("long_term")) return "Serious Relationship";
+            if (low.includes("dating") || low.includes("figuring")) return "Long-term Dating";
+            return s;
+          })
+        : typeof rawLf === "string" && rawLf
+        ? [
+            String(rawLf).toLowerCase().includes("marriage")
+              ? "Marriage"
+              : String(rawLf).toLowerCase().includes("serious") || String(rawLf).toLowerCase().includes("long_term")
+              ? "Serious Relationship"
+              : "Long-term Dating",
+          ]
+        : [];
+      setLookingFor(parsedLf);
       setVibeZones(data.vibe_zones || []);
       setPhotos(data.photos || []);
       setPrompts(data.prompts || []);

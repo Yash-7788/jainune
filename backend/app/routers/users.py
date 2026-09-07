@@ -341,6 +341,65 @@ async def delete_my_account(
             }
 
 
+@router.get("/me/export", status_code=status.HTTP_200_OK)
+async def export_my_data(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    DPDP Act 2023 / GDPR machine-readable personal data export.
+    Returns complete profile, prompts, media records, blocks, and arcade wallet.
+    """
+    from datetime import datetime, timezone
+
+    user_id = current_user["user_id"]
+    async with pool.acquire() as conn:
+        profile = await conn.fetchrow(
+            """
+            SELECT id, phone_number, email, first_name, date_of_birth, gender,
+                   community_sect, dietary_strictness, temple_visit_frequency,
+                   city, state, country, bio, job_title, company, education,
+                   height_cm, open_to_relocation, looking_for, show_me,
+                   is_photo_verified, subscription_tier, subscription_valid_until,
+                   super_connect_credits, is_paused, account_status, created_at, updated_at
+            FROM users WHERE id = $1
+            """,
+            user_id,
+        )
+        if profile is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        prompts = await conn.fetch(
+            "SELECT prompt_key, response_text, position, created_at FROM user_prompts WHERE user_id = $1 ORDER BY position",
+            user_id,
+        )
+        media = await conn.fetch(
+            "SELECT id, media_type, cdn_url, position, status, created_at FROM user_media WHERE user_id = $1 ORDER BY position",
+            user_id,
+        )
+        blocks = await conn.fetch(
+            "SELECT blocked_id, reason, created_at FROM user_blocks WHERE blocker_id = $1 ORDER BY created_at DESC",
+            user_id,
+        )
+        wallet = await conn.fetchrow(
+            "SELECT available_spins, available_dice_rolls, updated_at FROM user_arcade_wallet WHERE user_id = $1",
+            user_id,
+        )
+
+    return {
+        "export_metadata": {
+            "version": "1.0",
+            "compliance": "DPDP Act 2023 / Digital Personal Data Protection",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "profile": dict(profile),
+        "prompts": [dict(p) for p in prompts],
+        "media": [dict(m) for m in media],
+        "blocks": [dict(b) for b in blocks],
+        "arcade_wallet": dict(wallet) if wallet else None,
+    }
+
+
 @router.get("/{user_id}/public")
 async def get_public_profile(
     user_id: UUID,

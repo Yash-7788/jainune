@@ -58,10 +58,14 @@ export default function LikesScreen() {
       ]);
 
       if (subRes.status === "fulfilled") {
+        const s = subRes.value;
         setIsSubscriber(
-          subRes.value.tier === "jainune_plus" ||
-            subRes.value.tier === "plus" ||
-            subRes.value.is_active === true
+          s.can_see_who_liked === true ||
+            s.tier === "jainune_plus" ||
+            s.tier === "plus" ||
+            s.tier === "gold" ||
+            s.tier === "platinum" ||
+            s.is_active === true
         );
       }
 

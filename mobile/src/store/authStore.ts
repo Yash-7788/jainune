@@ -75,7 +75,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   logout: async () => {
-    await apiLogout();
-    set({ state: "unauthenticated", userId: null, isNewUser: false, onboardingCompleted: false });
+    try {
+      await apiLogout();
+    } catch {
+      await clearTokens();
+    } finally {
+      set({ state: "unauthenticated", userId: null, isNewUser: false, onboardingCompleted: false });
+    }
   },
 }));

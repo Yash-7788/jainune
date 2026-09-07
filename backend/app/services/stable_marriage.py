@@ -114,34 +114,43 @@ class StableMarriageEngine:
                     # Receiver keeps current — proposer stays free
                     free.append(proposer)
 
-        # Build output proposals (deduplicate pairs)
-        seen: set[frozenset] = set()
-        proposals: list[dict[str, Any]] = []
+        # Collect all candidate pairings with scores
+        candidates: list[dict[str, Any]] = []
+        seen_pairs: set[frozenset] = set()
 
         for receiver, proposer in current_match.items():
             if proposer is None or receiver == proposer:
                 continue
             pair = frozenset({receiver, proposer})
-            if pair in seen:
+            if pair in seen_pairs:
                 continue
-            seen.add(pair)
+            seen_pairs.add(pair)
 
             # Score = mutual rank quality (geometric mean, inverted to [0,1])
             r_rank = receiver_rank.get(receiver, {}).get(proposer, 999)
             p_rank = receiver_rank.get(proposer, {}).get(receiver, 999)
-            # Lower rank = better; normalise against TOP_K=50
             norm = 50.0
             r_score = max(0.0, 1.0 - r_rank / norm)
             p_score = max(0.0, 1.0 - p_rank / norm)
             score = round(math.sqrt(r_score * p_score), 4)
 
-            proposals.append({
+            candidates.append({
                 "user_a": receiver,
                 "user_b": proposer,
                 "score": score,
             })
 
-        # Sort by score descending (best mutual matches first)
-        proposals.sort(key=lambda x: x["score"], reverse=True)
+        # Sort candidate pairs by score descending (best pairs get matched first)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        # Enforce strict 1-to-1 matching (no user assigned multiple times)
+        proposals: list[dict[str, Any]] = []
+        matched_users: set[str] = set()
+        for cand in candidates:
+            if cand["user_a"] not in matched_users and cand["user_b"] not in matched_users:
+                matched_users.add(cand["user_a"])
+                matched_users.add(cand["user_b"])
+                proposals.append(cand)
+
         log.info("StableMarriageEngine: %d proposals from %d users", len(proposals), len(users))
         return proposals

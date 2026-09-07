@@ -139,7 +139,14 @@ export default function SubscriptionsScreen() {
           `Your subscription is active until ${new Date(result.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}.`,
           [{ text: "Let's go", onPress: () => navigation.goBack() }]
         );
+      } else if (result.success || result.activated) {
+        Alert.alert(
+          "Welcome to Jainune+",
+          "Your subscription has been activated successfully.",
+          [{ text: "Let's go", onPress: () => navigation.goBack() }]
+        );
       }
+      fetchStatus();
     } catch (err: any) {
       if (err?.code === 0 || err?.error === "CANCELLED") {
         return;

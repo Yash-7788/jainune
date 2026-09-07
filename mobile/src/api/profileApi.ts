@@ -130,8 +130,16 @@ export async function updateProfile(payload: Partial<{
   if (payload.bio !== undefined) sanitized.bio = payload.bio;
   if (payload.height_cm !== undefined) sanitized.height_cm = payload.height_cm;
   if (payload.max_distance_km !== undefined) sanitized.max_distance_km = payload.max_distance_km;
-  if (lookingForStr && ["marriage", "long_term", "figuring_out"].includes(lookingForStr)) {
-    sanitized.looking_for = lookingForStr;
+  if (lookingForStr) {
+    const raw = String(lookingForStr).toLowerCase().replace(/[\s-]+/g, "_");
+    let normalized = raw;
+    if (raw.includes("marriage")) normalized = "marriage";
+    else if (raw.includes("serious") || raw.includes("long_term") || raw.includes("dating")) normalized = "long_term";
+    else if (raw.includes("figuring")) normalized = "figuring_out";
+
+    if (["marriage", "long_term", "figuring_out"].includes(normalized)) {
+      sanitized.looking_for = normalized;
+    }
   }
 
   const res = await apiPatch<MyProfile>("/users/me", sanitized);

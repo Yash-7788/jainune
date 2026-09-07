@@ -20,7 +20,7 @@ import {
   Platform,
   Alert,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import { getMyProfile, updateProfile, MyProfile } from "../../api/profileApi";
 import { useAuthStore } from "../../store/authStore";
@@ -72,7 +72,11 @@ export default function ProfileScreen() {
     }
   }, []);
 
-  useEffect(() => { load(); }, []);
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
 
   const toggleParyushan = async (val: boolean) => {
     if (!profile) return;

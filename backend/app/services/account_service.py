@@ -135,7 +135,15 @@ async def purge_user_account(
             "DELETE FROM chats WHERE participant_a = $1 OR participant_b = $1 OR participant_1_id = $1 OR participant_2_id = $1",
             user_id,
         )
-        await conn.execute("DELETE FROM matches WHERE user_a = $1 OR user_b = $1", user_id)
+        await conn.execute(
+            """
+            DELETE FROM matches
+            WHERE user_a = $1 OR user_b = $1
+               OR user_id_1 = $1 OR user_id_2 = $1
+               OR user_a_id = $1 OR user_b_id = $1
+            """,
+            user_id,
+        )
         await conn.execute("DELETE FROM interactions WHERE actor_id = $1 OR target_id = $1", user_id)
 
         # Finally, delete user record itself
@@ -212,6 +220,26 @@ async def soft_delete_user_account(
             user_id,
         )
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
+        # Terminate active matches and chats for soft-deleted user
+        await conn.execute(
+            """
+            UPDATE matches
+            SET status = 'unmatched', updated_at = NOW()
+            WHERE (user_a = $1 OR user_b = $1 OR user_id_1 = $1 OR user_id_2 = $1 OR user_a_id = $1 OR user_b_id = $1)
+              AND status = 'active'
+            """,
+            user_id,
+        )
+        await conn.execute(
+            """
+            UPDATE chats
+            SET is_unmatched = TRUE, updated_at = NOW()
+            WHERE (participant_1_id = $1 OR participant_2_id = $1 OR participant_a = $1 OR participant_b = $1)
+              AND is_unmatched = FALSE
+            """,
+            user_id,
+        )
 
     # Invalidate feed & sessions in Redis
     try:
