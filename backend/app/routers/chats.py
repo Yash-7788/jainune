@@ -449,8 +449,11 @@ async def mark_read(
     chat_id: uuid.UUID,
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> None:
     user_id = uuid.UUID(str(current_user["id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:chats:read:{user_id}", 60, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
     actual_chat_id = chat["id"]
 
@@ -483,6 +486,7 @@ async def unmatch_chat(
     3. Blocks future messaging attempts with 403 Forbidden.
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:chats:unmatch:{user_id}", 15, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
     actual_chat_id = chat["id"]
     p1 = chat["participant_1_id"]

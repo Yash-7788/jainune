@@ -18,7 +18,7 @@ from app.core.security import sliding_window_rate_limit
 from app.dependencies import get_current_user, RedisDep
 import asyncpg
 
-from app.main import ok
+from app.core.responses import ok
 from app.services.location_verifier import (
     LAUNCH_ZONES,
     save_city_waitlist,

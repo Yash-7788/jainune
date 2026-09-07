@@ -98,6 +98,7 @@ async def get_daily_compatible(
     - Lock resets at midnight IST; users cannot skip their Daily Compatible
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    await sliding_window_rate_limit(f"ratelimit:feed:daily:{user_id}", 30, 60, redis)
     candidate = await fetch_daily_compatible(user_id=user_id, db=db, redis=redis)
 
     # Compute lock_until = next midnight IST as ISO string

@@ -259,6 +259,85 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res["created"])
         self.assertIn("INSERT INTO dilemmas", conn.fetchval.call_args[0][0])
 
+    async def test_endpoint_rate_limiters_enforced(self):
+        """Verify rate limiters trigger 429 when threshold exceeded across matrix endpoints."""
+        from app.routers.websockets import create_ws_ticket
+        from app.routers.auth import logout_endpoint
+        from app.routers.telemetry import ingest_interaction_event, InteractionEventPayload
+        from app.routers.media import presign_upload_get
+
+        mock_redis = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[0, 1, 999, True])
+        mock_redis.pipeline.return_value = mock_pipe
+        user_id = uuid.uuid4()
+        user_dict = {"id": str(user_id), "user_id": str(user_id)}
+
+        # WS ticket rate limit
+        with self.assertRaises(HTTPException) as ctx:
+            await create_ws_ticket(current_user=user_dict, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Logout rate limit
+        pool, _ = _make_mock_pool()
+        with self.assertRaises(HTTPException) as ctx:
+            await logout_endpoint(current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Telemetry interaction event rate limit
+        event = InteractionEventPayload(target_user_id=uuid.uuid4(), action="like", total_dwell_ms=1200)
+        with self.assertRaises(HTTPException) as ctx:
+            await ingest_interaction_event(event=event, current_user=user_dict, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Media presign upload rate limit
+        with self.assertRaises(HTTPException) as ctx:
+            await presign_upload_get(current_user=user_dict, db=pool, redis=mock_redis, type="photo")
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Media delete rate limit
+        from app.routers.media import delete_media, reorder_media
+        from app.models.schemas.user import ReorderMediaBody, MediaPositionItem
+        with self.assertRaises(HTTPException) as ctx:
+            await delete_media(media_id=uuid.uuid4(), current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Media reorder rate limit
+        reorder_payload = ReorderMediaBody(positions=[MediaPositionItem(media_id=uuid.uuid4(), position=1)])
+        with self.assertRaises(HTTPException) as ctx:
+            await reorder_media(body=reorder_payload, current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Feed daily-compatible rate limit
+        from app.routers.feed import get_daily_compatible
+        with self.assertRaises(HTTPException) as ctx:
+            await get_daily_compatible(current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Chats mark_read rate limit
+        from app.routers.chats import mark_read, unmatch_chat
+        chat_id = uuid.uuid4()
+        with self.assertRaises(HTTPException) as ctx:
+            await mark_read(chat_id=chat_id, current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Chats unmatch rate limit
+        with self.assertRaises(HTTPException) as ctx:
+            await unmatch_chat(chat_id=chat_id, current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        # Interactions matches and liked_me rate limits
+        from app.routers.interactions import get_my_matches, get_users_who_liked_me
+        with self.assertRaises(HTTPException) as ctx:
+            await get_my_matches(current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+        with self.assertRaises(HTTPException) as ctx:
+            await get_users_who_liked_me(current_user=user_dict, db=pool, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

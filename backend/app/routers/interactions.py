@@ -303,11 +303,14 @@ async def record_interaction_action(
 async def get_my_matches(
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> dict:
     """Fetch all active mutual matches for the authenticated user."""
     import json
     from datetime import date
     user_id = uuid.UUID(str(current_user["id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:interactions:matches:{user_id}", 30, 60, redis)
 
     query = """
     SELECT
@@ -378,12 +381,15 @@ async def get_my_matches(
 async def get_users_who_liked_me(
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> dict:
     """Fetch incoming likes from other users (server-side redacted for free tier)."""
     import json
     from datetime import date
     from app.services.payment_service import get_effective_user_tier
     user_id = uuid.UUID(str(current_user["id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:interactions:liked_me:{user_id}", 30, 60, redis)
 
     query = """
     SELECT

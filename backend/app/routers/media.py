@@ -210,7 +210,9 @@ async def presign_upload_get(
     redis: RedisDep,
     type: str = Query("photo", pattern="^(photo|voice)$"),
 ) -> UploadRequestResponse:
-    ct = "image/jpeg" if type == "photo" else "audio/mp4"
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:media:upload:{user_id}", 20, 60, redis)
+    ct = "image/jpeg" if type == "photo" else "audio/m4a"
     size = 2 * 1024 * 1024 if type == "photo" else 1024 * 1024
     body = UploadRequestBody(
         media_type=type,
@@ -305,11 +307,15 @@ async def delete_media(
     media_id: uuid.UUID,
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> dict:
     from app.services.account_service import _delete_s3_keys_sync
     import asyncio
 
     user_id = uuid.UUID(str(current_user["user_id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:media:delete:{user_id}", 30, 60, redis)
+
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, s3_key, status FROM user_media WHERE id = $1 AND user_id = $2",
@@ -338,8 +344,12 @@ async def reorder_media(
     body: ReorderMediaBody,
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> dict:
     user_id = uuid.UUID(str(current_user["user_id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:media:reorder:{user_id}", 30, 60, redis)
+
     async with db.acquire() as conn:
         async with conn.transaction():
             for item in body.positions:

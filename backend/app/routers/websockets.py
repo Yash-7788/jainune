@@ -29,7 +29,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 import secrets
 from app.core.database import get_pool
 from app.core.redis import get_redis
-from app.core.security import validate_access_token_raw
+from app.core.security import validate_access_token_raw, sliding_window_rate_limit
 from app.dependencies import CurrentUser, RedisDep
 
 router = APIRouter(tags=["websockets"])
@@ -45,6 +45,8 @@ async def create_ws_ticket(
     Issues a single-use, 30-second cryptographically random ticket.
     Prevents token leakage in URL access logs.
     """
+    user_id = str(current_user.get("user_id") or current_user.get("id"))
+    await sliding_window_rate_limit(f"ratelimit:ws_ticket:{user_id}", 30, 60, redis)
     ticket = f"wst_{secrets.token_urlsafe(32)}"
     ticket_key = f"ws:ticket:{ticket}"
     await redis.set(ticket_key, str(current_user["id"]), ex=30)

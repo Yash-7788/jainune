@@ -87,31 +87,7 @@ async def add_security_headers(request: Request, call_next):
 
 
 # ── Standard response envelope helpers ───────────────────────────────────────
-
-def ok(data: dict | list, meta: dict | None = None) -> dict:
-    import time, uuid
-    return {
-        "success": True,
-        "data": data,
-        "error": None,
-        "meta": meta or {
-            "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-            "request_id": f"req_{uuid.uuid4().hex[:16]}",
-        },
-    }
-
-
-def err(code: str, message: str, details: list | None = None) -> dict:
-    import uuid
-    return {
-        "success": False,
-        "data": None,
-        "error": {"code": code, "message": message, "details": details or []},
-        "meta": {
-            "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-            "request_id": f"req_{uuid.uuid4().hex[:16]}",
-        },
-    }
+from app.core.responses import err, ok
 
 
 # ── Global exception handlers ──────────────────────────────────────────────────

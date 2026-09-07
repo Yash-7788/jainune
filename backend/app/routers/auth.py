@@ -20,7 +20,7 @@ from app.core.security import (
     verify_otp,
 )
 from app.dependencies import CurrentUser, DBDep, RedisDep
-from app.main import err, ok
+from app.core.responses import err, ok
 from app.models.schemas.auth import (
     AccessTokenResponse,
     AppleAuthBody,
@@ -520,6 +520,7 @@ async def logout_endpoint(
 
     user_id_raw = current_user.get("user_id") or current_user.get("id")
     user_id = uuid.UUID(str(user_id_raw))
+    await sliding_window_rate_limit(f"ratelimit:auth:logout:{user_id}", 30, 60, redis)
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
 

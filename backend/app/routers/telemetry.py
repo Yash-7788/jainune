@@ -193,6 +193,7 @@ async def ingest_interaction_event(
 ) -> TelemetryResponse:
     """Accepts single user interaction dwell telemetry event from mobile feed."""
     actor_id = str(current_user["id"])
+    await sliding_window_rate_limit(f"ratelimit:telemetry:{actor_id}", 120, 60, redis)
     server_ts = int(time.time() * 1000)
     entry = {
         "actor_id": actor_id,
