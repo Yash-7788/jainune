@@ -52,3 +52,29 @@ jobs:
           name: android-release-bundle
           path: mobile/android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: ignore
+
+  build-ios:
+    if: inputs.platform == 'all' || inputs.platform == 'ios'
+    name: Build iOS Validation
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mobile/package.json
+
+      - name: Install dependencies
+        run: |
+          cd mobile
+          npm install --legacy-peer-deps --no-audit
+
+      - name: Validate iOS Native Configuration
+        run: |
+          cd mobile/ios
+          test -f Jainune/Info.plist && echo "Info.plist present"
+          test -f Jainune/Jainune.entitlements && echo "Jainune.entitlements present"
+

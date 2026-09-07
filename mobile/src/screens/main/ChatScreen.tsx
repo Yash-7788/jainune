@@ -231,6 +231,10 @@ export default function ChatScreen() {
           clearInterval(pingInterval.current);
           pingInterval.current = null;
         }
+        if (reconnectTimer.current) {
+          clearTimeout(reconnectTimer.current);
+          reconnectTimer.current = null;
+        }
         setWsConnected(false);
         if (reconnectAttempts.current < 5) {
           const delay = Math.min(20000, 2000 * Math.pow(1.5, reconnectAttempts.current));
@@ -239,7 +243,9 @@ export default function ChatScreen() {
         }
       };
 
-      socket.onerror = handleDisconnect;
+      socket.onerror = () => {
+        setWsConnected(false);
+      };
       socket.onclose = (e) => {
         if (pingInterval.current) {
           clearInterval(pingInterval.current);

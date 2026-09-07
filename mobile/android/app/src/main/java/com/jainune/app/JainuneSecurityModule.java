@@ -158,6 +158,7 @@ public class JainuneSecurityModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void detectFrida(Promise promise) {
     new Thread(() -> {
+      boolean detected = false;
       try {
         // TCP socket probe — must run off main thread
         Socket socket = new Socket();
@@ -166,33 +167,32 @@ public class JainuneSecurityModule extends ReactContextBaseJavaModule {
           200 // 200ms timeout
         );
         socket.close();
-        // Port responded — Frida server is running
-        promise.resolve(true);
-      } catch (java.net.ConnectException | java.net.SocketTimeoutException e) {
-        // Port refused or timed out — Frida not running
-        promise.resolve(false);
-      } catch (Exception e) {
-        // Network error — treat as clean
-        promise.resolve(false);
+        detected = true;
+      } catch (Exception ignored) {
+        // Port closed or unreachable
       }
 
-      // Also check /proc/self/maps for frida-agent
-      try {
-        Process proc = Runtime.getRuntime().exec("cat /proc/self/maps");
-        InputStream is = proc.getInputStream();
-        byte[] buffer = new byte[8192];
-        StringBuilder maps = new StringBuilder();
-        int n;
-        while ((n = is.read(buffer)) != -1) {
-          maps.append(new String(buffer, 0, n));
+      if (!detected) {
+        // Also check /proc/self/maps for frida-agent
+        try {
+          Process proc = Runtime.getRuntime().exec("cat /proc/self/maps");
+          InputStream is = proc.getInputStream();
+          byte[] buffer = new byte[8192];
+          StringBuilder maps = new StringBuilder();
+          int n;
+          while ((n = is.read(buffer)) != -1) {
+            maps.append(new String(buffer, 0, n));
+          }
+          String mapsStr = maps.toString().toLowerCase();
+          if (mapsStr.contains("frida") || mapsStr.contains("gum-js-loop") || mapsStr.contains("gmain")) {
+            detected = true;
+          }
+        } catch (Exception ignored) {
+          // Silently ignore /proc read errors
         }
-        String mapsStr = maps.toString().toLowerCase();
-        if (mapsStr.contains("frida") || mapsStr.contains("gum-js-loop") || mapsStr.contains("gmain")) {
-          promise.resolve(true);
-        }
-      } catch (Exception ignored) {
-        // Silently ignore /proc read errors
       }
+
+      promise.resolve(detected);
     }).start();
   }
 

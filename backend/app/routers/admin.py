@@ -142,7 +142,18 @@ async def get_user_detail(
         )
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return dict(row)
+
+    res = dict(row)
+    if admin.get("admin_role") != "superadmin":
+        for sensitive_col in (
+            "revealed_preference_vector",
+            "behavior_vector",
+            "income",
+            "income_range",
+            "annual_income",
+        ):
+            res.pop(sensitive_col, None)
+    return res
 
 
 @router.post("/users/{user_id}/ban", status_code=status.HTTP_200_OK)
@@ -303,13 +314,31 @@ async def resolve_report(
                    SET resolved         = TRUE,
                        resolved_by      = $1,
                        resolved_at      = NOW(),
-                       resolution_notes = $2
-                 WHERE id = $3
+                       resolution_notes = $2,
+                       action_taken     = $3
+                  WHERE id = $4
                 """,
                 admin["user_id"],
                 body.notes,
+                body.action_taken,
                 report_id,
             )
+
+            # Apply account action if suspension or ban decided
+            if body.action_taken == "banned":
+                await conn.execute(
+                    "UPDATE users SET account_status = 'banned', updated_at = NOW() WHERE id = $1",
+                    report["reported_id"],
+                )
+            elif body.action_taken == "suspended":
+                from datetime import datetime, timedelta, timezone
+                suspend_until = datetime.now(tz=timezone.utc) + timedelta(days=7)
+                await conn.execute(
+                    "UPDATE users SET account_status = 'suspended', suspend_until = $1, updated_at = NOW() WHERE id = $2",
+                    suspend_until,
+                    report["reported_id"],
+                )
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
@@ -322,8 +351,7 @@ async def resolve_report(
                 body.notes or "",
             )
 
-        # Recompute trust score for reported user
-        async with conn.transaction():
+            # Recompute trust score for reported user inside the same transaction
             await recompute_trust_score(report["reported_id"], conn)
 
     return {"resolved": True, "report_id": report_id}

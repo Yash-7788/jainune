@@ -498,6 +498,124 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("Cannot interact with a blocked user", ctx.exception.detail)
 
+    async def test_o7_report_trust_score_confirmed_vs_unresolved(self):
+        """O-7: Trust score penalizes confirmed reports and ignores raw unresolved reports."""
+        from app.services.dignity_engine import recompute_trust_score
+        conn = AsyncMock()
+        user_id = uuid.uuid4()
+
+        # Unresolved reports: confirmed_reports = 0 -> no penalty
+        conn.fetchrow.return_value = {
+            "is_photo_verified": False,
+            "created_at": None,
+            "has_voice": 0,
+            "confirmed_reports": 0,
+            "badge_count": 0,
+        }
+        score_clean = await recompute_trust_score(user_id, conn)
+        self.assertEqual(score_clean, 50)
+
+        # Moderator-confirmed reports: 2 confirmed reports -> 50 - 20 = 30
+        conn.fetchrow.return_value = {
+            "is_photo_verified": False,
+            "created_at": None,
+            "has_voice": 0,
+            "confirmed_reports": 2,
+            "badge_count": 0,
+        }
+        score_penalized = await recompute_trust_score(user_id, conn)
+        self.assertEqual(score_penalized, 30)
+
+    async def test_o7_resolve_report_atomic_action_and_trust_recompute(self):
+        """O-7: resolve_report updates action_taken, sets user status, and recomputes trust score in 1 transaction."""
+        from app.routers.admin import resolve_report, ResolveReportBody
+        pool, conn = _make_mock_pool()
+        report_id = uuid.uuid4()
+        reported_id = uuid.uuid4()
+        admin_id = uuid.uuid4()
+
+        conn.fetchrow.return_value = {"reported_id": reported_id}
+        # recompute_trust_score mock fetchrow
+        conn.fetchrow.side_effect = [
+            {"reported_id": reported_id},
+            {"is_photo_verified": False, "created_at": None, "has_voice": 0, "confirmed_reports": 1, "badge_count": 0},
+        ]
+
+        body = ResolveReportBody(action_taken="banned", notes="Confirmed serious harassment")
+        admin = {"user_id": admin_id, "admin_role": "superadmin"}
+
+        res = await resolve_report(report_id=report_id, body=body, admin=admin, pool=pool)
+        self.assertTrue(res["resolved"])
+
+        executed_sqls = [call[0][0] for call in conn.execute.call_args_list]
+        self.assertTrue(any("UPDATE reports" in s and "action_taken" in s for s in executed_sqls))
+        self.assertTrue(any("UPDATE users" in s and "account_status = 'banned'" in s for s in executed_sqls))
+        self.assertTrue(any("INSERT INTO admin_audit_log" in s for s in executed_sqls))
+        self.assertTrue(any("UPDATE users SET trust_score" in s for s in executed_sqls))
+
+    def test_o11_turnstile_siteverify_and_bot_integrity(self):
+        """O-11: Turnstile token verification calls Cloudflare siteverify endpoint."""
+        from app.services.email_verifier import verify_bot_integrity, verify_turnstile_token
+        from app.core.config import settings
+
+        # Blocked scraper User-Agent
+        is_bot, msg = verify_bot_integrity({"user-agent": "python-requests/2.31.0"})
+        self.assertTrue(is_bot)
+
+        # When turnstile_secret_key is configured, missing token is rejected
+        with patch.object(settings, "turnstile_secret_key", "0x4AAAAAAtestsecret"):
+            is_bot, msg = verify_bot_integrity({"user-agent": "Mozilla/5.0"}, turnstile_token=None)
+            self.assertTrue(is_bot)
+            self.assertIn("challenge failed", msg)
+
+            # Valid token verified with Cloudflare siteverify
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{"success": true}'
+            mock_resp.__enter__.return_value = mock_resp
+            mock_resp.__exit__.return_value = False
+
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                is_bot, msg = verify_bot_integrity({"user-agent": "Mozilla/5.0"}, turnstile_token="0.valid_cf_token")
+                self.assertFalse(is_bot)
+
+    def test_o12_location_synthetic_integer_coords_rejected(self):
+        """O-12: verify_location_anti_spoofing rejects synthetic integer coordinates."""
+        from app.services.location_verifier import verify_location_anti_spoofing
+        valid, err = verify_location_anti_spoofing(19.0, 72.0, is_mocked=False)
+        self.assertFalse(valid)
+        self.assertIn("Synthetic coordinate precision", err)
+
+    async def test_o14_admin_user_detail_least_privilege(self):
+        """O-14: get_user_detail redacts raw vector embeddings and income fields for moderators."""
+        from app.routers.admin import get_user_detail
+        pool, conn = _make_mock_pool()
+        user_id = uuid.uuid4()
+
+        conn.fetchrow.return_value = {
+            "id": user_id,
+            "first_name": "Aarav",
+            "revealed_preference_vector": [0.1] * 128,
+            "behavior_vector": [0.2] * 128,
+            "income": "25-50LPA",
+            "report_count": 0,
+            "badge_count": 0,
+            "media_count": 2,
+        }
+
+        # Moderator role: vectors and income redacted
+        mod_admin = {"user_id": uuid.uuid4(), "admin_role": "moderator"}
+        mod_detail = await get_user_detail(user_id=user_id, admin=mod_admin, pool=pool)
+        self.assertNotIn("revealed_preference_vector", mod_detail)
+        self.assertNotIn("behavior_vector", mod_detail)
+        self.assertNotIn("income", mod_detail)
+        self.assertEqual(mod_detail["first_name"], "Aarav")
+
+        # Superadmin role: full record retained
+        super_admin = {"user_id": uuid.uuid4(), "admin_role": "superadmin"}
+        super_detail = await get_user_detail(user_id=user_id, admin=super_admin, pool=pool)
+        self.assertIn("revealed_preference_vector", super_detail)
+        self.assertIn("income", super_detail)
+
 
 if __name__ == "__main__":
     unittest.main()

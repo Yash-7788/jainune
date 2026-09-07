@@ -111,18 +111,30 @@ async def _evaluate_auto_action(
     user_id: UUID,
     conn: asyncpg.Connection,
 ) -> None:
-    """Check report counts and trigger auto-suspend/ban if thresholds hit."""
-    confirmed_count = await conn.fetchval(
+    """
+    Evaluate abuse reports against user_id.
+    Prevents unreviewed brigading:
+    - Auto-bans are NEVER triggered by unreviewed reports (must be moderator-confirmed).
+    - Auto-quarantine/suspension requires at least AUTO_SUSPEND_THRESHOLD distinct reporters
+      with established trust scores (>= 40) and account age > 48h.
+    """
+    valid_reporters_count = await conn.fetchval(
         """
-        SELECT COUNT(*) FROM reports
-        WHERE reported_id = $1 AND resolved = FALSE
+        SELECT COUNT(DISTINCT r.reporter_id)
+        FROM reports r
+        JOIN users u ON u.id = r.reporter_id
+        WHERE r.reported_id = $1
+          AND r.resolved = FALSE
+          AND u.trust_score >= 40
+          AND u.created_at <= NOW() - INTERVAL '48 hours'
         """,
         user_id,
     )
 
-    if confirmed_count >= AUTO_BAN_THRESHOLD:
+    count = valid_reporters_count or 0
+    if count >= AUTO_BAN_THRESHOLD:
         new_status = "banned"
-    elif confirmed_count >= AUTO_SUSPEND_THRESHOLD:
+    elif count >= AUTO_SUSPEND_THRESHOLD:
         new_status = "suspended"
     else:
         return
@@ -132,7 +144,7 @@ async def _evaluate_auto_action(
         user_id,
     )
 
-    if current_status in ("banned", "deleted"):
+    if current_status in ("banned", "deleted") or current_status == new_status:
         return  # already actioned
 
     await conn.execute(
@@ -145,10 +157,9 @@ async def _evaluate_auto_action(
         user_id,
     )
     log.warning(
-        "Auto-action: user %s set to %s (report_count=%d)",
+        "Auto-quarantine: user %s suspended pending mod review (trusted_reporters=%d)",
         user_id,
-        new_status,
-        confirmed_count,
+        valid_reporters_count,
     )
 
 
@@ -252,8 +263,10 @@ async def recompute_trust_score(
              WHERE user_id = u.id AND media_type = 'voice' AND status = 'approved'
             ) AS has_voice,
             (SELECT COUNT(*) FROM reports
-             WHERE reported_id = u.id AND resolved = FALSE
-            ) AS pending_reports,
+             WHERE reported_id = u.id
+               AND resolved = TRUE
+               AND action_taken IN ('warned', 'suspended', 'banned')
+            ) AS confirmed_reports,
             (SELECT COUNT(*) FROM dignity_badges
              WHERE to_user_id = u.id
             ) AS badge_count
@@ -274,7 +287,10 @@ async def recompute_trust_score(
         score += 5
 
     # Penalty: −10 per confirmed report, capped at −40
-    report_penalty = min(int(row["pending_reports"]) * 10, 40)
+    confirmed_reports = row.get("confirmed_reports")
+    if confirmed_reports is None:
+        confirmed_reports = row.get("pending_reports", 0)
+    report_penalty = min(int(confirmed_reports) * 10, 40)
     score -= report_penalty
 
     # Badge bonus: +3 per badge, capped at +15

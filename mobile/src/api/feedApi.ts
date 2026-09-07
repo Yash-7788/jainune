@@ -64,9 +64,22 @@ export interface InteractionResult {
   momentum_window_hours: number;
 }
 
+export interface DailyCompatibleResponse {
+  candidate: FeedCandidate | null;
+  pairing_algorithm: string;
+  locked_until: string;
+}
+
 /** GET /v1/feed */
 export async function getFeed(limit = 15): Promise<FeedResponse> {
   const res = await apiGet<FeedResponse>("/feed", { limit });
+  if (!res.success) throw { _apiError: res.error };
+  return res.data;
+}
+
+/** GET /v1/feed/daily-compatible */
+export async function getDailyCompatible(): Promise<DailyCompatibleResponse> {
+  const res = await apiGet<DailyCompatibleResponse>("/feed/daily-compatible");
   if (!res.success) throw { _apiError: res.error };
   return res.data;
 }

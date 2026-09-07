@@ -135,10 +135,39 @@ def is_disposable_email(email: str, allow_custom_domains: bool = False) -> Tuple
     return False, ""
 
 
+def verify_turnstile_token(token: str, remote_ip: str | None = None) -> bool:
+    """Verifies Turnstile response token with Cloudflare siteverify API."""
+    if not settings.turnstile_secret_key:
+        return len(token) >= 10
+
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    payload = {
+        "secret": settings.turnstile_secret_key,
+        "response": token,
+    }
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("success"))
+    except Exception as exc:
+        log.warning("Turnstile verification request failed: %s", exc)
+        return False
+
+
 def verify_bot_integrity(
     headers: dict,
     turnstile_token: str | None = None,
     is_production: bool = False,
+    remote_ip: str | None = None,
 ) -> Tuple[bool, str]:
     """
     Validates client request to detect automated bot scripts and scrapers.
@@ -146,7 +175,7 @@ def verify_bot_integrity(
     """
     user_agent = headers.get("user-agent", "").lower()
 
-    # 1. Block known automated scripts & scrapers in production
+    # 1. Block known automated scripts & scrapers
     blocked_agents = [
         "python-requests", "curl/", "wget/", "scrapy", "postmanruntime",
         "go-http-client", "httpie", "aiohttp", "urllib", "puppeteer",
@@ -154,8 +183,11 @@ def verify_bot_integrity(
     if any(agent in user_agent for agent in blocked_agents):
         return True, "Automated or unsupported client detected."
 
-    # 2. In production, turnstile_token verification can be enforced
-    if is_production and turnstile_token:
+    # 2. Turnstile token verification
+    if settings.turnstile_secret_key or (is_production and turnstile_token):
+        if not turnstile_token or not verify_turnstile_token(turnstile_token, remote_ip):
+            return True, "Security verification challenge failed."
+    elif turnstile_token:
         if len(turnstile_token) < 10:
             return True, "Security verification challenge failed."
 
