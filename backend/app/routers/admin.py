@@ -429,22 +429,21 @@ async def reject_media(
         if row is None:
             raise HTTPException(status_code=404, detail="Media not found")
 
-        await conn.execute(
-            """
-            UPDATE user_media
-               SET status         = 'rejected',
-                   rejection_reason = $1,
-                   reviewed_by    = $2,
-                   reviewed_at    = NOW()
-             WHERE id = $3
-            """,
-            body.reason,
-            admin["user_id"],
-            media_id,
-        )
-
-        # Recompute trust score (rejected photo = lower score)
         async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE user_media
+                   SET status           = 'rejected',
+                       rejection_reason = $1,
+                       reviewed_by      = $2,
+                       reviewed_at      = NOW()
+                 WHERE id = $3
+                """,
+                body.reason,
+                admin["user_id"],
+                media_id,
+            )
+            # Recompute trust score atomically with the rejection
             await recompute_trust_score(row["user_id"], conn)
 
     return {"rejected": True, "media_id": media_id, "reason": body.reason}
@@ -469,11 +468,14 @@ async def get_dashboard_stats(
                 (SELECT COUNT(*) FROM users WHERE account_status = 'suspended') AS suspended_users,
                 (SELECT COUNT(*) FROM users WHERE account_status = 'banned')   AS banned_users,
                 (SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '24h') AS new_users_24h,
+                (SELECT COUNT(*) FROM users WHERE subscription_tier = 'jainune_plus') AS jainune_plus_subscribers,
                 (SELECT COUNT(*) FROM users WHERE subscription_tier = 'gold')  AS gold_subscribers,
                 (SELECT COUNT(*) FROM users WHERE subscription_tier = 'platinum') AS platinum_subscribers,
+                (SELECT COUNT(*) FROM users WHERE subscription_tier != 'free' AND subscription_valid_until > NOW()) AS active_paid_subscribers,
                 (SELECT COUNT(*) FROM reports WHERE resolved = FALSE)          AS open_reports,
-                (SELECT COUNT(*) FROM user_media WHERE status = 'pending')          AS pending_media,
+                (SELECT COUNT(*) FROM user_media WHERE status = 'pending')     AS pending_media,
                 (SELECT COUNT(*) FROM matches WHERE created_at > NOW() - INTERVAL '24h') AS matches_24h
             """
         )
     return dict(stats)
+

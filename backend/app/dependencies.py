@@ -80,10 +80,12 @@ async def get_current_user(
         )
 
     suspend_until = row.get("suspend_until")
-    if suspend_until and suspend_until > datetime.now(timezone.utc):
+    is_suspended = row.get("account_status") == "suspended"
+    if is_suspended or (suspend_until and suspend_until > datetime.now(timezone.utc)):
+        detail_until = suspend_until.isoformat() if suspend_until else "further notice"
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User account is temporarily suspended until {suspend_until.isoformat()}.",
+            detail=f"User account is temporarily suspended until {detail_until}.",
         )
 
     user_dict = UserSession(row)

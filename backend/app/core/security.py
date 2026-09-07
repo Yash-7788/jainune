@@ -44,10 +44,10 @@ def generate_otp() -> str:
 
 def hash_otp(phone_number: str, otp: str) -> str:
     """HMAC-SHA256 of phone+otp with pepper. Never store raw OTP."""
-    return hmac.new(
+    return hmac.HMAC(
         settings.otp_pepper_secret.encode(),
         f"{phone_number}:{otp}".encode(),
-        hashlib.sha256,
+        digestmod=hashlib.sha256,
     ).hexdigest()
 
 

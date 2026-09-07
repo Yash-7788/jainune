@@ -257,10 +257,10 @@ def verify_payment_signature(
 ) -> bool:
     """HMAC-SHA256 verification per Razorpay docs."""
     message = f"{order_id}|{payment_id}"
-    expected = hmac.new(
+    expected = hmac.HMAC(
         settings.razorpay_key_secret.encode(),
         message.encode(),
-        hashlib.sha256,
+        digestmod=hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
 
@@ -272,10 +272,10 @@ def verify_payment_signature(
 
 def verify_webhook_signature(body: bytes, signature: str) -> bool:
     """Verify X-Razorpay-Signature header."""
-    expected = hmac.new(
+    expected = hmac.HMAC(
         settings.razorpay_webhook_secret.encode(),
         body,
-        hashlib.sha256,
+        digestmod=hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
 
@@ -448,17 +448,43 @@ async def process_refund(
             plan_type = plan.get("type", "subscription")
 
             if plan_type == "subscription":
-                await conn.execute(
+                # Only revoke if this payment_id is still the active subscription source.
+                # Prevents a partial/older refund from nuking a separately-purchased
+                # stacked subscription (e.g. refunding a monthly while an annual is active).
+                active_row = await conn.fetchrow(
                     """
-                    UPDATE users
-                       SET subscription_tier        = 'free',
-                           subscription_valid_until = NULL,
-                           updated_at               = NOW()
-                     WHERE id = $1
+                    SELECT razorpay_payment_id
+                    FROM payment_intents
+                    WHERE user_id = $1
+                      AND status = 'captured'
+                      AND plan_id = $2
+                    ORDER BY captured_at DESC
+                    LIMIT 1
                     """,
                     intent["user_id"],
+                    intent["plan_id"],
                 )
-                log.info("Subscription revoked on refund: user=%s", intent["user_id"])
+                is_active_payment = (
+                    active_row is not None
+                    and active_row["razorpay_payment_id"] == payment_id
+                )
+                if is_active_payment:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                           SET subscription_tier        = 'free',
+                               subscription_valid_until = NULL,
+                               updated_at               = NOW()
+                         WHERE id = $1
+                        """,
+                        intent["user_id"],
+                    )
+                    log.info("Subscription revoked on refund: user=%s payment=%s", intent["user_id"], payment_id)
+                else:
+                    log.info(
+                        "Refund for payment=%s is not the active subscription — skipping tier downgrade for user=%s",
+                        payment_id, intent["user_id"],
+                    )
             elif plan_type == "arcade":
                 # Deduct arcade credits without touching subscription
                 spins = plan.get("spins", 0)

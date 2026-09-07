@@ -215,7 +215,11 @@ async def update_my_profile(
     """
 
     async with pool.acquire() as conn:
-        result = await conn.execute(query, current_user["user_id"], *values)
+        try:
+            result = await conn.execute(query, current_user["user_id"], *values)
+        except Exception as exc:
+            log.error("Profile UPDATE failed (possible schema mismatch): %s", exc)
+            raise HTTPException(status_code=500, detail="Profile update failed. Please try again.")
         if result == "UPDATE 0":
             raise HTTPException(status_code=404, detail="User not found")
         row = await _get_user_row(current_user["user_id"], conn)

@@ -651,7 +651,10 @@ async def step21_consent(
                     """
                     INSERT INTO consent_records (user_id, consent_type, granted, consent_version)
                     VALUES ($1, $2, $3, '1.0.0')
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (user_id, consent_type) DO UPDATE
+                        SET granted = EXCLUDED.granted,
+                            consent_version = EXCLUDED.consent_version,
+                            updated_at = NOW()
                     """,
                     current_user.id,
                     consent_type,

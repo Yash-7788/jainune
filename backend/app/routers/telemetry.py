@@ -112,7 +112,7 @@ async def ingest_events(
     prevent enumeration attacks.
     """
     actor_id = uuid.UUID(str(current_user["id"]))
-    await sliding_window_rate_limit(f"ratelimit:telemetry:{actor_id}", 120, 60, redis)
+    await sliding_window_rate_limit(f"ratelimit:telemetry:batch:{actor_id}", 120, 60, redis)
 
     server_ts = int(time.time() * 1000)
 
@@ -193,7 +193,7 @@ async def ingest_interaction_event(
 ) -> TelemetryResponse:
     """Accepts single user interaction dwell telemetry event from mobile feed."""
     actor_id = str(current_user["id"])
-    await sliding_window_rate_limit(f"ratelimit:telemetry:{actor_id}", 120, 60, redis)
+    await sliding_window_rate_limit(f"ratelimit:telemetry:event:{actor_id}", 60, 60, redis)
     server_ts = int(time.time() * 1000)
     entry = {
         "actor_id": actor_id,
