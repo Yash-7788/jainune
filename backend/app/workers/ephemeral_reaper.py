@@ -217,19 +217,20 @@ def reap_stale_matches() -> None:
 @celery_app.task(name="app.workers.ephemeral_reaper.purge_deleted_users")
 def purge_deleted_users() -> None:
     """
-    Hard-delete users soft-deleted > DELETED_USER_RETENTION_DAYS ago.
-    FK ON DELETE CASCADE handles: media, prompts, interactions, reports, matches,
-    dilemma_votes, dignity_badges, payment_intents, admin_audit_log entries.
+    Hard-delete users soft-deleted > 72 hours ago per DPDP Act & UI terms.
+    Excludes users with active paid subscriptions to retain billing and audit integrity.
+    Archives all payment and transaction records to financial_audit_logs (7-year RBI retention).
     """
 
     async def _run():
         conn = await _get_conn()
         try:
             rows = await conn.fetch(
-                f"""
+                """
                 SELECT id FROM users
                 WHERE account_status = 'deleted'
-                  AND deleted_at < NOW() - INTERVAL '{DELETED_USER_RETENTION_DAYS} days'
+                  AND deleted_at < NOW() - INTERVAL '72 hours'
+                  AND (subscription_tier = 'free' OR subscription_valid_until IS NULL OR subscription_valid_until < NOW())
                 LIMIT 100
                 """
             )
@@ -237,6 +238,47 @@ def purge_deleted_users() -> None:
                 return
 
             ids = [r["id"] for r in rows]
+
+            # Archive financial records for 7-year regulatory retention (RBI / DPDP Act)
+            for uid in ids:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO financial_audit_logs (
+                            original_user_id, transaction_type, reference_id,
+                            razorpay_order_id, razorpay_payment_id, plan_id,
+                            amount_inr, currency, status, captured_at, archived_at, retention_until
+                        )
+                        SELECT
+                            user_id, 'subscription_intent', COALESCE(razorpay_payment_id, razorpay_order_id, id::text),
+                            razorpay_order_id, razorpay_payment_id, plan_id,
+                            (amount / 100.0)::numeric(10,2), currency, status, captured_at, NOW(), NOW() + INTERVAL '7 years'
+                        FROM payment_intents
+                        WHERE user_id = $1
+                        ON CONFLICT (reference_id) DO NOTHING
+                        """,
+                        uid,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO financial_audit_logs (
+                            original_user_id, transaction_type, reference_id,
+                            razorpay_order_id, razorpay_payment_id, plan_id,
+                            amount_inr, currency, status, captured_at, archived_at, retention_until
+                        )
+                        SELECT
+                            user_id, 'arcade_transaction', COALESCE(razorpay_payment_id, razorpay_order_id, id::text),
+                            razorpay_order_id, razorpay_payment_id, action_type,
+                            amount_inr, 'INR', status, created_at, NOW(), NOW() + INTERVAL '7 years'
+                        FROM arcade_transactions
+                        WHERE user_id = $1 AND amount_inr > 0
+                        ON CONFLICT (reference_id) DO NOTHING
+                        """,
+                        uid,
+                    )
+                except Exception as exc:
+                    log.warning(f"Financial record archive error for user {uid}: {exc}")
+
             # Delete S3 objects first (no cascade for external storage)
             media_keys = await conn.fetch(
                 "SELECT s3_key FROM user_media WHERE user_id = ANY($1::uuid[])",
@@ -245,13 +287,13 @@ def purge_deleted_users() -> None:
             from app.services.account_service import _delete_s3_keys_sync
             _delete_s3_keys_sync([mk["s3_key"] for mk in media_keys if mk.get("s3_key")])
 
-            # Hard delete — cascades via FK
+            # Hard delete — cascades non-financial data
             result = await conn.execute(
                 "DELETE FROM users WHERE id = ANY($1::uuid[])",
                 ids,
             )
             count = int(result.split()[-1])
-            log.info("purge_deleted_users: hard-deleted %d users", count)
+            log.info("purge_deleted_users: hard-deleted %d users after 72h retention", count)
         finally:
             await conn.close()
 

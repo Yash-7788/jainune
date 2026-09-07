@@ -78,9 +78,65 @@ async def purge_user_account(
     4. Clears all Redis cache, quota, feed, and rate limit keys.
     Returns summary of deleted resources.
     """
-    user_row = await conn.fetchrow("SELECT phone_number, email FROM users WHERE id = $1", user_id)
+    user_row = await conn.fetchrow(
+        "SELECT phone_number, email, subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+        user_id,
+    )
     phone = user_row["phone_number"] if user_row else None
     email = user_row["email"] if user_row else None
+
+    # AUDIT-2: Block hard-delete while subscription is active — force soft-delete instead
+    if user_row and isinstance(user_row, dict) and user_row.get("subscription_tier") and user_row["subscription_tier"] != "free":
+        from datetime import datetime, timezone
+        valid_until = user_row.get("subscription_valid_until")
+        now = datetime.now(timezone.utc)
+        if isinstance(valid_until, datetime):
+            vu = valid_until if valid_until.tzinfo else valid_until.replace(tzinfo=timezone.utc)
+            if vu > now:
+                log.warning(
+                    f"User {user_id} has active {user_row['subscription_tier']} subscription until {valid_until}. "
+                    "Blocking hard-purge and falling back to soft-delete to preserve billing records."
+                )
+                return await soft_delete_user_account(user_id, conn, redis)
+
+    # AUDIT-1: Retain financial transaction logs for 7 years per RBI regulations
+    try:
+        await conn.execute(
+            """
+            INSERT INTO financial_audit_logs (
+                original_user_id, transaction_type, reference_id,
+                razorpay_order_id, razorpay_payment_id, plan_id,
+                amount_inr, currency, status, captured_at, archived_at, retention_until
+            )
+            SELECT
+                user_id, 'subscription_intent', COALESCE(razorpay_payment_id, razorpay_order_id, id::text),
+                razorpay_order_id, razorpay_payment_id, plan_id,
+                (amount / 100.0)::numeric(10,2), currency, status, captured_at, NOW(), NOW() + INTERVAL '7 years'
+            FROM payment_intents
+            WHERE user_id = $1
+            ON CONFLICT (reference_id) DO NOTHING
+            """,
+            user_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO financial_audit_logs (
+                original_user_id, transaction_type, reference_id,
+                razorpay_order_id, razorpay_payment_id, plan_id,
+                amount_inr, currency, status, captured_at, archived_at, retention_until
+            )
+            SELECT
+                user_id, 'arcade_transaction', COALESCE(razorpay_payment_id, razorpay_order_id, id::text),
+                razorpay_order_id, razorpay_payment_id, action_type,
+                amount_inr, 'INR', status, created_at, NOW(), NOW() + INTERVAL '7 years'
+            FROM arcade_transactions
+            WHERE user_id = $1 AND amount_inr > 0
+            ON CONFLICT (reference_id) DO NOTHING
+            """,
+            user_id,
+        )
+    except Exception as exc:
+        log.warning(f"Financial audit log archiving for {user_id}: {exc}")
 
     # 1. Fetch all media s3 keys
     media_rows = await conn.fetch(
@@ -98,6 +154,16 @@ async def purge_user_account(
 
     # 2. Database cleanup within transaction
     async with conn.transaction():
+        # Try nullifying user_id on financial records to prevent orphan cascades if schema allows
+        try:
+            await conn.execute("UPDATE payment_intents SET user_id = NULL WHERE user_id = $1", user_id)
+        except Exception:
+            pass
+        try:
+            await conn.execute("UPDATE arcade_transactions SET user_id = NULL WHERE user_id = $1 AND amount_inr > 0", user_id)
+        except Exception:
+            pass
+
         # Clear non-cascading FK references first
         await conn.execute("UPDATE user_media SET reviewed_by = NULL WHERE reviewed_by = $1", user_id)
         await conn.execute("UPDATE reports SET resolved_by = NULL WHERE resolved_by = $1", user_id)

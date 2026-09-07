@@ -250,6 +250,83 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.accepted, 1)
             self.assertEqual(res.dropped, 0)
 
+    async def test_09_purge_blocked_on_active_subscription_forces_soft_delete(self):
+        """Users with active paid subscriptions cannot be hard-purged; falls back to soft-delete."""
+        from app.services.account_service import purge_user_account
+        from datetime import datetime, timezone, timedelta
+
+        user_id = uuid.uuid4()
+        mock_conn = _create_mock_conn()
+        mock_conn.fetchrow.return_value = {
+            "phone_number": "+919876543210",
+            "email": "gold_user@jainune.com",
+            "subscription_tier": "gold_monthly",
+            "subscription_valid_until": datetime.now(timezone.utc) + timedelta(days=20),
+        }
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_redis = AsyncMock()
+
+        with patch("app.services.account_service.soft_delete_user_account", new_callable=AsyncMock) as mock_soft:
+            mock_soft.return_value = {"status": "soft_deleted", "user_id": str(user_id)}
+            res = await purge_user_account(user_id, mock_conn, mock_redis)
+            mock_soft.assert_called_once_with(user_id, mock_conn, mock_redis)
+            self.assertEqual(res["status"], "soft_deleted")
+
+    async def test_10_financial_audit_logs_archived_during_purge(self):
+        """Purging an account copies payment intents and arcade transactions into financial_audit_logs."""
+        from app.services.account_service import purge_user_account
+
+        user_id = uuid.uuid4()
+        executed_queries = []
+
+        mock_conn = _create_mock_conn()
+        mock_conn.fetchrow.return_value = {
+            "phone_number": "+919876543210",
+            "email": "free_user@jainune.com",
+            "subscription_tier": "free",
+            "subscription_valid_until": None,
+        }
+        mock_conn.fetch.return_value = []
+
+        async def fake_execute(query, *args):
+            executed_queries.append(query)
+            return "DELETE 1"
+
+        mock_conn.execute.side_effect = fake_execute
+        mock_redis = AsyncMock()
+        mock_redis.scan = AsyncMock(return_value=(0, []))
+
+        res = await purge_user_account(user_id, mock_conn, mock_redis)
+        self.assertEqual(res["status"], "purged")
+
+        # Confirm financial_audit_logs insertion
+        audit_queries = [q for q in executed_queries if "INSERT INTO financial_audit_logs" in q]
+        self.assertEqual(len(audit_queries), 2, "Expected 2 financial archive queries (intents + arcade)")
+
+    async def test_11_delete_my_account_defaults_to_soft_delete(self):
+        """DELETE /v1/users/me defaults to soft_delete, preserving grace period & financial logs."""
+        from app.routers.users import delete_my_account
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id}
+
+        mock_pool = MagicMock()
+        mock_conn = _create_mock_conn()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        with patch("app.services.account_service.soft_delete_user_account", new_callable=AsyncMock) as mock_soft:
+            mock_soft.return_value = {"status": "soft_deleted"}
+            res = await delete_my_account(
+                current_user=current_user,
+                pool=mock_pool,
+                redis=mock_redis,
+            )
+            mock_soft.assert_called_once_with(user_id, mock_conn, mock_redis)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["data"]["status"], "deactivated")
+            self.assertIn("72 hours", res["data"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

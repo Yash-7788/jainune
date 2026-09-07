@@ -241,8 +241,8 @@ export async function updateSettings(payload: {
   }
 }
 
-export async function requestAccountDeletion(_reason?: string): Promise<void> {
-  const res = await apiDelete<void>("/users/me");
+export async function requestAccountDeletion(reason?: string): Promise<void> {
+  const res = await apiDelete<void>("/users/me", { hard_delete: false, reason });
   if (!res.success) throw { _apiError: res.error };
 }
 

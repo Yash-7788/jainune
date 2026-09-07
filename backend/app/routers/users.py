@@ -305,16 +305,18 @@ async def set_fcm_token(
 @router.delete("/me", status_code=status.HTTP_200_OK)
 @router.post("/me/delete", status_code=status.HTTP_200_OK)
 async def delete_my_account(
-    hard_delete: bool = Query(True, description="When True, immediately and permanently purges all user rows, media from S3, and Redis caches to free memory and disk."),
+    hard_delete: bool = False,
+    reason: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
     redis = Depends(get_redis),
 ):
     """
     Account deletion endpoint:
-    - hard_delete=True (default): Physically deletes all user records across all tables,
-      deletes uploaded photos/voice notes from Amazon S3, and purges Redis feed & quota caches.
-    - hard_delete=False: Anonymizes PII and marks account_status='deleted'.
+    - hard_delete=False (default): Anonymizes PII, sets account_status='deleted', revokes sessions,
+      and preserves financial records for 7-year regulatory retention with a 72-hour hard purge schedule.
+    - hard_delete=True: Physically deletes non-financial records immediately. If active subscription exists,
+      safely falls back to soft-delete.
     """
     from app.services.account_service import purge_user_account, soft_delete_user_account
 
@@ -322,6 +324,15 @@ async def delete_my_account(
     async with pool.acquire() as conn:
         if hard_delete:
             result = await purge_user_account(user_id, conn, redis)
+            if result.get("status") == "soft_deleted":
+                return {
+                    "success": True,
+                    "data": {
+                        "message": "Account has an active paid subscription. It has been deactivated and scheduled for removal after subscription period ends.",
+                        "status": "deactivated",
+                    },
+                    "error": None,
+                }
             return {
                 "success": True,
                 "data": {
@@ -335,7 +346,7 @@ async def delete_my_account(
             return {
                 "success": True,
                 "data": {
-                    "message": "Your account has been deactivated and scheduled for removal.",
+                    "message": "Your account has been deactivated. Photos and matches will be permanently purged in 72 hours.",
                     "status": "deactivated",
                 },
                 "error": None,

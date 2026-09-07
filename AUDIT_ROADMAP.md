@@ -9,7 +9,7 @@ Production readiness divided into two sequential tiers:
 
 ## 2. Current Progress Checkpoint
 - **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
-- **Test Suite**: 156 unit tests passing with 0 errors and 0 regressions.
+- **Test Suite**: 159 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -32,6 +32,10 @@ Production readiness divided into two sequential tiers:
   - Account deletion dual-method alias (`DELETE /v1/users/me` & `POST /v1/users/me/delete`).
   - Mobile client telemetry buffer, AppState auto-flush (`useTelemetry.ts`), and Redis stream ingestion.
   - Feed screen 402/quota paywall triggers and subscription sheet activation.
+  - Account deletion defaults to soft-delete (`hard_delete=False`), honoring 72h grace period and scrubbing PII (AUDIT-1).
+  - Active paid subscription check blocks hard-purge and enforces soft-delete during subscription validity (AUDIT-2).
+  - Financial transaction log retention for 7 years per RBI regulations (`financial_audit_logs`, migration `0013`) (AUDIT-1).
+  - Celery ephemeral reaper 72h retention window with active subscription exclusion and financial archiving.
 
 ---
 
