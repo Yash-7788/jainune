@@ -103,15 +103,36 @@ async def _get_access_token() -> str:
     return token
 
 
+async def prune_invalid_device_token(device_token: str, conn: Any = None) -> None:
+    """Nullifies unregistered / rotated device token from users table."""
+    if not device_token:
+        return
+    try:
+        if conn is not None:
+            await conn.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", device_token)
+        else:
+            import asyncpg
+            conn_temp = await asyncpg.connect(settings.database_url)
+            try:
+                await conn_temp.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", device_token)
+            finally:
+                await conn_temp.close()
+        log.info("Pruned invalid device token: %s...", device_token[:10])
+    except Exception as exc:
+        log.warning("Failed to prune invalid device token %s: %s", device_token[:10], exc)
+
+
 async def send_push(
     device_token: str,
     title: str,
     body: str,
     data: dict[str, str] | None = None,
+    db_conn: Any = None,
 ) -> bool:
     """
     Send a single FCM push notification.
     Returns True on success, False on failure (never raises).
+    Automatically prunes dead / unregistered tokens from PostgreSQL.
     """
     if not device_token:
         return False
@@ -131,6 +152,8 @@ async def send_push(
                         "priority": "high",
                     },
                 )
+                if "DeviceNotRegistered" in resp.text:
+                    await prune_invalid_device_token(device_token, conn=db_conn)
                 return resp.status_code == 200
         except Exception as exc:
             log.error("Expo push exception: %s", exc)
@@ -171,6 +194,9 @@ async def send_push(
             )
             if resp.status_code == 200:
                 return True
+            # FCM v1 returns 404 / UNREGISTERED when app uninstalled or token rotated
+            if resp.status_code in (404, 410) or "UNREGISTERED" in resp.text:
+                await prune_invalid_device_token(device_token, conn=db_conn)
             log.warning(
                 "FCM send failed: status=%d body=%s token_prefix=%s",
                 resp.status_code,
@@ -188,6 +214,7 @@ async def send_push_multicast(
     title: str,
     body: str,
     data: dict[str, str] | None = None,
+    db_conn: Any = None,
 ) -> dict[str, int]:
     """
     Fan-out push to multiple tokens. Returns {"success": N, "failure": M}.
@@ -200,7 +227,7 @@ async def send_push_multicast(
         return {"success": 0, "failure": 0}
 
     results = await asyncio.gather(
-        *[send_push(tok, title, body, data) for tok in tokens],
+        *[send_push(tok, title, body, data, db_conn=db_conn) for tok in tokens],
         return_exceptions=True,
     )
     success = sum(1 for r in results if r is True)

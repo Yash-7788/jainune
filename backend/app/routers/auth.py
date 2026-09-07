@@ -17,6 +17,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     generate_otp,
+    get_trusted_client_ip,
     hash_otp,
     revoke_token,
     sliding_window_rate_limit,
@@ -140,7 +141,12 @@ async def _issue_token_response(
 # ── POST /v1/auth/otp/request ─────────────────────────────────────────────────
 
 @router.post("/otp/request")
-async def request_otp(body: OTPRequestBody, redis: RedisDep) -> dict:
+async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = None) -> dict:
+    # IP rate limit: 15 OTP requests per minute per IP
+    if request:
+        client_ip = get_trusted_client_ip(request)
+        await sliding_window_rate_limit(f"ratelimit:auth:otp:ip:{client_ip}", 15, 60, redis)
+
     # Rate limit: 3 OTP requests per phone per hour
     rate_key = f"auth:otp_rate:{body.phone_number}"
     await sliding_window_rate_limit(rate_key, OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS, redis)
@@ -369,7 +375,7 @@ def _verify_apple_token(id_token: str) -> dict:
 
 @router.post("/google")
 async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: RedisDep) -> dict:
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:google:{client_ip}", 20, 60, redis)
 
     is_bot, bot_msg = await asyncio.to_thread(
@@ -453,7 +459,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
 
 @router.post("/apple")
 async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: RedisDep) -> dict:
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:apple:{client_ip}", 20, 60, redis)
 
     is_bot, bot_msg = await asyncio.to_thread(
@@ -537,7 +543,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
 
 @router.post("/token/refresh")
 async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: DBDep, redis: RedisDep) -> dict:
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:refresh:{client_ip}", 30, 60, redis)
 
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()

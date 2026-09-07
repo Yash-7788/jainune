@@ -325,6 +325,11 @@ async def spin_serendipity_wheel(
     await sliding_window_rate_limit(f"ratelimit:arcade:spin:{current_user['user_id']}", 30, 60, redis)
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Concurrency lock on user arcade wallet to serialize burst requests
+            await conn.execute(
+                "SELECT available_spins FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE",
+                current_user["user_id"],
+            )
             # Atomic deduction
             remaining = await conn.fetchval(
                 """
@@ -470,6 +475,11 @@ async def roll_lucky_dice(
     import random
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Concurrency lock on user arcade wallet to serialize burst requests
+            await conn.execute(
+                "SELECT available_dice_rolls FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE",
+                current_user["user_id"],
+            )
             remaining = await conn.fetchval(
                 """
                 UPDATE user_arcade_wallet

@@ -8,8 +8,8 @@ Production readiness divided into two sequential tiers:
 ---
 
 ## 2. Current Progress Checkpoint
-- **Status**: Tier 1 Code Logic & Functional Hardening 100% COMPLETE.
-- **Test Suite**: 168 unit tests passing with 0 errors and 0 regressions.
+- **Status**: Tier 1 Code Logic Hardening 100% COMPLETE. Tier 2 Production Hardening Phase IN PROGRESS.
+- **Test Suite**: 172 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -46,11 +46,15 @@ Production readiness divided into two sequential tiers:
   - `interactions.interaction_type` NOT NULL constraint dropped with default fallback (migration `0015`) and populated in `interactions.py` (P1).
   - GPS reverse-proxy trust boundary origin-lock (`cloudflare_origin_secret`) and `client_ip` format validation (P2).
   - DPDP Act / TRAI marketing consent enforcement in `broadcast_promotional_campaign`, schema, and onboarding step 21 UI (P4).
+  - Celery worker deployment configuration updated to consume `batch` queue across `docker-compose.prod.yml` and `docker-compose.yml` (Tier 2).
+  - Reverse-proxy rate limit evasion defense via `get_trusted_client_ip()` origin-locked resolution across auth, location, and onboarding (Tier 2).
+  - Arcade wallet double-spend serialized via `SELECT ... FOR UPDATE` row locks in `spin_serendipity_wheel` and `roll_lucky_dice` (Tier 2).
+  - Automated FCM v1 / Expo unregistered and dead device token nullification from PostgreSQL (Tier 2).
 
 ---
 
 ## 3. Tier 1: Code Logic Audits [100% COMPLETE]
-All code logic audits across auth, onboarding, feed, chat, payments, arcade, and media are complete. Ready for Tier 2 Real-World Production Chaos & Resilience Hardening.
+All code logic audits across auth, onboarding, feed, chat, payments, arcade, and media are complete. Tier 2 Real-World Production Chaos & Resilience Hardening underway.
 
 ---
 

@@ -21,7 +21,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.core.security import sliding_window_rate_limit
+from app.core.security import get_trusted_client_ip, sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.user import (
     OnboardingStatusResponse,
@@ -336,7 +336,7 @@ async def step11_location(
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
 
-    client_ip = request.client.host if request.client else None
+    client_ip = get_trusted_client_ip(request)
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,
         lon=body.longitude,

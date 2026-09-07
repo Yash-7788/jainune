@@ -697,6 +697,119 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(marketing_consent_saved)
 
+    def test_21_trusted_client_ip_origin_verification(self):
+        """get_trusted_client_ip rejects spoofed headers unless cloudflare_origin_secret matches."""
+        from app.core.security import get_trusted_client_ip
+
+        class DummyClient:
+            host = "203.0.113.195"
+
+        class DummyRequest:
+            def __init__(self, headers: dict):
+                self.headers = headers
+                self.client = DummyClient()
+
+        # Attack scenario: malicious client sends spoofed CF-Connecting-IP & X-Forwarded-For directly
+        req_spoofed = DummyRequest({
+            "cf-connecting-ip": "1.1.1.1",
+            "x-forwarded-for": "8.8.8.8",
+        })
+
+        with patch("app.core.security.settings.cloudflare_origin_secret", "secret_origin_key_123"), \
+             patch("app.core.security.settings.environment", "production"):
+            ip = get_trusted_client_ip(req_spoofed)
+            # Must NOT trust spoofed IP, must return direct peer IP
+            self.assertEqual(ip, "203.0.113.195")
+
+        # Legitimate scenario: Cloudflare edge passes matching origin secret
+        req_legit = DummyRequest({
+            "cf-connecting-ip": "49.37.10.25",
+            "x-edge-secret": "secret_origin_key_123",
+        })
+        with patch("app.core.security.settings.cloudflare_origin_secret", "secret_origin_key_123"), \
+             patch("app.core.security.settings.environment", "production"):
+            ip = get_trusted_client_ip(req_legit)
+            self.assertEqual(ip, "49.37.10.25")
+
+    def test_22_docker_compose_worker_listens_to_batch_queue(self):
+        """Celery worker in docker-compose.prod.yml and docker-compose.yml must listen to -Q default,notifications,batch."""
+        import os
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        prod_compose = os.path.join(repo_root, "docker-compose.prod.yml")
+        dev_compose = os.path.join(repo_root, "docker-compose.yml")
+
+        self.assertTrue(os.path.exists(prod_compose), f"{prod_compose} not found")
+        with open(prod_compose, "r", encoding="utf-8") as f:
+            prod_content = f.read()
+        self.assertIn("-Q default,notifications,batch", prod_content)
+
+        self.assertTrue(os.path.exists(dev_compose), f"{dev_compose} not found")
+        with open(dev_compose, "r", encoding="utf-8") as f:
+            dev_content = f.read()
+        self.assertIn("-Q default,notifications,batch", dev_content)
+
+    async def test_23_arcade_wallet_for_update_concurrency_lock(self):
+        """Arcade spins and rolls execute SELECT ... FOR UPDATE before deducting balances."""
+        from app.routers.arcade import spin_serendipity_wheel, roll_lucky_dice
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id, "id": user_id, "show_me": "women"}
+
+        executed_sqls = []
+
+        mock_conn = _create_mock_conn()
+        async def mock_execute(sql, *args):
+            executed_sqls.append(sql)
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+        mock_conn.fetchval = AsyncMock(return_value=2)
+        mock_conn.fetchrow = AsyncMock(return_value={"id": uuid.uuid4(), "first_name": "Aditi", "city": "Bengaluru"})
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        with patch("app.routers.arcade.sliding_window_rate_limit", new_callable=AsyncMock):
+            await spin_serendipity_wheel(current_user=current_user, pool=mock_pool, redis=mock_redis)
+
+        self.assertTrue(any("SELECT available_spins FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE" in s for s in executed_sqls))
+
+        executed_sqls.clear()
+        with patch("app.routers.arcade.sliding_window_rate_limit", new_callable=AsyncMock):
+            await roll_lucky_dice(current_user=current_user, pool=mock_pool, redis=mock_redis)
+
+        self.assertTrue(any("SELECT available_dice_rolls FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE" in s for s in executed_sqls))
+
+    async def test_24_fcm_unregistered_token_cleanup(self):
+        """send_push automatically executes cleanup query when FCM returns 404/UNREGISTERED."""
+        from app.services.push_notifications import send_push
+
+        cleanup_sqls = []
+
+        mock_conn = MagicMock()
+        async def mock_execute(sql, *args):
+            cleanup_sqls.append((sql, args))
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+
+        with patch("app.services.push_notifications._get_access_token", new_callable=AsyncMock) as mock_token, \
+             patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_token.return_value = "mock_token"
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            mock_resp.text = '{"error": {"code": 404, "details": [{"errorCode": "UNREGISTERED"}]}}'
+            mock_post.return_value = mock_resp
+
+            dead_token = "dead_device_token_abc123"
+            success = await send_push(dead_token, "Title", "Body", db_conn=mock_conn)
+            self.assertFalse(success)
+
+        self.assertEqual(len(cleanup_sqls), 1)
+        sql, args = cleanup_sqls[0]
+        self.assertIn("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", sql)
+        self.assertEqual(args[0], dead_token)
+
 
 if __name__ == "__main__":
     unittest.main()

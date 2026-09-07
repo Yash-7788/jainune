@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
-from app.core.security import sliding_window_rate_limit
+from app.core.security import get_trusted_client_ip, sliding_window_rate_limit
 from app.dependencies import get_current_user, RedisDep
 import asyncpg
 
@@ -65,7 +65,7 @@ async def verify_location(
     await sliding_window_rate_limit(f"ratelimit:loc_verify:{user_id}", 15, 60, redis)
 
     # 1. Anti-spoofing & integrity gate
-    client_ip = request.client.host if request.client else None
+    client_ip = get_trusted_client_ip(request)
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,
         lon=body.longitude,

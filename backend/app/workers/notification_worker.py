@@ -71,12 +71,14 @@ def notify_new_match(self, match_id: str) -> None:
                     "New Match! 🎉",
                     f"You matched with {row['name_b']}! Say hello 👋",
                     {"type": "new_match", "match_id": match_id},
+                    db_conn=conn,
                 ),
                 send_push(
                     row["token_b"],
                     "New Match! 🎉",
                     f"You matched with {row['name_a']}! Say hello 👋",
                     {"type": "new_match", "match_id": match_id},
+                    db_conn=conn,
                 ),
             )
         finally:
@@ -129,6 +131,7 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
                 row["sender_name"],
                 body,
                 {"type": "new_message", "chat_id": chat_id, "sender_id": sender_id},
+                db_conn=conn,
             )
         finally:
             await conn.close()
@@ -171,6 +174,7 @@ def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
                 "Someone likes you! ❤️",
                 f"{liker_name} liked your profile",
                 {"type": "new_like"},
+                db_conn=conn,
             )
         finally:
             await conn.close()
@@ -219,12 +223,14 @@ def notify_match_expiring(self, match_id: str) -> None:
                     "Match expiring soon ⏰",
                     f"Your match with {row['name_b']} expires in 24 hours! Send a message.",
                     {"type": "match_expiring", "match_id": match_id},
+                    db_conn=conn,
                 ),
                 send_push(
                     row["token_b"],
                     "Match expiring soon ⏰",
                     f"Your match with {row['name_a']} expires in 24 hours! Send a message.",
                     {"type": "match_expiring", "match_id": match_id},
+                    db_conn=conn,
                 ),
             )
         finally:
@@ -283,6 +289,7 @@ def send_daily_digest() -> None:
                         "People are interested in you! 💛",
                         f"{r['like_count']} {'person' if r['like_count'] == 1 else 'people'} liked your profile today.",
                         {"type": "daily_digest"},
+                        db_conn=conn,
                     )
                     for r in rows
                 ],

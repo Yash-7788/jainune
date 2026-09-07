@@ -217,7 +217,38 @@ async def validate_access_token_raw(
         if await redis.exists(f"token:blacklist:{jti}"):
             raise ValueError("Token has been revoked.")
 
-    return payload
+def get_trusted_client_ip(request) -> str:
+    """
+    Extracts authentic client IP.
+    Trusts reverse-proxy headers (CF-Connecting-IP / X-Forwarded-For) ONLY if
+    edge origin lock is verified with cloudflare_origin_secret.
+    Otherwise falls back strictly to direct peer IP request.client.host to prevent rate-limit evasion.
+    """
+    if not request:
+        return "127.0.0.1"
+
+    headers = {k.lower(): v for k, v in request.headers.items()} if hasattr(request, "headers") else {}
+    origin_secret = getattr(settings, "cloudflare_origin_secret", "")
+    edge_token = headers.get("x-edge-secret") or headers.get("x-origin-secret")
+
+    # Only trust reverse-proxy headers if origin lock matches
+    if origin_secret and edge_token == origin_secret:
+        cf_ip = headers.get("cf-connecting-ip")
+        if cf_ip:
+            return cf_ip.strip()
+        forwarded = headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+    if getattr(settings, "environment", "development") != "production":
+        cf_ip = headers.get("cf-connecting-ip")
+        if cf_ip:
+            return cf_ip.strip()
+
+    if hasattr(request, "client") and request.client and getattr(request.client, "host", None):
+        return request.client.host
+
+    return "127.0.0.1"
 
 
 def __getattr__(name: str):
