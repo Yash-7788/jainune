@@ -36,6 +36,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 dsn=primary_dsn,
                 min_size=settings.database_pool_min_size,
                 max_size=settings.database_pool_max_size,
+                timeout=5.0,
                 command_timeout=settings.database_statement_timeout_ms / 1000,
                 server_settings={"application_name": "jainune-api-primary"},
             )
@@ -57,6 +58,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 dsn=fallback_dsn,
                 min_size=settings.database_pool_min_size,
                 max_size=settings.database_pool_max_size,
+                timeout=5.0,
                 command_timeout=settings.database_statement_timeout_ms / 1000,
                 server_settings={"application_name": "jainune-api-fallback"},
             )

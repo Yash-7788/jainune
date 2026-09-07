@@ -209,6 +209,11 @@ async def record_interaction_action(
                             detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
                         )
             elif body.action == "super_connect":
+                # Concurrency lock to prevent double-spending super connect credits
+                await conn.execute(
+                    "SELECT super_connect_credits FROM users WHERE id = $1 FOR UPDATE",
+                    actor_id,
+                )
                 deducted = await conn.fetchval(
                     """
                     UPDATE users

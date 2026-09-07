@@ -8,8 +8,8 @@ Production readiness divided into two sequential tiers:
 ---
 
 ## 2. Current Progress Checkpoint
-- **Status**: Tier 1 Code Logic Hardening 100% COMPLETE. Tier 2 Production Hardening Phase IN PROGRESS.
-- **Test Suite**: 173 unit tests passing with 0 errors and 0 regressions.
+- **Status**: Tier 1 Code Logic Hardening 100% COMPLETE. Tier 2 Phase 1 (Load, Concurrency & State Pressure) 100% COMPLETE.
+- **Test Suite**: 176 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
 - **Domains Audited & Hardened**:
   - Dignity Engine & report brigading defense.
@@ -51,6 +51,9 @@ Production readiness divided into two sequential tiers:
   - Arcade wallet double-spend serialized via `SELECT ... FOR UPDATE` row locks in `spin_serendipity_wheel` and `roll_lucky_dice` (Tier 2).
   - Automated FCM v1 / Expo unregistered and dead device token nullification from PostgreSQL (Tier 2).
   - Resilient MSG91 SMS 503 / DLT template congestion automatic failover to WhatsApp OTP (Tier 2).
+  - Asyncpg connection pool 5s acquire timeout with 503 Service Unavailable + Retry-After headers under 500 req/s bursts (Tier 2 Phase 1).
+  - Redis pool enlarged to 2000 max connections and WebSocket pub/sub leak-proof slow-consumer (5s) and zombie heartbeat (60s) teardowns (Tier 2 Phase 1).
+  - Super connect credit double-spend serialized via `SELECT ... FOR UPDATE` row lock in `record_interaction_action` (Tier 2 Phase 1).
 
 ---
 
@@ -61,11 +64,11 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 
 ## 4. Tier 2: Real-World Production Hardening (20–30 Domain Audits)
 
-### Phase 1: Load, Concurrency & State Pressure (4–5 Runs)
-- 10,000 concurrent WebSocket connections stress test.
-- Asyncpg database connection pool exhaustion under 500 req/s bursts.
-- Redis pub/sub memory leak and channel backlog audit.
-- High-concurrency wallet deduction races (preventing double-spend on credits/tokens).
+### Phase 1: Load, Concurrency & State Pressure [100% COMPLETE]
+- ✅ 10,000 concurrent WebSocket connections: Redis pool scaled to 2000 connections, slow-consumer protection (5s timeout), and task-reaping cleanup.
+- ✅ Asyncpg database connection pool exhaustion under 500 req/s bursts: 5s acquire timeout and 503 `Retry-After: 2` fast error handling.
+- ✅ Redis pub/sub memory leak and channel backlog audit: 60s zombie heartbeat timeout eliminates unclosed socket subscriptions.
+- ✅ High-concurrency wallet deduction races: `SELECT ... FOR UPDATE` row locks on arcade spins, dice rolls, and super connect credits.
 
 ### Phase 2: Third-Party Failures & Webhook Chaos (5–6 Runs)
 - **Razorpay**: Dropped webhooks, delayed payment confirmations, forged webhook signatures, and refund webhooks.

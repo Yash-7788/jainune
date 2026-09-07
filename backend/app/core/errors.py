@@ -7,6 +7,7 @@ Zero status codes or raw stack traces are ever exposed to the user.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -217,6 +218,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     log.exception(f"Unhandled server error on {request.url.path}: {exc}")
+    # Handle database connection pool exhaustion or timeouts under burst load gracefully
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "TooManyConnectionsError" in type(exc).__name__:
+        code, title, friendly_msg = resolve_friendly_error(503, "database connection pool timeout")
+        envelope = create_error_envelope(503, code, title, friendly_msg, raw_details=[str(exc)])
+        return JSONResponse(status_code=503, content=envelope, headers={"Retry-After": "2"})
+
     code, title, friendly_msg = resolve_friendly_error(500, str(exc))
     envelope = create_error_envelope(500, code, title, friendly_msg, raw_details=[str(exc)])
     return JSONResponse(status_code=500, content=envelope)

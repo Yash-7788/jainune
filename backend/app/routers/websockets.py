@@ -187,52 +187,58 @@ async def websocket_chat(
     # ── 5. Concurrent tasks ──────────────────────────────────────────────────
 
     async def _producer() -> None:
-        """Relay Redis channel messages → WebSocket client."""
-        async for raw_msg in pubsub.listen():
-            if raw_msg["type"] != "message":
-                continue
-            try:
-                data = json.loads(raw_msg["data"])
-                await websocket.send_json(data)
-            except Exception:
-                break
+        """Relay Redis channel messages → WebSocket client with slow-consumer protection."""
+        try:
+            async for raw_msg in pubsub.listen():
+                if raw_msg["type"] != "message":
+                    continue
+                try:
+                    data = json.loads(raw_msg["data"])
+                    await asyncio.wait_for(websocket.send_json(data), timeout=5.0)
+                except (asyncio.TimeoutError, Exception):
+                    break
+        except asyncio.CancelledError:
+            pass
 
     async def _consumer() -> None:
-        """Relay WebSocket frames → Redis channel (typing/read_receipt events)."""
-        while True:
-            try:
-                data = await websocket.receive_json()
-            except WebSocketDisconnect:
-                break
-            except Exception:
-                continue
-
-            if not isinstance(data, dict):
-                continue
-
-            msg_type = data.get("type", "")
-            if msg_type == "ping":
+        """Relay WebSocket frames → Redis channel with 60s zombie heartbeat timeout."""
+        try:
+            while True:
                 try:
-                    await websocket.send_json({"type": "pong"})
-                except Exception:
+                    data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
+                except (asyncio.TimeoutError, WebSocketDisconnect):
                     break
-                continue
-
-            if msg_type in ("typing", "read_receipt"):
-                # Fan out to other participant via the same Redis channel
-                try:
-                    await redis.publish(
-                        f"chat:{real_chat_id}",
-                        json.dumps({
-                            "type": msg_type,
-                            "payload": {
-                                "sender_id": str(user_id),
-                                **data.get("payload", {}),
-                            },
-                        }),
-                    )
                 except Exception:
-                    pass
+                    continue
+
+                if not isinstance(data, dict):
+                    continue
+
+                msg_type = data.get("type", "")
+                if msg_type == "ping":
+                    try:
+                        await asyncio.wait_for(websocket.send_json({"type": "pong"}), timeout=5.0)
+                    except Exception:
+                        break
+                    continue
+
+                if msg_type in ("typing", "read_receipt"):
+                    # Fan out to other participant via the same Redis channel
+                    try:
+                        await redis.publish(
+                            f"chat:{real_chat_id}",
+                            json.dumps({
+                                "type": msg_type,
+                                "payload": {
+                                    "sender_id": str(user_id),
+                                    **data.get("payload", {}),
+                                },
+                            }),
+                        )
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            pass
 
     try:
         producer_task = asyncio.create_task(_producer())
@@ -243,6 +249,8 @@ async def websocket_chat(
         )
         for t in pending:
             t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     finally:
         # ── 6. Cleanup ───────────────────────────────────────────────────────
         try:

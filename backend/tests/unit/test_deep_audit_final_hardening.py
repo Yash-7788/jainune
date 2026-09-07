@@ -829,6 +829,110 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             mock_sms.assert_called_once_with(phone, otp)
             mock_wa.assert_called_once_with(phone, otp)
 
+    async def test_26_db_pool_timeout_maps_to_503_retry_after(self):
+        """Pool exhaustion TimeoutError in unhandled_exception_handler returns 503 with Retry-After header."""
+        from app.core.errors import unhandled_exception_handler
+        from fastapi import Request
+
+        scope = {"type": "http", "method": "GET", "path": "/v1/feed", "headers": []}
+        req = Request(scope)
+
+        timeout_exc = TimeoutError("Connection acquisition timed out (5.0s)")
+        resp = await unhandled_exception_handler(req, timeout_exc)
+
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.headers.get("retry-after"), "2")
+
+    async def test_27_websocket_slow_consumer_and_zombie_timeout(self):
+        """WebSocket chat handler encapsulates producer and consumer with timeout protections."""
+        from app.routers.websockets import websocket_chat
+        from starlette.websockets import WebSocketDisconnect
+
+        mock_ws = AsyncMock()
+        mock_ws.headers = {}
+        mock_ws.receive_json.side_effect = TimeoutError("Zombie connection timeout (60s)")
+
+        mock_redis = AsyncMock()
+        mock_pubsub = MagicMock()
+        async def mock_listen():
+            while True:
+                await asyncio.sleep(100)
+                yield {"type": "message", "data": "{}"}
+        mock_pubsub.listen = mock_listen
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.close = AsyncMock()
+        mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+        mock_redis.get.return_value = str(uuid.uuid4())
+        mock_redis.delete.return_value = 1
+
+        mock_db = MagicMock()
+        mock_conn = _create_mock_conn()
+        mock_conn.fetchrow.return_value = {
+            "id": uuid.uuid4(),
+            "match_id": uuid.uuid4(),
+            "other_id": uuid.uuid4(),
+            "account_status": "active",
+            "is_unmatched": False,
+        }
+        mock_conn.fetchval.return_value = False  # not blocked
+        mock_db.acquire.return_value.__aenter__.return_value = mock_conn
+
+        with patch("app.routers.websockets.get_pool", return_value=mock_db), \
+             patch("app.routers.websockets.get_redis", return_value=mock_redis), \
+             patch("app.routers.websockets.sliding_window_rate_limit", new_callable=AsyncMock):
+            await websocket_chat(websocket=mock_ws, chat_id=uuid.uuid4(), ticket="valid_ticket")
+
+        # Must cleanly clean up pubsub and close websocket
+        mock_pubsub.close.assert_called_once()
+        mock_ws.close.assert_called_once()
+
+    async def test_28_super_connect_for_update_concurrency_lock(self):
+        """Super connect action executes SELECT ... FOR UPDATE before deducting credits."""
+        from app.routers.interactions import record_interaction_action
+        from app.models.schemas.interaction import InteractionActionRequest
+
+        actor_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        current_user = {"id": actor_id, "user_id": actor_id}
+
+        executed_sqls = []
+        mock_conn = _create_mock_conn()
+        async def mock_execute(sql, *args):
+            executed_sqls.append(sql)
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+        # First fetchval is block check (None), second is credit deduction returning remaining = 1
+        mock_conn.fetchval = AsyncMock(side_effect=[None, 1])
+        
+        async def mock_fetchrow(query, *args):
+            if "subscription_tier" in query:
+                return {"subscription_tier": "plus", "subscription_valid_until": None}
+            if "FROM users WHERE id" in query:
+                return {"id": target_id, "account_status": "active", "deleted_at": None}
+            return None
+        mock_conn.fetchrow = AsyncMock(side_effect=mock_fetchrow)
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_redis = AsyncMock()
+
+        body = InteractionActionRequest(
+            target_user_id=target_id,
+            action="super_connect",
+        )
+
+        with patch("app.routers.interactions.sliding_window_rate_limit", new_callable=AsyncMock):
+            res = await record_interaction_action(
+                body=body,
+                current_user=current_user,
+                db=mock_pool,
+                redis=mock_redis,
+            )
+
+        self.assertTrue(res.success)
+        self.assertTrue(any("SELECT super_connect_credits FROM users WHERE id = $1 FOR UPDATE" in s for s in executed_sqls))
+
 
 if __name__ == "__main__":
     unittest.main()
