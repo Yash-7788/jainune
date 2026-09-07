@@ -91,9 +91,13 @@ export interface RefreshData {
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 /** POST /v1/auth/otp/request */
-export async function requestPhoneOTP(phoneNumber: string): Promise<OTPRequestData> {
+export async function requestPhoneOTP(
+  phoneNumber: string,
+  channel: "sms" | "whatsapp" = "sms"
+): Promise<OTPRequestData> {
   const res = await apiPost<OTPRequestData>("/auth/otp/request", {
     phone_number: phoneNumber.trim(),
+    channel,
   });
   if (!res.success) throw { _apiError: res.error };
   return res.data;

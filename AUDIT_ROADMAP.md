@@ -8,10 +8,10 @@ Production readiness divided into two sequential tiers:
 ---
 
 ## 2. Current Progress Checkpoint
-- **Status**: Rounds 1–6 complete.
-- **Test Suite**: 129 unit tests passing with 0 errors and 0 regressions.
+- **Status**: Rounds 1–7 complete.
+- **Test Suite**: 138 unit tests passing with 0 errors and 0 regressions.
 - **Mobile TypeScript**: `tsc --noEmit` 100% clean (0 errors).
-- **Git Commit**: Round 6 ready for push.
+- **Git Commit**: Round 7 ready for push.
 - **Domains Audited So Far**:
   - Dignity Engine & report brigading defense.
   - PostGIS location verifier & anti-spoofing coordinates.
@@ -28,28 +28,28 @@ Production readiness divided into two sequential tiers:
   - Auth lifecycle gates for banned/deleted/suspended users across all providers (phone OTP, email OTP, Google, Apple), signup concurrency `ON CONFLICT` race mitigation, token refresh inactive user purging, profile update & unblock feed cache purging, and interactions target profile existence validation.
   - **Round 6**:
     - Backend DPDP Act 2023 `GET /v1/users/me/export` machine-readable personal data portability endpoint.
-    - Account service purge deleting all 6 match column aliases (`user_a`, `user_b`, `user_id_1`, `user_id_2`, `user_a_id`, `user_b_id`) and all 4 chat participant aliases.
+    - Account service purge deleting all 6 match column aliases and all 4 chat participant aliases.
     - Account soft delete setting matches `status = 'unmatched'` and chats `is_unmatched = TRUE`.
-    - Stable marriage engine output proposal stage sorted by score descending with strict 1-to-1 matching via `matched_users` set, eliminating duplicate pairing.
-    - Mobile `profileApi.ts`: normalized `looking_for` string formatting so selections in `EditProfileScreen` aren't dropped.
-    - Mobile `EditProfileScreen.tsx`: parsed backend `looking_for` to match UI display strings.
-    - Mobile `LikesScreen.tsx`: updated paywall logic to check `can_see_who_liked`, `gold`, and `platinum` tiers.
-    - Mobile `SubscriptionsScreen.tsx`: added success fallback message and auto status refresh on subscription purchase.
-    - Mobile `ProfileScreen.tsx`: integrated `useFocusEffect` to reload latest profile data on return from editing.
-    - Mobile `authStore.ts`: hardened `logout` with `try/finally` around `clearTokens()` and unauthenticated state reset.
-    - Mobile `client.ts` & `errors.ts`: exported and imported `ERROR_MAP` dictionary.
+    - Stable marriage engine output proposal stage sorted by score descending with strict 1-to-1 matching via `matched_users` set.
+    - Mobile profile edit looking_for normalization, Likes paywall tier checks, and auto-refresh on focus.
+  - **Round 7**:
+    - Unified messaging service (`messaging_service.py`): SMS (MSG91), WhatsApp (MSG91 WhatsApp API / Meta Cloud API with auto-fallback to SMS), and Email (SMTP/SES with branded HTML templates).
+    - Phone OTP channel selection: `OTPRequestBody` and `requestPhoneOTP` accept `channel="sms"` or `channel="whatsapp"`; added WhatsApp OTP delivery button in `PhoneScreen.tsx`.
+    - Email OTP real dispatch: hooked `send_email_otp` in `request_email_otp` (was previously mock logging only).
+    - Payment settlement & network cutoff recovery: added `initiate_refund` in `payment_service.py` using Razorpay Refund API to return debited funds directly to source UPI/bank accounts.
+    - Direct gateway sync: added `sync_order_with_razorpay` in `payment_service.py` and `POST /v1/subscriptions/sync` to reconcile and activate payments directly from Razorpay even if mobile connection drops before verify callback or webhooks are delayed.
+    - Refund request API: added `POST /v1/subscriptions/refund` with caller ownership verification.
+    - Mobile offline & network cutoff resilience: persisted pending payment verification receipts in `SecureStore` in `billingService.ts`; caught post-debit network drops with reassuring `pending_verification` state instead of false "Payment Failed" errors.
+    - Mobile Subscriptions UX: added `Restore / Sync Purchases` button and auto-sync on screen focus in `SubscriptionsScreen.tsx` with clear bank reconciliation/refund timelines.
 
 ---
 
-## 3. Tier 1: Remaining Code Logic Audits (3 Passes Remaining)
+## 3. Tier 1: Remaining Code Logic Audits (2 Passes Remaining)
 Targeting absolute zero remaining logic defects in source files:
-- **Round 6 [COMPLETED]**:
-  - `users.py`: DPDP data export endpoint.
-  - `account_service.py`: 6-column match purge and soft delete unmatching.
-  - `stable_marriage.py`: Strict 1-to-1 matching without duplicate allocations.
-  - Frontend/Mobile: `profileApi.ts`, `EditProfileScreen.tsx`, `LikesScreen.tsx`, `SubscriptionsScreen.tsx`, `ProfileScreen.tsx`, `authStore.ts`, `client.ts`, `errors.ts`.
-- **Round 7**:
-  - Mobile TypeScript store edge cases (`onboardingStore.ts`, `chatStore.ts`, `billingService.ts`), offline state persistence, and unhandled Promise rejections.
+- **Round 7 [COMPLETED]**:
+  - Unified messaging systems (SMS, WhatsApp, Email).
+  - Payment recovery, gateway reconciliation, and source bank refund pipeline.
+  - Mobile payment network drop persistence and Restore Purchases flow.
 - **Round 8**:
   - `backend/app/routers/arcade.py` & `app/services/dignity_engine.py`: Dilemma voting race conditions, badge award quotas.
 - **Round 9**:

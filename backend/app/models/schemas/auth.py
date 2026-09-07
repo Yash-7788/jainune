@@ -28,6 +28,7 @@ def _sanitize_string(v: str | None, max_len: int = 255) -> str | None:
 
 class OTPRequestBody(BaseModel):
     phone_number: str = Field(..., max_length=16, examples=["+919820098200"])
+    channel: Optional[str] = Field("sms", pattern="^(sms|whatsapp)$")
 
     @field_validator("phone_number")
     @classmethod

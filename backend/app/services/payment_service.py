@@ -584,3 +584,99 @@ async def get_effective_user_tier(
 
     return tier
 
+
+async def sync_order_with_razorpay(
+    order_id: str,
+    pool: asyncpg.Pool,
+) -> dict[str, Any]:
+    """
+    Direct server-to-Razorpay synchronization:
+    Checks order status directly on Razorpay's API to recover from network drops,
+    dropped webhooks, or unverified payments.
+    """
+    rzp = _rzp_client()
+    try:
+        payments_data = await asyncio.to_thread(rzp.order.payments, order_id)
+    except Exception as exc:
+        log.warning("Razorpay order sync fetch error for %s: %s", order_id, exc)
+        raise ValueError(f"Unable to query gateway for order {order_id}: {exc}")
+
+    items = payments_data.get("items", []) if isinstance(payments_data, dict) else payments_data or []
+    captured_payment = None
+    for p in items:
+        if p.get("status") == "captured":
+            captured_payment = p
+            break
+
+    if captured_payment:
+        # Process capture idempotently
+        await process_payment_captured(
+            event={"payload": {"payment": {"entity": captured_payment}}},
+            pool=pool,
+        )
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT u.subscription_tier, u.subscription_valid_until
+                FROM payment_intents pi
+                JOIN users u ON u.id = pi.user_id
+                WHERE pi.razorpay_order_id = $1
+                """,
+                order_id,
+            )
+        v_until = row["subscription_valid_until"] if row else None
+        return {
+            "synced": True,
+            "activated": True,
+            "status": "captured",
+            "tier": row["subscription_tier"] if row else "jainune_plus",
+            "expires_at": v_until.isoformat() if v_until else None,
+            "payment_id": captured_payment.get("id"),
+        }
+
+    return {
+        "synced": True,
+        "activated": False,
+        "status": "pending",
+        "message": "Payment has not yet been captured by gateway.",
+    }
+
+
+async def initiate_refund(
+    payment_id: str,
+    amount_paise: Optional[int] = None,
+    reason: str = "customer_request",
+    pool: Optional[asyncpg.Pool] = None,
+) -> dict[str, Any]:
+    """
+    Initiates an instant or normal refund back to the user's source payment method (UPI / card / bank).
+    Reverts subscription or arcade credits.
+    """
+    rzp = _rzp_client()
+    refund_payload: dict[str, Any] = {
+        "notes": {"reason": reason},
+    }
+    if amount_paise:
+        refund_payload["amount"] = amount_paise
+
+    try:
+        refund = await asyncio.to_thread(rzp.payment.refund, payment_id, refund_payload)
+    except Exception as exc:
+        log.error("Razorpay refund creation failed for payment %s: %s", payment_id, exc)
+        raise ValueError(f"Gateway refund initiation failed: {exc}")
+
+    if pool:
+        await process_refund(
+            event={"payload": {"refund": {"entity": refund}}},
+            pool=pool,
+        )
+
+    return {
+        "success": True,
+        "refund_id": refund.get("id"),
+        "payment_id": payment_id,
+        "amount": refund.get("amount"),
+        "currency": refund.get("currency", "INR"),
+        "status": refund.get("status", "processed"),
+    }
+

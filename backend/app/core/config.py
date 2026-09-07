@@ -41,9 +41,18 @@ class Settings(BaseSettings):
     aws_s3_production_bucket: str = "jainune-media-production"
     cdn_public_base_url: str = "https://cdn.jainune.com"
 
-    # MSG91
+    # MSG91 (SMS & WhatsApp)
     msg91_auth_key: str = "test_msg91_key"
     msg91_otp_template_id: str = "test_msg91_template"
+    msg91_whatsapp_template_id: str = "test_msg91_wa_template"
+
+    # Email (SMTP / Transactional)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    email_from_address: str = "noreply@jainune.com"
+    email_from_name: str = "Jainune"
 
     # Razorpay
     razorpay_key_id: str = "test_rzp_key"

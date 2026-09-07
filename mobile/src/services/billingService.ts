@@ -13,9 +13,12 @@ try {
 } catch {
   // Native module unavailable in Expo Go
 }
+
+import * as SecureStore from "expo-secure-store";
 import {
   createSubscriptionOrder,
   verifySubscriptionPayment,
+  syncSubscriptionOrder,
   createArcadeOrder,
   verifyArcadePayment,
   SubscriptionPlan,
@@ -28,8 +31,74 @@ export type BillingProvider = "play_billing" | "app_store" | "razorpay" | "web";
 export interface PurchaseResult {
   success: boolean;
   activated?: boolean;
+  pending_verification?: boolean;
+  message?: string;
   expires_at?: string;
   error?: string;
+}
+
+const PENDING_PAYMENT_KEY = "jainune_pending_payment";
+
+export interface PendingPayment {
+  order_id: string;
+  payment_id: string;
+  signature: string;
+  plan_id?: string;
+  timestamp: number;
+}
+
+export async function savePendingPayment(payment: PendingPayment): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(PENDING_PAYMENT_KEY, JSON.stringify(payment));
+  } catch {}
+}
+
+export async function getPendingPayment(): Promise<PendingPayment | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(PENDING_PAYMENT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearPendingPayment(): Promise<void> {
+  try {
+    await SecureStore.deleteItemAsync(PENDING_PAYMENT_KEY);
+  } catch {}
+}
+
+export async function syncPendingPayment(): Promise<PurchaseResult> {
+  const pending = await getPendingPayment();
+  if (pending) {
+    try {
+      const verifyRes = await verifySubscriptionPayment({
+        razorpay_order_id: pending.order_id,
+        razorpay_payment_id: pending.payment_id,
+        razorpay_signature: pending.signature,
+      });
+      await clearPendingPayment();
+      return {
+        success: true,
+        activated: verifyRes.activated,
+        expires_at: verifyRes.expires_at,
+      };
+    } catch {}
+  }
+
+  try {
+    const syncRes = await syncSubscriptionOrder(pending?.order_id);
+    if (syncRes.activated) {
+      await clearPendingPayment();
+      return {
+        success: true,
+        activated: true,
+        expires_at: syncRes.expires_at,
+      };
+    }
+  } catch {}
+
+  return { success: false };
 }
 
 export const ACTIVE_BILLING_PROVIDER: BillingProvider =
@@ -97,17 +166,39 @@ export async function purchaseSubscription(
       throw new Error("INVALID_PAYMENT_RESPONSE");
     }
 
-    const verifyRes = await verifySubscriptionPayment({
-      razorpay_order_id: paymentResult.razorpay_order_id,
-      razorpay_payment_id: paymentResult.razorpay_payment_id,
-      razorpay_signature: paymentResult.razorpay_signature,
+    // Persist receipt in SecureStore immediately before network verification
+    await savePendingPayment({
+      order_id: paymentResult.razorpay_order_id,
+      payment_id: paymentResult.razorpay_payment_id,
+      signature: paymentResult.razorpay_signature,
+      plan_id: plan.plan_id,
+      timestamp: Date.now(),
     });
 
-    return {
-      success: true,
-      activated: verifyRes.activated,
-      expires_at: verifyRes.expires_at,
-    };
+    try {
+      const verifyRes = await verifySubscriptionPayment({
+        razorpay_order_id: paymentResult.razorpay_order_id,
+        razorpay_payment_id: paymentResult.razorpay_payment_id,
+        razorpay_signature: paymentResult.razorpay_signature,
+      });
+
+      await clearPendingPayment();
+
+      return {
+        success: true,
+        activated: verifyRes.activated,
+        expires_at: verifyRes.expires_at,
+      };
+    } catch (verifyErr) {
+      // Network drop after bank deduction
+      return {
+        success: true,
+        activated: false,
+        pending_verification: true,
+        message:
+          "Payment debited by your bank. Your subscription will activate automatically once network connection is restored.",
+      };
+    }
   } catch (err: any) {
     if (err?.code === 2 || err?.description === "Payment Cancelled") {
       return { success: false, error: "CANCELLED" };

@@ -38,6 +38,7 @@ from app.models.schemas.auth import (
     TokenResponse,
 )
 from app.services.email_verifier import is_disposable_email, verify_bot_integrity
+from app.services.messaging_service import dispatch_phone_otp, send_email_otp
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -151,10 +152,11 @@ async def request_otp(body: OTPRequestBody, redis: RedisDep) -> dict:
     session_key = f"auth:otp:{body.phone_number}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
 
-    # Send via MSG91
-    await _send_otp_msg91(body.phone_number, otp)
+    # Dispatch via MSG91 SMS or WhatsApp
+    channel = getattr(body, "channel", "sms") or "sms"
+    await dispatch_phone_otp(body.phone_number, otp, channel=channel)
 
-    log.info("Dispatched SMS OTP to %s", mask_phone(body.phone_number))
+    log.info("Dispatched %s OTP to %s", channel.upper(), mask_phone(body.phone_number))
     return ok(OTPRequestResponse(
         phone_number=mask_phone(body.phone_number),
         retry_after_seconds=60,
@@ -228,6 +230,9 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
     otp_hash = hash_otp(clean_email, otp)
     session_key = f"auth:email_otp:{clean_email}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
+
+    # Deliver branded OTP email
+    await send_email_otp(clean_email, otp)
 
     log.info("Dispatched email OTP to %s", mask_email(clean_email))
     return ok({

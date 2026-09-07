@@ -45,7 +45,7 @@ import {
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
 
-import { purchaseSubscription } from "../../services/billingService";
+import { purchaseSubscription, syncPendingPayment } from "../../services/billingService";
 
 const FEATURES = [
   "30 daily intentional likes (vs 10 free)",
@@ -72,10 +72,14 @@ export default function SubscriptionsScreen() {
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     enableScreenCaptureProtection();
     fetchStatus();
+    syncPendingPayment().then((res) => {
+      if (res.activated) fetchStatus();
+    }).catch(() => {});
     return () => disableScreenCaptureProtection();
   }, []);
 
@@ -96,6 +100,30 @@ export default function SubscriptionsScreen() {
       // non-fatal
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRestorePurchases = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncPendingPayment();
+      if (res.activated) {
+        Alert.alert(
+          "Subscription Restored",
+          "Your active Jainune+ subscription was successfully verified and restored.",
+          [{ text: "Great", onPress: () => fetchStatus() }]
+        );
+      } else {
+        await fetchStatus();
+        Alert.alert(
+          "Purchases Synced",
+          "Account status is up to date. If you were recently debited, gateway processing can take 2-3 minutes."
+        );
+      }
+    } catch (err) {
+      Alert.alert("Sync Error", extractError(err).message);
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -139,6 +167,12 @@ export default function SubscriptionsScreen() {
           `Your subscription is active until ${new Date(result.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}.`,
           [{ text: "Let's go", onPress: () => navigation.goBack() }]
         );
+      } else if (result.pending_verification) {
+        Alert.alert(
+          "Payment Processing",
+          result.message || "Payment debited by bank. Your subscription will activate automatically once network connection is restored.",
+          [{ text: "OK", onPress: () => navigation.goBack() }]
+        );
       } else if (result.success || result.activated) {
         Alert.alert(
           "Welcome to Jainune+",
@@ -151,7 +185,11 @@ export default function SubscriptionsScreen() {
       if (err?.code === 0 || err?.error === "CANCELLED") {
         return;
       }
-      Alert.alert("Payment Failed", extractError(err).message);
+      const friendly = extractError(err);
+      Alert.alert(
+        friendly.title,
+        `${friendly.message}\n\nNote: If funds were debited from your account, your subscription will activate automatically once network connection is restored, or be automatically refunded to your bank within 5-7 business days.`
+      );
     } finally {
       setPaying(false);
     }
@@ -274,6 +312,18 @@ export default function SubscriptionsScreen() {
             Recurring UPI AutoPay. Cancel anytime. Governed by RBI pre-debit notification guidelines.
             Price inclusive of 18% GST.
           </Text>
+
+          <TouchableOpacity
+            style={styles.restoreBtn}
+            onPress={handleRestorePurchases}
+            disabled={syncing}
+          >
+            {syncing ? (
+              <ActivityIndicator size="small" color={colors.saffron} />
+            ) : (
+              <Text style={styles.restoreBtnText}>🔄 Restore / Sync Purchases</Text>
+            )}
+          </TouchableOpacity>
         </>
       )}
 
@@ -292,6 +342,16 @@ export default function SubscriptionsScreen() {
 }
 
 const styles = StyleSheet.create({
+  restoreBtn: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    alignItems: "center",
+  },
+  restoreBtnText: {
+    fontFamily: "Outfit_600SemiBold",
+    color: colors.saffron,
+    fontSize: 14,
+  },
   container: { flex: 1, backgroundColor: "#111112" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#111112" },
   header: {

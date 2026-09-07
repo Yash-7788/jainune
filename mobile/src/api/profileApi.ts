@@ -361,6 +361,38 @@ export async function verifySubscriptionPayment(payload: {
   return res.data;
 }
 
+export async function syncSubscriptionOrder(orderId?: string): Promise<{
+  synced: boolean;
+  activated: boolean;
+  tier?: string;
+  expires_at?: string;
+  status?: string;
+  message?: string;
+}> {
+  const res = await apiPost<{
+    synced: boolean;
+    activated: boolean;
+    tier?: string;
+    expires_at?: string;
+    status?: string;
+    message?: string;
+  }>("/subscriptions/sync", orderId ? { razorpay_order_id: orderId } : {});
+  if (!res.success) throw { _apiError: res.error };
+  return res.data;
+}
+
+export async function requestSubscriptionRefund(
+  paymentId: string,
+  reason = "customer_request"
+): Promise<{ success: boolean; refund_id?: string; message?: string }> {
+  const res = await apiPost<{ success: boolean; refund_id?: string; message?: string }>(
+    "/subscriptions/refund",
+    { razorpay_payment_id: paymentId, reason }
+  );
+  if (!res.success) throw { _apiError: res.error };
+  return res.data;
+}
+
 // ── Serendipity Arcade ───────────────────────────────────────────────────────
 
 export const ARCADE_PRODUCTS: ArcadeProduct[] = [

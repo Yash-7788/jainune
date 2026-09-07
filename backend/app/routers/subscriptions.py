@@ -12,7 +12,8 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from typing import Any
+from typing import Any, Optional
+from pydantic import BaseModel, Field
 
 import asyncpg
 
@@ -203,6 +204,109 @@ async def verify_payment(
         "expires_at": v_until.isoformat() if v_until else "",
         "message": "Payment verified. Account upgraded.",
     }
+
+
+class SyncSubscriptionBody(BaseModel):
+    razorpay_order_id: Optional[str] = Field(None, max_length=64)
+
+
+@router.post("/sync", status_code=status.HTTP_200_OK)
+async def sync_subscription(
+    body: Optional[SyncSubscriptionBody] = None,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Directly reconciles payment status with Razorpay.
+    Recovers from network drops, dropped webhooks, or unverified payments.
+    """
+    user_id = current_user["user_id"]
+    order_id = body.razorpay_order_id if body and body.razorpay_order_id else None
+
+    async with pool.acquire() as conn:
+        if not order_id:
+            row = await conn.fetchrow(
+                """
+                SELECT razorpay_order_id, status FROM payment_intents
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                user_id,
+            )
+            if not row:
+                return {"synced": False, "activated": False, "message": "No recent payment orders found."}
+            order_id = row["razorpay_order_id"]
+            if row["status"] == "captured":
+                user_row = await conn.fetchrow(
+                    "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+                    user_id,
+                )
+                v_until = user_row["subscription_valid_until"] if user_row else None
+                return {
+                    "synced": True,
+                    "activated": True,
+                    "status": "already_captured",
+                    "tier": user_row["subscription_tier"] if user_row else "jainune_plus",
+                    "expires_at": v_until.isoformat() if v_until else None,
+                }
+        else:
+            row = await conn.fetchrow(
+                "SELECT user_id, status FROM payment_intents WHERE razorpay_order_id = $1",
+                order_id,
+            )
+            if not row or str(row["user_id"]) != str(user_id):
+                raise HTTPException(status_code=403, detail="Order not found or does not belong to user")
+
+    try:
+        res = await payment_service.sync_order_with_razorpay(order_id, pool)
+        return res
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class RefundRequestBody(BaseModel):
+    razorpay_payment_id: str = Field(..., min_length=5, max_length=64)
+    reason: Optional[str] = Field("user_cancellation", max_length=256)
+
+
+@router.post("/refund", status_code=status.HTTP_200_OK)
+async def request_refund(
+    body: RefundRequestBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Customer refund request for charged payments:
+    Verifies caller ownership of the payment and initiates Razorpay gateway refund,
+    crediting funds back to the user's source bank / UPI account.
+    """
+    user_id = current_user["user_id"]
+    async with pool.acquire() as conn:
+        intent = await conn.fetchrow(
+            """
+            SELECT user_id, amount, status FROM payment_intents
+            WHERE razorpay_payment_id = $1
+            """,
+            body.razorpay_payment_id,
+        )
+    if not intent:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    if str(intent["user_id"]) != str(user_id):
+        raise HTTPException(status_code=403, detail="Payment does not belong to authenticated user")
+    if intent["status"] == "refunded":
+        return {"success": True, "message": "Payment has already been refunded.", "status": "already_refunded"}
+
+    try:
+        result = await payment_service.initiate_refund(
+            payment_id=body.razorpay_payment_id,
+            amount_paise=intent["amount"],
+            reason=body.reason or "customer_request",
+            pool=pool,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

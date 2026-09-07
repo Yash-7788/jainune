@@ -43,7 +43,7 @@ export default function PhoneScreen() {
     if (error) setError(null);
   };
 
-  const handleSend = async () => {
+  const handleSend = async (channel: "sms" | "whatsapp" = "sms") => {
     if (!isValid) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       setError({
@@ -55,7 +55,7 @@ export default function PhoneScreen() {
     setLoading(true);
     setError(null);
     try {
-      const res = await requestPhoneOTP(phoneValidation.e164);
+      const res = await requestPhoneOTP(phoneValidation.e164, channel);
       // res.phone_number is masked: +91*****1210 — no account enumeration
       navigation.navigate("OTPVerify", {
         phoneNumber: phoneValidation.e164,
@@ -85,7 +85,7 @@ export default function PhoneScreen() {
         </TouchableOpacity>
         <Text style={styles.title}>Your phone number</Text>
         <Text style={styles.sub}>
-          We'll send a 6-digit verification code. Standard SMS rates may apply.
+          We'll send a 6-digit verification code via SMS or WhatsApp.
         </Text>
       </View>
 
@@ -109,17 +109,34 @@ export default function PhoneScreen() {
       {/* Send OTP */}
       <View style={styles.cta}>
         <PrimaryButton
-          label="Send Code"
-          onPress={handleSend}
+          label="Send Code via SMS"
+          onPress={() => handleSend("sms")}
           loading={loading}
           disabled={!isValid || loading}
         />
+        <TouchableOpacity
+          style={styles.whatsappBtn}
+          onPress={() => handleSend("whatsapp")}
+          disabled={!isValid || loading}
+        >
+          <Text style={styles.whatsappBtnText}>💬 Send Code via WhatsApp</Text>
+        </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  whatsappBtn: {
+    marginTop: spacing.md,
+    alignItems: "center",
+    paddingVertical: spacing.sm,
+  },
+  whatsappBtnText: {
+    fontFamily: "Outfit_600SemiBold",
+    color: "#25D366",
+    fontSize: 14,
+  },
   container: {
     flex: 1,
     backgroundColor: colors.bg,
