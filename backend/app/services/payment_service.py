@@ -426,7 +426,7 @@ async def process_refund(
 ) -> None:
     """Handle payment.refunded — isolate subscription downgrade vs arcade deduction."""
     refund = event.get("payload", {}).get("refund", {}).get("entity", {})
-    payment_id: str = refund.get("payment_id", "")
+    payment_id: str = refund.get("payment_id") or event.get("payment_id", "")
 
     if not payment_id:
         return
@@ -448,27 +448,28 @@ async def process_refund(
             plan_type = plan.get("type", "subscription")
 
             if plan_type == "subscription":
-                # Only revoke if this payment_id is still the active subscription source.
-                # Prevents a partial/older refund from nuking a separately-purchased
-                # stacked subscription (e.g. refunding a monthly while an annual is active).
-                active_row = await conn.fetchrow(
+                # Check if user has any other active captured payment
+                other_active = await conn.fetchrow(
                     """
                     SELECT razorpay_payment_id
                     FROM payment_intents
                     WHERE user_id = $1
                       AND status = 'captured'
-                      AND plan_id = $2
+                      AND razorpay_payment_id IS NOT NULL
+                      AND razorpay_payment_id != $2
                     ORDER BY captured_at DESC
                     LIMIT 1
                     """,
                     intent["user_id"],
-                    intent["plan_id"],
+                    payment_id,
                 )
-                is_active_payment = (
-                    active_row is not None
-                    and active_row.get("razorpay_payment_id") in (payment_id, None)
+                has_other_payment = (
+                    other_active is not None
+                    and other_active.get("razorpay_payment_id") is not None
+                    and other_active.get("razorpay_payment_id") != payment_id
                 )
-                if is_active_payment:
+                if not has_other_payment:
+                    # No other valid payment exists — unconditionally revoke subscription
                     await conn.execute(
                         """
                         UPDATE users
@@ -480,9 +481,16 @@ async def process_refund(
                         intent["user_id"],
                     )
                     log.info("Subscription revoked on refund: user=%s payment=%s", intent["user_id"], payment_id)
+                    from app.core.redis import get_redis
+                    try:
+                        r = get_redis()
+                        await r.delete(f"user:{intent['user_id']}:subscription")
+                        await r.delete(f"user:{intent['user_id']}:tier")
+                    except Exception:
+                        pass
                 else:
                     log.info(
-                        "Refund for payment=%s is not the active subscription — skipping tier downgrade for user=%s",
+                        "Refund for payment=%s is not the only active subscription — skipping tier downgrade for user=%s",
                         payment_id, intent["user_id"],
                     )
             elif plan_type == "arcade":
@@ -603,10 +611,13 @@ async def sync_order_with_razorpay(
 
     items = payments_data.get("items", []) if isinstance(payments_data, dict) else payments_data or []
     captured_payment = None
+    failed_payment = None
     for p in items:
         if p.get("status") == "captured":
             captured_payment = p
             break
+        elif p.get("status") == "failed":
+            failed_payment = p
 
     if captured_payment:
         # Process capture idempotently
@@ -632,6 +643,14 @@ async def sync_order_with_razorpay(
             "tier": row["subscription_tier"] if row else "jainune_plus",
             "expires_at": v_until.isoformat() if v_until else None,
             "payment_id": captured_payment.get("id"),
+        }
+
+    if failed_payment:
+        return {
+            "synced": True,
+            "activated": False,
+            "status": "failed",
+            "message": "Payment attempt was declined or failed at your bank. If any amount was debited, your bank will automatically return it within 5-7 business days.",
         }
 
     return {
@@ -666,8 +685,11 @@ async def initiate_refund(
         raise ValueError(f"Gateway refund initiation failed: {exc}")
 
     if pool:
+        refund_entity = refund if isinstance(refund, dict) else {}
+        if not refund_entity.get("payment_id"):
+            refund_entity["payment_id"] = payment_id
         await process_refund(
-            event={"payload": {"refund": {"entity": refund}}},
+            event={"payload": {"refund": {"entity": refund_entity}}, "payment_id": payment_id},
             pool=pool,
         )
 

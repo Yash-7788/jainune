@@ -19,6 +19,8 @@ export type ErrorCode =
   | "FEED_EMPTY"
   | "CHAT_NOT_ALLOWED"
   | "SMS_GATEWAY_BUSY"
+  | "PAYMENT_NETWORK_CUTOFF"
+  | "PAYMENT_FAILED_REFUND_GUARANTEED"
   | "TEMPORARY_ERROR";
 
 interface FriendlyError {
@@ -98,6 +100,16 @@ export const ERROR_MAP: Record<ErrorCode, FriendlyError> = {
     title: "The Carrier Pigeon is Resting",
     message:
       "Our SMS carrier is catching its breath! Give it 60 seconds and request your code again.",
+  },
+  PAYMENT_NETWORK_CUTOFF: {
+    title: "Connection Lost During Payment",
+    message:
+      "Network connection dropped during payment confirmation. If your bank account was debited, your subscription will activate automatically once restored, or tap 'Restore / Sync Purchases'.",
+  },
+  PAYMENT_FAILED_REFUND_GUARANTEED: {
+    title: "Payment Could Not Be Completed",
+    message:
+      "Your transaction was not completed by your bank or payment gateway. If any amount was deducted, your bank will automatically refund it to your account within 5-7 business days.",
   },
   TEMPORARY_ERROR: {
     title: "Our Servers Need a Chai Break",

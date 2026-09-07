@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     msg91_auth_key: str = "test_msg91_key"
     msg91_otp_template_id: str = "test_msg91_template"
     msg91_whatsapp_template_id: str = "test_msg91_wa_template"
+    msg91_promotional_flow_id: str = ""
 
     # Email (SMTP / Transactional)
     smtp_host: str = ""

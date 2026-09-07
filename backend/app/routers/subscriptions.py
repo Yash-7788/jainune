@@ -277,31 +277,60 @@ async def request_refund(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """
-    Customer refund request for charged payments:
-    Verifies caller ownership of the payment and initiates Razorpay gateway refund,
-    crediting funds back to the user's source bank / UPI account.
+    Customer refund request for unfulfilled or failed transactions (Last Resort):
+    Active fulfilled subscription passes are non-refundable passes.
+    Refunds are permitted only for stuck, unfulfilled, or duplicate debits.
+    When refund is issued, subscription is unconditionally revoked.
     """
+    from datetime import datetime, timezone
     user_id = current_user["user_id"]
     async with pool.acquire() as conn:
         intent = await conn.fetchrow(
             """
-            SELECT user_id, amount, status FROM payment_intents
+            SELECT user_id, amount, status, razorpay_order_id FROM payment_intents
             WHERE razorpay_payment_id = $1
             """,
             body.razorpay_payment_id,
         )
-    if not intent:
-        raise HTTPException(status_code=404, detail="Payment record not found")
-    if str(intent["user_id"]) != str(user_id):
-        raise HTTPException(status_code=403, detail="Payment does not belong to authenticated user")
-    if intent["status"] == "refunded":
-        return {"success": True, "message": "Payment has already been refunded.", "status": "already_refunded"}
+        if not intent:
+            intent = await conn.fetchrow(
+                """
+                SELECT user_id, amount, status, razorpay_order_id FROM payment_intents
+                WHERE razorpay_order_id = $1
+                """,
+                body.razorpay_payment_id,
+            )
+        if not intent:
+            raise HTTPException(status_code=404, detail="Payment record not found")
+        if str(intent["user_id"]) != str(user_id):
+            raise HTTPException(status_code=403, detail="Payment does not belong to authenticated user")
+        if intent["status"] == "refunded":
+            return {"success": True, "message": "Payment has already been refunded.", "status": "already_refunded"}
+
+        # Prevent refund abuse on active, fulfilled passes
+        user_row = await conn.fetchrow(
+            "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",
+            user_id,
+        )
+        now_utc = datetime.now(timezone.utc)
+        is_active_fulfilled = (
+            user_row
+            and user_row["subscription_tier"] != "free"
+            and user_row["subscription_valid_until"]
+            and user_row["subscription_valid_until"] > now_utc
+            and intent["status"] == "captured"
+        )
+        if is_active_fulfilled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Active Jainune+ passes are non-refundable once fulfilled. If you experienced a billing issue, please contact support@jainune.com.",
+            )
 
     try:
         result = await payment_service.initiate_refund(
             payment_id=body.razorpay_payment_id,
             amount_paise=intent["amount"],
-            reason=body.reason or "customer_request",
+            reason=body.reason or "customer_recovery_unfulfilled",
             pool=pool,
         )
         return result

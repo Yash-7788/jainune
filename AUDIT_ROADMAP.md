@@ -50,8 +50,12 @@ Targeting absolute zero remaining logic defects in source files:
   - Unified messaging systems (SMS, WhatsApp, Email).
   - Payment recovery, gateway reconciliation, and source bank refund pipeline.
   - Mobile payment network drop persistence and Restore Purchases flow.
-- **Round 8**:
-  - `backend/app/routers/arcade.py` & `app/services/dignity_engine.py`: Dilemma voting race conditions, badge award quotas.
+- **Round 8 (Completed - Sub-Audit & Marketing/Payment Safeguards)**:
+  - Multi-channel promotional marketing system (SMS, WhatsApp, Email) with campaign segment targeting.
+  - Razorpay refund safeguards: active fulfilled passes non-refundable self-service; unfulfilled/failed debits refunded back to source bank.
+  - Guaranteed subscription revocation on refund (`tier = 'free'`, `valid_until = NULL`, Redis cache eviction).
+  - Admin campaign broadcast (`/v1/admin/campaigns/broadcast`) and admin refund (`/v1/admin/subscriptions/refund`).
+  - Mobile SubscriptionsScreen UI: removed misleading "Recurring UPI AutoPay" disclaimer; added launch promotional offer badge; added network cutoff error guidance.
 - **Round 9**:
   - Final end-to-end integration pass across full auth -> onboarding -> feed -> chat -> payment lifecycle.
 

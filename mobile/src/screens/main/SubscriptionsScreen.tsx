@@ -229,6 +229,14 @@ export default function SubscriptionsScreen() {
         <Text style={styles.heroSubtitle}>
           70% cheaper than Tinder Gold. 10x more meaningful.
         </Text>
+
+        {/* Promotional Festive Launch Offer */}
+        <View style={styles.promoBanner}>
+          <Text style={styles.promoBadge}>✨ LIMITED FESTIVE LAUNCH OFFER</Text>
+          <Text style={styles.promoText}>
+            Save up to 53% on Multi-Month Passes • Safe 1-Time UPI Checkout
+          </Text>
+        </View>
       </View>
 
       {/* Active banner & cancellation CTA */}
@@ -309,8 +317,7 @@ export default function SubscriptionsScreen() {
           </TouchableOpacity>
 
           <Text style={styles.legalNote}>
-            Recurring UPI AutoPay. Cancel anytime. Governed by RBI pre-debit notification guidelines.
-            Price inclusive of 18% GST.
+            One-time fixed-duration pass. Zero recurring auto-debit or surprise renewals. Instant activation. Price inclusive of 18% GST.
           </Text>
 
           <TouchableOpacity
@@ -324,6 +331,10 @@ export default function SubscriptionsScreen() {
               <Text style={styles.restoreBtnText}>🔄 Restore / Sync Purchases</Text>
             )}
           </TouchableOpacity>
+
+          <Text style={styles.restoreHint}>
+            Network drop during payment? Tap 'Restore / Sync Purchases' to verify with the gateway and activate your membership immediately.
+          </Text>
         </>
       )}
 
@@ -520,4 +531,37 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   featureText: { ...typography.bodySmall, color: "rgba(255,255,255,0.7)", flex: 1, lineHeight: 20 },
+  promoBanner: {
+    backgroundColor: "rgba(255, 156, 74, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 156, 74, 0.35)",
+    borderRadius: radii.md,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    marginTop: spacing.md,
+    alignItems: "center",
+  },
+  promoBadge: {
+    fontFamily: "Outfit_700Bold",
+    fontSize: 11,
+    color: colors.saffron,
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  promoText: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
+    color: "rgba(255, 255, 255, 0.8)",
+    textAlign: "center",
+  },
+  restoreHint: {
+    ...typography.caption,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.4)",
+    textAlign: "center",
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.xs,
+    marginBottom: spacing.lg,
+    lineHeight: 15,
+  },
 });

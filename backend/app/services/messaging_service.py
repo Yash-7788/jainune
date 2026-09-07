@@ -12,8 +12,9 @@ import asyncio
 import email.message
 import logging
 import smtplib
-from typing import Optional
+from typing import Any, Optional
 
+import asyncpg
 import httpx
 from fastapi import HTTPException, status
 
@@ -167,3 +168,232 @@ async def dispatch_phone_otp(phone_number: str, otp: str, channel: str = "sms") 
         await send_whatsapp_otp(phone_number, otp)
     else:
         await send_sms_otp(phone_number, otp)
+
+
+# ---------------------------------------------------------------------------
+# Promotional & Marketing Messaging System (SMS, WhatsApp, Email)
+# ---------------------------------------------------------------------------
+
+
+async def send_promotional_sms(
+    phone_number: str,
+    message: str,
+    flow_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Sends promotional SMS via MSG91 Flow / Campaign API."""
+    if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
+        log.info("[MOCK PROMO SMS] To: %s | Message: %s", _mask_phone(phone_number), message[:60])
+        return {"success": True, "channel": "sms", "mock": True}
+
+    mobile = phone_number.lstrip("+")
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                "https://api.msg91.com/api/v5/flow/",
+                headers={
+                    "authkey": settings.msg91_auth_key,
+                    "content-type": "application/json",
+                },
+                json={
+                    "flow_id": flow_id or settings.msg91_promotional_flow_id or settings.msg91_otp_template_id,
+                    "sender": "JAINUN",
+                    "mobiles": mobile,
+                    "message": message,
+                },
+            )
+            return {"success": resp.status_code in (200, 201), "channel": "sms", "status_code": resp.status_code}
+    except Exception as exc:
+        log.warning("Promotional SMS failed for %s: %s", _mask_phone(phone_number), exc)
+        return {"success": False, "channel": "sms", "error": str(exc)}
+
+
+async def send_promotional_whatsapp(
+    phone_number: str,
+    template_name: str,
+    parameters: dict[str, str],
+    fallback_message: Optional[str] = None,
+) -> dict[str, Any]:
+    """Dispatches promotional WhatsApp template message with SMS fallback."""
+    if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
+        log.info("[MOCK PROMO WHATSAPP] To: %s | Template: %s", _mask_phone(phone_number), template_name)
+        return {"success": True, "channel": "whatsapp", "mock": True}
+
+    mobile = phone_number.lstrip("+")
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+                headers={
+                    "authkey": settings.msg91_auth_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "integrated_number": mobile,
+                    "content_type": "template",
+                    "payload": {
+                        "template_name": template_name,
+                        "components": [
+                            {
+                                "type": "body",
+                                "parameters": [{"type": "text", "text": v} for v in parameters.values()],
+                            }
+                        ],
+                    },
+                },
+            )
+            if resp.status_code in (200, 201):
+                return {"success": True, "channel": "whatsapp"}
+            log.warning("WhatsApp promotional delivery failed (%s); fallback to SMS", resp.status_code)
+    except Exception as exc:
+        log.warning("WhatsApp promotional error: %s; fallback to SMS", exc)
+
+    if fallback_message:
+        return await send_promotional_sms(phone_number, fallback_message)
+    return {"success": False, "channel": "whatsapp"}
+
+
+async def send_promotional_email(
+    to_email: str,
+    subject: str,
+    title: str,
+    body_text: str,
+    offer_badge: Optional[str] = None,
+    cta_title: Optional[str] = None,
+    cta_url: Optional[str] = None,
+) -> bool:
+    """Delivers branded promotional / marketing email with Jain aesthetic."""
+    badge_html = f"""
+    <div style="display: inline-block; background-color: #FEF3C7; color: #92400E; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 9999px; margin-bottom: 16px; border: 1px solid #FCD34D;">
+        {offer_badge}
+    </div>
+    """ if offer_badge else ""
+
+    cta_html = f"""
+    <div style="margin: 28px 0; text-align: center;">
+        <a href="{cta_url or 'https://jainune.com'}" style="background-color: #D97706; color: #FFFFFF; font-weight: 600; text-decoration: none; padding: 14px 28px; border-radius: 12px; display: inline-block; font-size: 15px;">
+            {cta_title or 'Explore Jainune+'}
+        </a>
+    </div>
+    """ if cta_title or cta_url else ""
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #FAFAF8; padding: 24px; color: #1C1917; margin: 0;">
+    <div style="max-width: 520px; margin: 0 auto; background: #FFFFFF; border-radius: 16px; padding: 32px; border: 1px solid #E7E5E4;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <span style="font-size: 20px; font-weight: 800; letter-spacing: -0.5px; color: #D97706;">JAINUNE</span>
+      </div>
+      {badge_html}
+      <h2 style="font-size: 22px; font-weight: 700; color: #1C1917; margin: 0 0 16px 0; line-height: 28px;">{title}</h2>
+      <p style="font-size: 15px; line-height: 24px; color: #44403C; margin: 0 0 16px 0; white-space: pre-line;">{body_text}</p>
+      {cta_html}
+      <hr style="border: none; border-top: 1px solid #F5F5F4; margin: 28px 0;" />
+      <p style="font-size: 12px; color: #A8A29E; text-align: center; line-height: 18px; margin: 0;">
+        You received this update because you are a valued member of the Jainune community.<br/>
+        © 2026 Jainune Inc. • Crafted with Ahimsa & Intentionality
+      </p>
+    </div>
+  </body>
+</html>"""
+
+    plain_text = f"Jai Jinendra\n\n{title}\n\n{body_text}\n\n{cta_title or 'Visit'}: {cta_url or 'https://jainune.com'}\n\nTeam Jainune"
+    try:
+        await send_email(to_email, subject, html_body, plain_text)
+        return True
+    except Exception as exc:
+        log.warning("Promotional email delivery failed for %s: %s", _mask_email(to_email), exc)
+        return False
+
+
+async def broadcast_promotional_campaign(
+    pool: asyncpg.Pool,
+    campaign_name: str,
+    title: str,
+    message: str,
+    channels: list[str],
+    target_segment: str = "free",
+    offer_badge: Optional[str] = None,
+    cta_url: Optional[str] = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """
+    Executes broadcast promotional marketing campaign across SMS, WhatsApp, and/or Email.
+    Respects user account status and active segments.
+    """
+    where_clause = "account_status = 'active'"
+    params: list[Any] = []
+    if target_segment == "free":
+        params.append("free")
+        where_clause += f" AND subscription_tier = ${len(params)}"
+    elif target_segment == "plus":
+        where_clause += " AND subscription_tier != 'free'"
+
+    query = f"""
+        SELECT id, phone_number, email, first_name
+        FROM users
+        WHERE {where_clause}
+        ORDER BY created_at DESC
+        LIMIT {limit}
+    """
+    async with pool.acquire() as conn:
+        users = await conn.fetch(query, *params)
+
+    stats = {
+        "campaign": campaign_name,
+        "targeted": len(users),
+        "sms_sent": 0,
+        "whatsapp_sent": 0,
+        "email_sent": 0,
+        "errors": 0,
+    }
+
+    channels_set = set(c.lower() for c in channels)
+
+    for u in users:
+        phone = u.get("phone_number")
+        email_addr = u.get("email")
+
+        # Email dispatch
+        if "email" in channels_set and email_addr:
+            try:
+                ok = await send_promotional_email(
+                    to_email=email_addr,
+                    subject=title,
+                    title=title,
+                    body_text=message,
+                    offer_badge=offer_badge or "Jainune Special",
+                    cta_title="Unlock Jainune+",
+                    cta_url=cta_url or "https://jainune.com/plans",
+                )
+                if ok:
+                    stats["email_sent"] += 1
+            except Exception:
+                stats["errors"] += 1
+
+        # WhatsApp dispatch
+        if "whatsapp" in channels_set and phone:
+            try:
+                res = await send_promotional_whatsapp(
+                    phone_number=phone,
+                    template_name="jainune_promotional",
+                    parameters={"1": u.get("first_name") or "Friend", "2": message},
+                    fallback_message=f"Jai Jinendra! {title}: {message}",
+                )
+                if res.get("success"):
+                    stats["whatsapp_sent"] += 1
+            except Exception:
+                stats["errors"] += 1
+
+        # SMS dispatch (if not using whatsapp or whatsapp was omitted)
+        elif "sms" in channels_set and phone:
+            try:
+                res = await send_promotional_sms(
+                    phone_number=phone,
+                    message=f"Jainune: {title}. {message}",
+                )
+                if res.get("success"):
+                    stats["sms_sent"] += 1
+            except Exception:
+                stats["errors"] += 1
+
+    return stats

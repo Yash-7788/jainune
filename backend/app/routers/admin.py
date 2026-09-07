@@ -504,3 +504,75 @@ async def get_dashboard_stats(
         )
     return dict(stats)
 
+
+# ---------------------------------------------------------------------------
+# Promotional & Marketing Campaign Broadcast
+# ---------------------------------------------------------------------------
+
+
+class BroadcastCampaignBody(BaseModel):
+    campaign_name: str = Field(..., min_length=3, max_length=64)
+    title: str = Field(..., min_length=3, max_length=120)
+    message: str = Field(..., min_length=5, max_length=1000)
+    channels: list[str] = Field(default=["email"], description="List containing email, whatsapp, and/or sms")
+    target_segment: str = Field(default="free", pattern="^(free|plus|all)$")
+    offer_badge: Optional[str] = Field(None, max_length=40)
+    cta_url: Optional[str] = Field(None, max_length=500)
+    limit: int = Field(default=500, ge=1, le=5000)
+
+
+@router.post("/campaigns/broadcast", status_code=status.HTTP_200_OK)
+async def trigger_campaign_broadcast(
+    body: BroadcastCampaignBody,
+    admin: dict = Depends(require_admin),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Admin-triggered broadcast of promotional or festival campaign across channels."""
+    from app.services.messaging_service import broadcast_promotional_campaign
+    res = await broadcast_promotional_campaign(
+        pool=pool,
+        campaign_name=body.campaign_name,
+        title=body.title,
+        message=body.message,
+        channels=body.channels,
+        target_segment=body.target_segment,
+        offer_badge=body.offer_badge,
+        cta_url=body.cta_url,
+        limit=body.limit,
+    )
+    log.info("Campaign %s triggered by admin %s: %s", body.campaign_name, admin["user_id"], res)
+    return {"success": True, "results": res}
+
+
+# ---------------------------------------------------------------------------
+# Admin Refund Action (Last resort dispute resolution)
+# ---------------------------------------------------------------------------
+
+
+class AdminRefundBody(BaseModel):
+    razorpay_payment_id: str = Field(..., min_length=5, max_length=64)
+    reason: str = Field(..., min_length=3, max_length=256)
+    amount_paise: Optional[int] = Field(None, ge=100)
+
+
+@router.post("/subscriptions/refund", status_code=status.HTTP_200_OK)
+async def admin_refund_subscription(
+    body: AdminRefundBody,
+    admin: dict = Depends(require_superadmin),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Superadmin-authorized refund. Initiates gateway refund and immediately revokes
+    the user's subscription access back to free tier.
+    """
+    from app.services import payment_service
+    res = await payment_service.initiate_refund(
+        payment_id=body.razorpay_payment_id,
+        amount_paise=body.amount_paise,
+        reason=f"admin_action: {body.reason}",
+        pool=pool,
+    )
+    log.info("Admin %s initiated refund for payment %s", admin["user_id"], body.razorpay_payment_id)
+    return res
+
+
