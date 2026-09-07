@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
 from app.core.security import sliding_window_rate_limit
-from app.dependencies import RedisDep
+from app.dependencies import CurrentUser, RedisDep
 import asyncpg
 
 from app.main import ok
@@ -51,6 +51,7 @@ class LocationZoneResponse(BaseModel):
 async def verify_location(
     body: VerifyLocationRequest,
     request: Request,
+    current_user: CurrentUser,
     redis: RedisDep,
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
@@ -60,8 +61,8 @@ async def verify_location(
     - If coordinates are inside Mumbai MMR, Pune PCMC, or Bengaluru: returns allowed=True.
     - If outside: returns allowed=False and automatically logs entry to location_waitlist.
     """
-    client_ip = request.client.host if request.client else "unknown"
-    await sliding_window_rate_limit(f"ratelimit:loc_verify:{client_ip}", 15, 60, redis)
+    user_id = current_user.get("id") or current_user.get("user_id")
+    await sliding_window_rate_limit(f"ratelimit:loc_verify:{user_id}", 15, 60, redis)
 
     # 1. Anti-spoofing & integrity gate
     valid_gps, spoof_error = verify_location_anti_spoofing(
@@ -90,8 +91,9 @@ async def verify_location(
 
     # Out of coverage: register on waitlist
     try:
+        phone = body.phone_number or current_user.get("phone_number")
         await save_city_waitlist(
-            phone_number=body.phone_number,
+            phone_number=phone,
             lat=body.latitude,
             lon=body.longitude,
             city_hint=body.city_hint,

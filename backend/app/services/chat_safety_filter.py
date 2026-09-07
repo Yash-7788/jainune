@@ -240,22 +240,34 @@ async def filter_chat_content(
     has_full_platform = bool(_RE_FULL_PLATFORMS.search(normalized))
 
     # B. Shorthands with contextual intent check
-    has_shorthand = False
-    if _RE_SHORTHAND.search(normalized):
-        # Disambiguate benign idioms for snap
-        if "snap" in normalized.lower() and _RE_BENIGN_SNAP.search(normalized):
-            has_shorthand = False
-        else:
-            has_shorthand = True
+    shorthand_spans: list[tuple[int, int]] = []
+    for m in _RE_SHORTHAND.finditer(normalized):
+        matched_text = m.group(0).lower()
+        if "snap" in matched_text and _RE_BENIGN_SNAP.search(normalized):
+            is_benign = any(
+                not (m.end() <= bm.start() or m.start() >= bm.end())
+                for bm in _RE_BENIGN_SNAP.finditer(normalized)
+            )
+            if is_benign:
+                continue
+        shorthand_spans.append(m.span())
+    has_shorthand = len(shorthand_spans) > 0
 
     # C. Phone numbers & word numbers
     has_phone = bool(_RE_PHONE.search(normalized))
 
     # D. Address with benign idiom check
-    has_address = False
-    if _RE_ADDRESS.search(normalized):
-        if not _RE_BENIGN_STREET.search(normalized):
-            has_address = True
+    address_spans: list[tuple[int, int]] = []
+    for m in _RE_ADDRESS.finditer(normalized):
+        if _RE_BENIGN_STREET.search(normalized):
+            is_benign = any(
+                not (m.end() <= bm.start() or m.start() >= bm.end())
+                for bm in _RE_BENIGN_STREET.finditer(normalized)
+            )
+            if is_benign:
+                continue
+        address_spans.append(m.span())
+    has_address = len(address_spans) > 0
 
     if has_phone:
         detected_types.append("NUMBERS")
@@ -297,12 +309,12 @@ async def filter_chat_content(
 
     # Mask detected sensitive segments to '#' based on matches in normalized text
     spans: list[tuple[int, int]] = []
-    for regex in [_RE_PHONE, _RE_FULL_PLATFORMS, _RE_SHORTHAND]:
+    for regex in [_RE_PHONE, _RE_FULL_PLATFORMS]:
         for m in regex.finditer(normalized):
             spans.append(m.span())
+    spans.extend(shorthand_spans)
     if has_address:
-        for m in _RE_ADDRESS.finditer(normalized):
-            spans.append(m.span())
+        spans.extend(address_spans)
 
     if spans:
         # Merge overlapping spans

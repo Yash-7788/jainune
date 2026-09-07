@@ -12,7 +12,7 @@ apply plugin: "com.facebook.react"
 
 android {
     compileSdkVersion 35
-    namespace "com.jainune"
+    namespace "com.jainune.app"
 
     defaultConfig {
         applicationId "com.jainune.app"

@@ -1,4 +1,4 @@
-package com.jainune;
+package com.jainune.app;
 
 import android.app.Activity;
 import android.content.Context;

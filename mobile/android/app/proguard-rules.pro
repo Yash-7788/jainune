@@ -31,4 +31,4 @@
 -keep interface com.facebook.react.bridge.** { *; }
 
 # Protect Native Security Bridge
--keep class com.jainune.security.** { *; }
+-keep class com.jainune.app.** { *; }

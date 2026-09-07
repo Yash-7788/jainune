@@ -299,7 +299,10 @@ def _verify_apple_token(id_token: str) -> dict:
 # ── POST /v1/auth/google ──────────────────────────────────────────────────────
 
 @router.post("/google")
-async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict:
+async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: RedisDep) -> dict:
+    client_ip = request.client.host if request.client else "unknown"
+    await sliding_window_rate_limit(f"ratelimit:auth:google:{client_ip}", 20, 60, redis)
+
     is_bot, bot_msg = verify_bot_integrity(
         dict(request.headers),
         body.turnstile_token,
@@ -358,7 +361,10 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep) -> dict
 # ── POST /v1/auth/apple ───────────────────────────────────────────────────────
 
 @router.post("/apple")
-async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
+async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: RedisDep) -> dict:
+    client_ip = request.client.host if request.client else "unknown"
+    await sliding_window_rate_limit(f"ratelimit:auth:apple:{client_ip}", 20, 60, redis)
+
     is_bot, bot_msg = verify_bot_integrity(
         dict(request.headers),
         body.turnstile_token,
@@ -417,7 +423,10 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep) -> dict:
 # ── POST /v1/auth/token/refresh ───────────────────────────────────────────────
 
 @router.post("/token/refresh")
-async def refresh_token_endpoint(body: TokenRefreshBody, db: DBDep, redis: RedisDep) -> dict:
+async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: DBDep, redis: RedisDep) -> dict:
+    client_ip = request.client.host if request.client else "unknown"
+    await sliding_window_rate_limit(f"ratelimit:auth:refresh:{client_ip}", 30, 60, redis)
+
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
 
     # 1. Check for replay/reuse of an already-rotated token (Token Family Theft Detection)

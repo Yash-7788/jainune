@@ -12,7 +12,7 @@
  * @xml/network_security_config (this is the OS-level pinning enforcement).
  */
 
-package com.jainune;
+package com.jainune.app;
 
 import android.os.Bundle;
 import android.view.WindowManager;
