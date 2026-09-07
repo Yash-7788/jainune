@@ -348,8 +348,8 @@ async def get_my_matches(
             FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
         ), '[]'::json) AS photos
     FROM matches m
-    JOIN users u ON (u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END)
-    WHERE (m.user_a = $1 OR m.user_b = $1 OR m.user_id_1 = $1 OR m.user_id_2 = $1)
+    JOIN users u ON (u.id = CASE WHEN COALESCE(m.user_a, m.user_a_id, m.user_id_1) = $1 THEN COALESCE(m.user_b, m.user_b_id, m.user_id_2) ELSE COALESCE(m.user_a, m.user_a_id, m.user_id_1) END)
+    WHERE (COALESCE(m.user_a, m.user_a_id, m.user_id_1) = $1 OR COALESCE(m.user_b, m.user_b_id, m.user_id_2) = $1)
       AND m.status IN ('active', 'matched')
       AND u.account_status = 'active'
       AND u.is_paused = FALSE
@@ -450,7 +450,7 @@ async def get_users_who_liked_me(
     is_subscriber = tier in ("jainune_plus", "gold", "platinum")
     today = date.today()
     likes = []
-    for r in rows:
+    for idx, r in enumerate(rows):
         dob = r["date_of_birth"]
         age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day)) if dob else 25
         photos_val = r["photos"]
@@ -479,7 +479,7 @@ async def get_users_who_liked_me(
         else:
             # Server-side redaction for free tier: prevent paywall bypass
             likes.append({
-                "id": str(r["id"]),
+                "id": f"blurred_{idx}",
                 "first_name": "Someone",
                 "age": age,
                 "city": r["city"] or "Nearby",

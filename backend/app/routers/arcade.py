@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import random
 from typing import Optional
+import uuid
 from uuid import UUID
 
 import asyncpg
@@ -372,10 +373,44 @@ async def spin_serendipity_wheel(
                 target_gender,
             )
 
+            chat_id = None
+            if candidate:
+                cand_id = candidate["id"]
+                pair = sorted([str(user_id), str(cand_id)])
+                u1 = uuid.UUID(pair[0])
+                u2 = uuid.UUID(pair[1])
+                match_row = await conn.fetchrow(
+                    """
+                    INSERT INTO matches
+                        (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
+                    VALUES ($1, $2, $1, $2, $1, $2, 'serendipity_spin', 'active')
+                    ON CONFLICT (user_a, user_b) DO UPDATE
+                        SET match_type = EXCLUDED.match_type
+                    RETURNING id
+                    """,
+                    u1, u2,
+                )
+                from datetime import datetime, timezone, timedelta
+                chat_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+                chat_row = await conn.fetchrow(
+                    """
+                    INSERT INTO chats
+                        (match_id, participant_1_id, participant_2_id, participant_a, participant_b, is_ephemeral, expires_at)
+                    VALUES ($1, $2, $3, $2, $3, TRUE, $4)
+                    ON CONFLICT (match_id) DO UPDATE
+                        SET is_ephemeral = TRUE, expires_at = EXCLUDED.expires_at, is_unmatched = FALSE
+                    RETURNING id
+                    """,
+                    match_row["id"], u1, u2, chat_expires_at,
+                )
+                chat_id = chat_row["id"]
+                await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
+
     return {
         "success": True,
         "action": "spin",
         "remaining_spins": remaining,
+        "chat_id": str(chat_id) if chat_id else None,
         "paired_user": {
             "id": str(candidate["id"]),
             "first_name": candidate["first_name"],

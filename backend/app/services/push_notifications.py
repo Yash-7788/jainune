@@ -157,7 +157,7 @@ async def send_push(
         }
     }
     if data:
-        message["message"]["data"] = data
+        message["message"]["data"] = {str(k): str(v) for k, v in data.items() if v is not None}
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:

@@ -726,7 +726,7 @@ async def step22_complete(
             """
             SELECT EXISTS (
                 SELECT 1 FROM user_media
-                WHERE user_id = $1 AND media_type = 'photo' AND status = 'approved'
+                WHERE user_id = $1 AND media_type = 'photo' AND status IN ('approved', 'pending')
             )
             """,
             current_user.id,

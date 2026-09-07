@@ -78,18 +78,32 @@ export function setupNotificationListeners(navigate: (name: string, params?: any
       const data = response.notification.request.content.data;
       if (!data) return;
 
-      if (data.type === "chat" && data.match_id) {
+      if ((data.type === "chat" || data.type === "new_message") && (data.match_id || data.chat_id)) {
         navigate("Chat", {
-          matchId: data.match_id,
+          matchId: data.match_id || data.chat_id,
+          chatId: data.chat_id || data.match_id,
           otherUser: {
             id: data.sender_id || "",
             first_name: data.sender_name || "Match",
             photo_url: data.sender_photo || null,
           },
         });
-      } else if (data.type === "match") {
+      } else if (data.type === "match" || data.type === "new_match") {
+        if (data.match_id) {
+          navigate("Chat", {
+            matchId: data.match_id,
+            otherUser: {
+              id: "",
+              first_name: "Match",
+              photo_url: null,
+            },
+          });
+        } else {
+          navigate("MainTabs", { screen: "Likes" });
+        }
+      } else if (data.type === "new_like") {
         navigate("MainTabs", { screen: "Likes" });
-      } else if (data.type === "momentum") {
+      } else if (data.type === "momentum" || data.type === "match_expiring") {
         navigate("MainTabs", { screen: "Chats" });
       }
     } catch {}

@@ -160,12 +160,17 @@ def reap_stale_matches() -> None:
                    SET status     = 'expired',
                        expired_at = NOW()
                  WHERE status IN ('active', 'matched')
-                   AND last_message_at < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
+                   AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                 RETURNING id
                 """
             )
             if expired_ids:
-                log.info("reap_stale_matches: expired %d matches", len(expired_ids))
+                exp_list = [r["id"] for r in expired_ids]
+                await conn.execute(
+                    "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                    exp_list,
+                )
+                log.info("reap_stale_matches: expired %d matches and closed chats", len(expired_ids))
 
             # --- Step 2: warn matches expiring within EXPIRY_WARN_HOURS ---
             warn_ids = await conn.fetch(
@@ -173,7 +178,7 @@ def reap_stale_matches() -> None:
                 SELECT id FROM matches
                 WHERE status IN ('active', 'matched')
                   AND expiry_warned = FALSE
-                  AND last_message_at < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
+                  AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                                                 + INTERVAL '{EXPIRY_WARN_HOURS} hours'
                 LIMIT 500
                 """
