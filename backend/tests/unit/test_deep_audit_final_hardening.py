@@ -810,6 +810,25 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", sql)
         self.assertEqual(args[0], dead_token)
 
+    async def test_25_sms_gateway_downtime_fails_over_to_whatsapp(self):
+        """When SMS gateway returns 503, dispatch_phone_otp automatically fails over to WhatsApp."""
+        from fastapi import HTTPException
+        from app.services.messaging_service import dispatch_phone_otp
+
+        phone = "+919876543210"
+        otp = "123456"
+
+        with patch("app.services.messaging_service.settings.debug", False), \
+             patch("app.services.messaging_service.send_sms_otp", new_callable=AsyncMock) as mock_sms, \
+             patch("app.services.messaging_service.send_whatsapp_otp", new_callable=AsyncMock) as mock_wa:
+            mock_sms.side_effect = HTTPException(status_code=503, detail="SMS gateway down")
+            mock_wa.return_value = None
+
+            # Must not raise 503, must succeed via WhatsApp failover
+            await dispatch_phone_otp(phone, otp, channel="sms")
+            mock_sms.assert_called_once_with(phone, otp)
+            mock_wa.assert_called_once_with(phone, otp)
+
 
 if __name__ == "__main__":
     unittest.main()

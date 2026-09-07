@@ -201,11 +201,23 @@ async def send_email_otp(to_email: str, otp: str) -> None:
 
 
 async def dispatch_phone_otp(phone_number: str, otp: str, channel: str = "sms") -> None:
-    """Dispatches phone OTP via requested channel (sms or whatsapp)."""
+    """Dispatches phone OTP via requested channel (sms or whatsapp) with automatic gateway failover."""
     if channel.lower() == "whatsapp":
         await send_whatsapp_otp(phone_number, otp)
     else:
-        await send_sms_otp(phone_number, otp)
+        try:
+            await send_sms_otp(phone_number, otp)
+        except HTTPException as exc:
+            # Automatic failover to WhatsApp on SMS gateway downtime / DLT template congestion
+            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE and not settings.debug:
+                log.warning("SMS gateway 503 for %s; attempting automatic WhatsApp OTP failover", _mask_phone(phone_number))
+                try:
+                    await send_whatsapp_otp(phone_number, otp)
+                    log.info("WhatsApp failover succeeded for %s", _mask_phone(phone_number))
+                    return
+                except Exception as fb_err:
+                    log.error("WhatsApp OTP fallback failed for %s: %s", _mask_phone(phone_number), fb_err)
+            raise exc
 
 
 # ---------------------------------------------------------------------------
