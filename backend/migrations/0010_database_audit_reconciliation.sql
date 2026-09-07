@@ -29,4 +29,12 @@ CREATE INDEX IF NOT EXISTS idx_payment_intents_stale
     ON payment_intents (status, created_at)
     WHERE status = 'created';
 
+-- 3. Voice-note schema constraint: single voice note per user (position must be 1)
+ALTER TABLE user_media
+    DROP CONSTRAINT IF EXISTS chk_voice_position_one;
+
+ALTER TABLE user_media
+    ADD CONSTRAINT chk_voice_position_one
+        CHECK (media_type != 'voice' OR position = 1);
+
 COMMIT;

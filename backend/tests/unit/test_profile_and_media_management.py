@@ -20,6 +20,12 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = MagicMock()
 if "redis.asyncio" not in sys.modules:
     sys.modules["redis.asyncio"] = MagicMock()
+if "boto3" not in sys.modules:
+    sys.modules["boto3"] = MagicMock()
+if "botocore" not in sys.modules:
+    sys.modules["botocore"] = MagicMock()
+if "botocore.config" not in sys.modules:
+    sys.modules["botocore.config"] = MagicMock()
 
 from app.models.schemas.user import (
     MediaPositionItem,
@@ -28,7 +34,7 @@ from app.models.schemas.user import (
     UpdatePromptsBody,
     UserProfileResponse,
 )
-from app.routers.media import delete_media, reorder_media
+from app.routers.media import delete_media, reorder_media, request_upload, UploadRequestBody
 from app.routers.users import get_my_prompts, update_my_prompts
 
 
@@ -139,6 +145,49 @@ class TestProfileAndMediaManagement(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         executed_queries = [call[0][0] for call in conn.execute.call_args_list]
         self.assertTrue(any("UPDATE user_media SET position" in q for q in executed_queries))
+        self.assertTrue(any("AND media_type = 'photo'" in q for q in executed_queries))
+
+    @patch("boto3.client")
+    @patch("app.routers.media.sliding_window_rate_limit", new_callable=AsyncMock)
+    async def test_voice_upload_forces_position_one_and_advisory_lock(self, mock_rate_limit, mock_boto3):
+        """Voice note uploads must serialize with advisory lock and force target_position = 1."""
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_url.return_value = "https://s3.quarantine/test"
+        mock_boto3.return_value = mock_s3
+        db = MagicMock()
+        conn = AsyncMock()
+        tx_mock = MagicMock()
+        tx_mock.__aenter__ = AsyncMock(return_value=None)
+        tx_mock.__aexit__ = AsyncMock(return_value=False)
+        conn.transaction = MagicMock(return_value=tx_mock)
+        conn.fetch.return_value = []
+        db.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+        db.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        redis = MagicMock()
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": user_id}
+        # Client tries to send position=4 for voice
+        body = UploadRequestBody(
+            media_type="voice",
+            content_type="audio/mp4",
+            file_size_bytes=500_000,
+            position=4,
+        )
+
+        resp = await request_upload(body, current_user, db, redis)
+        self.assertIsNotNone(resp.media_id)
+
+        # Verify advisory lock was called with hashtext
+        lock_calls = [call for call in conn.execute.call_args_list if "pg_advisory_xact_lock" in call[0][0]]
+        self.assertTrue(len(lock_calls) > 0)
+
+        # Verify target_position inserted was 1, not 4
+        insert_calls = [call for call in conn.execute.call_args_list if "INSERT INTO user_media" in call[0][0]]
+        self.assertTrue(len(insert_calls) > 0)
+        # args are (media_id, user_id, media_type, s3_key, target_position)
+        target_pos_arg = insert_calls[0][0][5]
+        self.assertEqual(target_pos_arg, 1)
 
 
 if __name__ == "__main__":

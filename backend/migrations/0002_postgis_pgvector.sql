@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS user_media (
     duration_seconds NUMERIC(5, 2),
     is_processed  BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, media_type, position)
+    UNIQUE (user_id, media_type, position),
+    CONSTRAINT chk_voice_position_one CHECK (media_type != 'voice' OR position = 1)
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_media_user ON user_media (user_id);

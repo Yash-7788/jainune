@@ -619,6 +619,9 @@ export async function verifyDeviceIntegrity(): Promise<boolean> {
 }
 ```
 
+> [!NOTE]
+> **Client-Side vs Hardware Attestation Boundary**: Client-side heuristics (Frida, test-keys, Cydia) provide deterrence against casual reverse-engineering. Production-grade zero-trust hardware attestation requires integrating the Google Play Integrity API (Android) and Apple DeviceCheck / App Attest (iOS) with backend token verification (`POST /v1/auth/attest`), gated by Google Cloud / Apple Developer enterprise credentials.
+
 ### 9.2 Screen Capture & Screenshot Blocking
 - Android: Set `FLAG_SECURE` on the window instance across all chat and profile review screens:
   ```java

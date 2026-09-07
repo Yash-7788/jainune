@@ -82,7 +82,7 @@ async def request_upload(
 
     Content-type and size constraints are enforced via S3 presigned policy conditions.
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:media:upload:{user_id}", 20, 60, redis)
 
     # Validate content type
@@ -274,7 +274,7 @@ async def get_media_status(
     current_user: CurrentUser,
     db: DBDep,
 ) -> MediaStatusResponse:
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
@@ -340,7 +340,7 @@ async def reorder_media(
         async with conn.transaction():
             for item in body.positions:
                 await conn.execute(
-                    "UPDATE user_media SET position = $1 WHERE id = $2 AND user_id = $3",
+                    "UPDATE user_media SET position = $1 WHERE id = $2 AND user_id = $3 AND media_type = 'photo'",
                     item.position, item.media_id, user_id,
                 )
     return {"success": True, "message": "Photos reordered successfully."}
