@@ -97,11 +97,14 @@ All code logic audits across auth, onboarding, feed, chat, payments, arcade, and
 - ✅ **Run 5: SSRF & Webhook Signature Forgery Tests**: Strict HMAC-SHA256 signature enforcement across webhook ingress with `hmac.compare_digest`, and added `is_safe_public_url` blocking SSRF against loopback, RFC 1918 private subnets, and AWS/cloud metadata endpoints (`169.254.169.254`).
 - ✅ **Run 6: JWT Replay, Token Revocation & Security Headers**: Verified pyjwt algorithm confusion defense (`RS256` only, rejecting `none` and `HS256`), token replay rejection via Redis JTI blacklist, strict CORS allowed origins whitelist, and production security headers (`nosniff`, `DENY`, HSTS, CSP).
 
-### Phase 5: Mobile Real-Device Stress & Native Edge Cases (5–7 Runs)
-- Low-memory terminations during camera capture and photo upload on budget Android devices.
-- Mid-flow permission revokes (location, notifications, camera).
-- App backgrounding / foregrounding during active WebSocket chat or checkout.
-- Seamless network handoffs (Wi-Fi to 4G/5G, flight mode, packet loss).
+### Phase 5: Mobile Real-Device Stress & Native Edge Cases [100% COMPLETE]
+- ✅ **Run 1: Low-Memory Terminations & Camera Capture Heap Pressure**: Implemented `ImagePicker.getPendingResultAsync()` recovery hook on Android in `Step19Photos.tsx` and `EditProfileScreen.tsx` to restore and upload captured photos after Android OS destroys the React Native Activity under camera RAM pressure.
+- ✅ **Run 2: Mid-Flow Permission Revocations**: Added `AppState` active listener in `Step11Location.tsx` to automatically re-evaluate permissions when returning from device settings; wired friendly alerts with direct `Linking.openSettings()` deep links on photo library and location denial.
+- ✅ **Run 3: Active WebSocket Backgrounding & Reconnect**: Hardened `useWebSocket.ts` and `ChatScreen.tsx` to clear heartbeat ping timers and cleanly close sockets (`code: 1000`) on `background` or `inactive` AppState transitions, preventing zombie subscriptions and socket deadlocks, while re-syncing unread message backlogs on `active`.
+- ✅ **Run 4: Seamless Network Handoffs & Offline Packet Loss**: Enhanced `withRetry` in `client.ts` with exponential backoff plus randomized jitter (`0-200ms`) and HTTP 429 retry support to absorb momentary packet drops during Wi-Fi ↔ Cellular handoffs.
+- ✅ **Run 5: Checkout Backgrounding & External UPI Interrupts**: Persisted pending order IDs before Razorpay/UPI redirection in `billingService.ts`; wired `AppState` active listener in `SubscriptionsScreen.tsx` to query `/subscriptions/sync` upon return from external bank/UPI apps (GPay, PhonePe, Paytm), ensuring immediate subscription activation without double billing.
+- ✅ **Run 6: Push Notification Taps from Cold Boot vs Background**: Extracted unified `handleNotificationRouting` and added `Notifications.getLastNotificationResponseAsync()` in `notifications.ts` wired to `AppNavigator.tsx` on `onReady` and mount, ensuring seamless deep-link navigation to chat, matches, and likes whether tapped from cold boot or background.
+- ✅ **Run 7: Font Scaling, Small Screen (320px) & Accessibility Stress**: Upgraded core buttons to dynamic `minHeight: 52, paddingVertical: spacing.sm` with `maxFontSizeMultiplier={1.35}`; scaled OTP box width to 44px to fit 6 digits within 320px screens; wrapped `OnboardingStep.tsx` in a scrollable `ScrollView` container to eliminate button clipping under 200% system accessibility font scaling.
 
 ### Phase 6: Infrastructure, CI/CD & Deployment (3–4 Runs)
 - Docker image minimization and non-root security container execution.

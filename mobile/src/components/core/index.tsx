@@ -50,7 +50,7 @@ export function PrimaryButton({ label, onPress, loading, disabled, style }: Prim
         {loading ? (
           <ActivityIndicator color={colors.white} size="small" />
         ) : (
-          <Text style={styles.primaryLabel}>{label}</Text>
+          <Text style={styles.primaryLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
         )}
       </LinearGradient>
     </TouchableOpacity>
@@ -74,7 +74,7 @@ export function GhostButton({ label, onPress, disabled, style }: GhostButtonProp
       activeOpacity={0.7}
       style={[styles.ghost, style]}
     >
-      <Text style={styles.ghostLabel}>{label}</Text>
+      <Text style={styles.ghostLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
     </TouchableOpacity>
   );
 }
@@ -90,7 +90,7 @@ export function JainuneInput({ label, error, style, ...props }: JainuneInputProp
   const [focused, setFocused] = React.useState(false);
   return (
     <View style={styles.inputWrapper}>
-      {label ? <Text style={styles.inputLabel}>{label}</Text> : null}
+      {label ? <Text style={styles.inputLabel} maxFontSizeMultiplier={1.35}>{label}</Text> : null}
       <RNTextInput
         style={[
           styles.input,
@@ -98,12 +98,13 @@ export function JainuneInput({ label, error, style, ...props }: JainuneInputProp
           error ? styles.inputError : null,
           style,
         ]}
-        placeholderTextColor={colors.mid}
+        maxFontSizeMultiplier={1.35}
+        placeholderTextColor={colors.muted}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         {...props}
       />
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      {error ? <Text style={styles.errorText} maxFontSizeMultiplier={1.35}>{error}</Text> : null}
     </View>
   );
 }
@@ -231,10 +232,11 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   primaryGradient: {
-    height: 52,
+    minHeight: 52,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.sm,
   },
   primaryLabel: {
     ...typography.cta,
@@ -243,13 +245,14 @@ const styles = StyleSheet.create({
 
   // GhostButton
   ghost: {
-    height: 52,
+    minHeight: 52,
     borderRadius: radii.full,
     borderWidth: 1.5,
     borderColor: colors.saffron,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.sm,
   },
   ghostLabel: {
     ...typography.cta,
@@ -279,15 +282,15 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
 
-  // OTP
+  // OTP (optimized for 320px screens and large fonts)
   otpRow: {
     flexDirection: "row",
     justifyContent: "center",
-    gap: spacing.sm,
+    gap: 6,
   },
   otpBox: {
-    width: 48,
-    height: 56,
+    width: 44,
+    height: 52,
     borderRadius: radii.md,
     borderWidth: 1.5,
     borderColor: colors.border,

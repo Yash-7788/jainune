@@ -71,36 +71,38 @@ export async function clearPendingPayment(): Promise<void> {
 export async function syncPendingPayment(): Promise<PurchaseResult> {
   const pending = await getPendingPayment();
   if (pending) {
-    try {
-      const verifyRes = await verifySubscriptionPayment({
-        razorpay_order_id: pending.order_id,
-        razorpay_payment_id: pending.payment_id,
-        razorpay_signature: pending.signature,
-      });
-      await clearPendingPayment();
-      return {
-        success: true,
-        activated: verifyRes.activated,
-        expires_at: verifyRes.expires_at,
-      };
-    } catch {}
-  }
-
-  try {
-    const syncRes = await syncSubscriptionOrder(pending?.order_id);
-    if (syncRes.activated) {
-      await clearPendingPayment();
-      return {
-        success: true,
-        activated: true,
-        expires_at: syncRes.expires_at,
-      };
+    if (pending.payment_id && pending.signature) {
+      try {
+        const verifyRes = await verifySubscriptionPayment({
+          razorpay_order_id: pending.order_id,
+          razorpay_payment_id: pending.payment_id,
+          razorpay_signature: pending.signature,
+        });
+        await clearPendingPayment();
+        return {
+          success: true,
+          activated: verifyRes.activated,
+          expires_at: verifyRes.expires_at,
+        };
+      } catch {}
     }
-  } catch {}
 
-  // Expire stale pending payment records older than 24 hours
-  if (pending && Date.now() - (pending.timestamp || 0) > 86400000) {
-    await clearPendingPayment();
+    try {
+      const syncRes = await syncSubscriptionOrder(pending.order_id);
+      if (syncRes.activated) {
+        await clearPendingPayment();
+        return {
+          success: true,
+          activated: true,
+          expires_at: syncRes.expires_at,
+        };
+      }
+    } catch {}
+
+    // Expire stale pending payment records older than 24 hours
+    if (Date.now() - (pending.timestamp || 0) > 86400000) {
+      await clearPendingPayment();
+    }
   }
 
   return { success: false };
@@ -150,6 +152,15 @@ export async function purchaseSubscription(
   // Pathway 2: Android (Google Play Billing / User Choice Billing / Razorpay alternative)
   try {
     const order = await createSubscriptionOrder(plan.plan_id);
+
+    // Persist pending order ID before launching native UPI / webview
+    await savePendingPayment({
+      order_id: order.order_id,
+      payment_id: "",
+      signature: "",
+      plan_id: plan.plan_id,
+      timestamp: Date.now(),
+    });
 
     if (!RazorpayCheckout || typeof RazorpayCheckout.open !== "function") {
       throw new Error("BILLING_MODULE_UNAVAILABLE");

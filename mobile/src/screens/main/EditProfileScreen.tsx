@@ -26,6 +26,7 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  Linking,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
@@ -194,9 +195,59 @@ export default function EditProfileScreen() {
     }
   };
 
+  const uploadPickedAsset = useCallback(async (asset: ImagePicker.ImagePickerAsset) => {
+    setUploadingPhoto(true);
+    try {
+      const mime = asset.type === "image" ? "image/jpeg" : "image/jpeg";
+      const sizeBytes = asset.fileSize || 1024 * 1024;
+      const presign = await presignUpload(mime, sizeBytes);
+      await uploadToPresignedUrl(presign.upload_url, asset.uri, mime);
+      await addPhoto(presign.media_id);
+      setPhotos((prev) => [
+        ...prev,
+        { id: presign.media_id, url: presign.cdn_url, order: prev.length },
+      ]);
+    } catch (err) {
+      Alert.alert("Upload Failed", extractError(err).message);
+    } finally {
+      setUploadingPhoto(false);
+    }
+  }, []);
+
+  // Android low-memory Activity recreation recovery
+  useEffect(() => {
+    if (Platform.OS === "android") {
+      ImagePicker.getPendingResultAsync()
+        .then((results) => {
+          if (Array.isArray(results)) {
+            for (const res of results) {
+              if ("canceled" in res && !res.canceled && res.assets && res.assets.length > 0) {
+                uploadPickedAsset(res.assets[0]);
+                break;
+              }
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [uploadPickedAsset]);
+
   const handlePickAndUploadPhoto = async () => {
     if (photos.length >= 6) {
       Alert.alert("Maximum Photos", "You can upload up to 6 photos.");
+      return;
+    }
+
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert(
+        "Permission Required",
+        "Photo library access is needed to upload photos. Please grant permission in Settings.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Open Settings", onPress: () => Linking.openSettings() },
+        ]
+      );
       return;
     }
 
@@ -210,30 +261,9 @@ export default function EditProfileScreen() {
 
       if (result.canceled || !result.assets[0]?.uri) return;
 
-      const asset = result.assets[0];
-      setUploadingPhoto(true);
-
-      const mime = asset.type === "image" ? "image/jpeg" : "image/jpeg";
-      const sizeBytes = asset.fileSize || 1024 * 1024;
-
-      // 1. Presign upload URL
-      const presign = await presignUpload(mime, sizeBytes);
-
-      // 2. Upload file directly to S3
-      await uploadToPresignedUrl(presign.upload_url, asset.uri, mime);
-
-      // 3. Register photo in user profile
-      await addPhoto(presign.media_id);
-
-      // Refresh photos
-      setPhotos((prev) => [
-        ...prev,
-        { id: presign.media_id, url: presign.cdn_url, order: prev.length },
-      ]);
+      await uploadPickedAsset(result.assets[0]);
     } catch (err) {
       Alert.alert("Upload Failed", extractError(err).message);
-    } finally {
-      setUploadingPhoto(false);
     }
   };
 

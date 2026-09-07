@@ -4,8 +4,8 @@
  * Opens device settings if permission denied — never shows "coming soon" screen.
  * Then calls /v1/location/verify to check 100km geofence. Waitlist if outside.
  */
-import React, { useState, useEffect } from "react";
-import { View, Text, StyleSheet, Alert } from "react-native";
+import React, { useState, useEffect, useCallback } from "react";
+import { View, Text, StyleSheet, Alert, AppState, AppStateStatus } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import * as Location from "expo-location";
@@ -38,19 +38,32 @@ export default function Step11Screen() {
     accuracyMeters: number | null;
   } | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const { status } = await Location.getForegroundPermissionsAsync();
-        if (status === "granted") {
-          setPermStatus("granted");
-          fetchPosition();
-        }
-      } catch {
-        // First-time prompt: show prominent disclosure before requesting
+  const checkPermissionAndLocation = useCallback(async () => {
+    try {
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status === "granted") {
+        setPermStatus("granted");
+        fetchPosition();
+      } else if (status === "denied") {
+        setPermStatus("denied");
       }
-    })();
+    } catch {
+      // Non-fatal
+    }
   }, []);
+
+  useEffect(() => {
+    checkPermissionAndLocation();
+
+    // Re-check permissions when returning from device settings
+    const sub = AppState.addEventListener("change", (nextState: AppStateStatus) => {
+      if (nextState === "active") {
+        checkPermissionAndLocation();
+      }
+    });
+
+    return () => sub.remove();
+  }, [checkPermissionAndLocation]);
 
   const requestLocation = async () => {
     setLocStatus("loading");

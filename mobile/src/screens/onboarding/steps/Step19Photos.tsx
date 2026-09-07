@@ -3,7 +3,7 @@
  * Backend: submitStep19(media_ids[]) confirms already-uploaded photos
  * Actual upload uses getPresignedUploadUrl() → PUT to S3 presigned URL
  */
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -12,6 +12,8 @@ import {
   Image,
   ActivityIndicator,
   Alert,
+  Platform,
+  Linking,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { useNavigation } from "@react-navigation/native";
@@ -39,25 +41,10 @@ export default function Step19Screen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
 
-  const pickAndUpload = async () => {
-    if (photos.length >= 6) return;
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== "granted") {
-      Alert.alert("Permission Required", "Allow photo library access to upload photos.");
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [4, 5],
-      quality: 0.8,
-    });
-    if (result.canceled) return;
-
+  const processAndUploadAsset = useCallback(async (asset: ImagePicker.ImagePickerAsset) => {
     setUploading(true);
     setError(null);
     try {
-      const asset = result.assets[0];
       const { media_id, upload_url, cdn_url } = await getPresignedUploadUrl("photo");
       await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg");
       await confirmUpload(media_id);
@@ -67,6 +54,49 @@ export default function Step19Screen() {
     } finally {
       setUploading(false);
     }
+  }, []);
+
+  // Android Activity destruction recovery (budget devices / low memory)
+  useEffect(() => {
+    if (Platform.OS === "android") {
+      ImagePicker.getPendingResultAsync()
+        .then((results) => {
+          if (Array.isArray(results)) {
+            for (const res of results) {
+              if ("canceled" in res && !res.canceled && res.assets && res.assets.length > 0) {
+                processAndUploadAsset(res.assets[0]);
+                break;
+              }
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [processAndUploadAsset]);
+
+  const pickAndUpload = async () => {
+    if (photos.length >= 6) return;
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert(
+        "Permission Required",
+        "Photo library access is needed to upload photos. Please grant permission in Settings.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Open Settings", onPress: () => Linking.openSettings() },
+        ]
+      );
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [4, 5],
+      quality: 0.8,
+    });
+    if (result.canceled || !result.assets || result.assets.length === 0) return;
+
+    await processAndUploadAsset(result.assets[0]);
   };
 
   const removePhoto = (mediaId: string) => {

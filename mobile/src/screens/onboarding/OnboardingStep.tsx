@@ -54,8 +54,8 @@ export default function OnboardingStep({
       </TouchableOpacity>
 
       {/* Title */}
-      <Text style={styles.title}>{title}</Text>
-      {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
+      <Text style={styles.title} maxFontSizeMultiplier={1.35}>{title}</Text>
+      {subtitle ? <Text style={styles.subtitle} maxFontSizeMultiplier={1.35}>{subtitle}</Text> : null}
 
       {/* Step content */}
       <View style={styles.body}>{children}</View>
@@ -70,7 +70,7 @@ export default function OnboardingStep({
         />
         {skipLabel && onSkip ? (
           <TouchableOpacity onPress={onSkip} style={styles.skip}>
-            <Text style={styles.skipText}>{skipLabel}</Text>
+            <Text style={styles.skipText} maxFontSizeMultiplier={1.35}>{skipLabel}</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -84,17 +84,13 @@ export default function OnboardingStep({
     >
       {error && <ErrorToast title={error.title} message={error.message} visible />}
 
-      {scrollable ? (
-        <ScrollView
-          contentContainerStyle={{ flexGrow: 1 }}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {content}
-        </ScrollView>
-      ) : (
-        content
-      )}
+      <ScrollView
+        contentContainerStyle={{ flexGrow: 1 }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {content}
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }

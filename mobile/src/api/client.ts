@@ -170,15 +170,16 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((res) =>
-          setTimeout(res, 500 * Math.pow(2, attempt - 1))
-        );
+        const jitter = Math.floor(Math.random() * 200);
+        const delay = Math.min(4000, 500 * Math.pow(2, attempt - 1) + jitter);
+        await new Promise((res) => setTimeout(res, delay));
       }
       return await fn();
     } catch (err) {
       lastError = err;
       if ((err as Record<string, unknown>)?._sessionExpired) throw err;
-      if (axios.isAxiosError(err) && err.response && err.response.status < 500)
+      // Do not retry 4xx errors except 429 rate limits
+      if (axios.isAxiosError(err) && err.response && err.response.status < 500 && err.response.status !== 429)
         throw err;
     }
   }

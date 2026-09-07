@@ -149,12 +149,18 @@ export function useWebSocket({
     isMounted.current = true;
     connect();
 
-    // Reconnect when app returns from background
+    // Reconnect when app returns from background; teardown on background/inactive
     const subscription = AppState.addEventListener(
       "change",
       (nextState: AppStateStatus) => {
-        if (nextState === "active" && ws.current?.readyState !== WebSocket.OPEN) {
-          connect();
+        if (nextState === "active") {
+          if (ws.current?.readyState !== WebSocket.OPEN) {
+            reconnectAttempts.current = 0;
+            connect();
+          }
+        } else if (nextState === "background" || nextState === "inactive") {
+          cleanup();
+          setStatus("disconnected");
         }
       }
     );

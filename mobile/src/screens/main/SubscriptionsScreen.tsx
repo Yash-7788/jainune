@@ -26,6 +26,8 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  AppState,
+  AppStateStatus,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
@@ -80,7 +82,20 @@ export default function SubscriptionsScreen() {
     syncPendingPayment().then((res) => {
       if (res.activated) fetchStatus();
     }).catch(() => {});
-    return () => disableScreenCaptureProtection();
+
+    // Sync pending payment when returning from external UPI app (GPay / PhonePe / Paytm)
+    const appStateSub = AppState.addEventListener("change", (nextState: AppStateStatus) => {
+      if (nextState === "active") {
+        syncPendingPayment().then((res) => {
+          if (res.activated) fetchStatus();
+        }).catch(() => {});
+      }
+    });
+
+    return () => {
+      disableScreenCaptureProtection();
+      appStateSub.remove();
+    };
   }, []);
 
   const fetchStatus = async () => {

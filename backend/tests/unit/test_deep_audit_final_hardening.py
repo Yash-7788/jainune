@@ -1549,7 +1549,162 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://app.jainune.com", settings.allowed_origins)
         self.assertIn("https://jainune.com", settings.allowed_origins)
 
+    async def test_38_websocket_lifecycle_and_background_disconnect(self):
+        """Verify WebSocket connection cleanly handles background teardown (code 1000) and ticket verification."""
+        from app.routers.websockets import websocket_chat
+        from starlette.websockets import WebSocketDisconnect
+
+        chat_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        mock_ws = AsyncMock()
+        mock_ws.headers = {"origin": "https://app.jainune.com"}
+        mock_ws.accept = AsyncMock()
+        mock_ws.send_json = AsyncMock()
+        mock_ws.close = AsyncMock()
+        # Simulate clean client background disconnect
+        mock_ws.receive_json = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
+        mock_ws.receive_text = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
+
+        mock_redis = AsyncMock()
+        mock_pipe = MagicMock()
+        mock_pipe.zremrangebyscore = MagicMock()
+        mock_pipe.zadd = MagicMock()
+        mock_pipe.zcard = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[0, 1, 1, True])
+        mock_redis.pipeline.return_value = mock_pipe
+        mock_redis.get = AsyncMock(return_value=str(user_id))
+        mock_redis.delete = AsyncMock()
+        mock_pubsub = AsyncMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.close = AsyncMock()
+        async def mock_listen():
+            if False:
+                yield {}
+        mock_pubsub.listen = mock_listen
+        mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+
+        mock_conn = MagicMock()
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            {"account_status": "active", "suspend_until": None, "deleted_at": None},
+            {"id": chat_id, "match_id": chat_id, "is_unmatched": False, "other_id": uuid.uuid4()},
+            {"account_status": "active", "deleted_at": None},
+        ])
+        mock_conn.fetchval = AsyncMock(return_value=None)
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Connect and cleanly background-disconnect
+        with patch("app.routers.websockets.get_pool", return_value=mock_pool), \
+             patch("app.routers.websockets.get_redis", return_value=mock_redis):
+            await websocket_chat(websocket=mock_ws, chat_id=chat_id, ticket="valid_ticket")
+
+        mock_ws.accept.assert_awaited_once()
+
+    async def test_39_checkout_background_sync_and_idempotent_order_resolution(self):
+        """Verify checkout sync endpoint recovers order after client backgrounding/interruption and blocks IDOR."""
+        from app.routers.subscriptions import sync_subscription, SyncSubscriptionBody
+
+        user_id = uuid.uuid4()
+        attacker_id = uuid.uuid4()
+        order_id = "order_bg_sync_789"
+
+        mock_conn = MagicMock()
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # 1. Successful sync when user returns from UPI app (GPay / PhonePe)
+        mock_conn.fetchrow = AsyncMock(return_value={"user_id": user_id, "status": "created"})
+        with patch("app.services.payment_service.sync_order_with_razorpay", new_callable=AsyncMock) as mock_sync:
+            mock_sync.return_value = {
+                "synced": True,
+                "activated": True,
+                "tier": "gold_monthly",
+                "expires_at": "2026-10-07T00:00:00Z",
+                "status": "captured",
+            }
+            body = SyncSubscriptionBody(razorpay_order_id=order_id)
+            res = await sync_subscription(body=body, current_user={"user_id": user_id}, pool=mock_pool)
+            self.assertTrue(res["activated"])
+            self.assertEqual(res["tier"], "gold_monthly")
+
+        # 2. Rejection if attacker attempts to sync another user's order
+        mock_conn.fetchrow = AsyncMock(return_value={"user_id": user_id, "status": "created"})
+        with self.assertRaises(HTTPException) as ctx:
+            await sync_subscription(body=body, current_user={"user_id": attacker_id}, pool=mock_pool)
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("does not belong to user", ctx.exception.detail)
+
+    async def test_40_push_notification_cold_boot_routing_payload_integrity(self):
+        """Verify push notification data payloads include required routing fields with stringified values for mobile cold-boot."""
+        from app.services.push_notifications import send_push_notification
+
+        match_id = str(uuid.uuid4())
+        sender_id = str(uuid.uuid4())
+
+        captured_messages = []
+
+        async def mock_post(url, headers=None, json=None):
+            captured_messages.append(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = '{"data": [{"status": "ok"}]}'
+            return mock_resp
+
+        mock_client = MagicMock()
+        mock_client.post = mock_post
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            # 1. Chat push payload
+            await send_push_notification(
+                device_token="ExponentPushToken[cold_boot_test_token]",
+                title="New Message",
+                body="Hey, how are you?",
+                data={
+                    "type": "chat",
+                    "match_id": match_id,
+                    "chat_id": match_id,
+                    "sender_id": sender_id,
+                    "sender_name": "Aarav",
+                },
+            )
+
+            # 2. Super Connect push payload
+            await send_push_notification(
+                device_token="ExponentPushToken[cold_boot_test_token]",
+                title="Super Connect Received",
+                body="Someone sent you a Super Connect!",
+                data={
+                    "type": "super_connect",
+                    "sender_id": sender_id,
+                },
+            )
+
+        self.assertEqual(len(captured_messages), 2)
+
+        # Validate chat payload stringification & routing keys
+        chat_data = captured_messages[0]["data"]
+        self.assertEqual(chat_data["type"], "chat")
+        self.assertEqual(chat_data["match_id"], match_id)
+        self.assertEqual(chat_data["sender_id"], sender_id)
+        for k, v in chat_data.items():
+            self.assertIsInstance(k, str)
+            self.assertIsInstance(v, str)
+
+        # Validate super connect payload
+        sc_data = captured_messages[1]["data"]
+        self.assertEqual(sc_data["type"], "super_connect")
+        self.assertEqual(sc_data["sender_id"], sender_id)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

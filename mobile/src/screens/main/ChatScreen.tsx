@@ -280,6 +280,28 @@ export default function ChatScreen() {
           reconnectAttempts.current = 0;
           connectWebSocket();
         }
+        loadMessages();
+        triggerMarkRead();
+      } else if (nextState === "background" || nextState === "inactive") {
+        if (pingInterval.current) {
+          clearInterval(pingInterval.current);
+          pingInterval.current = null;
+        }
+        if (reconnectTimer.current) {
+          clearTimeout(reconnectTimer.current);
+          reconnectTimer.current = null;
+        }
+        if (ws.current) {
+          ws.current.onopen = null;
+          ws.current.onmessage = null;
+          ws.current.onerror = null;
+          ws.current.onclose = null;
+          try {
+            ws.current.close(1000, "Background");
+          } catch {}
+          ws.current = null;
+        }
+        setWsConnected(false);
       }
     });
 

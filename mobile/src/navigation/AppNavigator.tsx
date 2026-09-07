@@ -12,7 +12,11 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import * as Linking from "expo-linking";
 import { colors } from "../theme/tokens";
 import { useAuthStore } from "../store/authStore";
-import { registerForPushNotificationsAsync, setupNotificationListeners } from "../services/notifications";
+import {
+  registerForPushNotificationsAsync,
+  setupNotificationListeners,
+  checkInitialNotificationResponse,
+} from "../services/notifications";
 
 // Auth screens
 import SplashScreen from "../screens/auth/SplashScreen";
@@ -240,11 +244,27 @@ export default function AppNavigator() {
         (navigationRef as any).navigate(name, params);
       }
     });
+
+    // Check cold-boot notification response
+    checkInitialNotificationResponse((name, params) => {
+      if (navigationRef.isReady()) {
+        (navigationRef as any).navigate(name, params);
+      }
+    });
+
     return cleanup;
   }, []);
 
   return (
-    <NavigationContainer ref={navigationRef} linking={linking}>
+    <NavigationContainer
+      ref={navigationRef}
+      linking={linking}
+      onReady={() => {
+        checkInitialNotificationResponse((name, params) => {
+          (navigationRef as any).navigate(name, params);
+        });
+      }}
+    >
       {authState === "loading" && <LoadingScreen />}
       {authState === "unauthenticated" && <AuthNavigator />}
       {authState === "onboarding" && <OnboardingNavigator />}

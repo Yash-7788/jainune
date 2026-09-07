@@ -237,3 +237,6 @@ async def send_push_multicast(
     )
     success = sum(1 for r in results if r is True)
     return {"success": success, "failure": len(tokens) - success}
+
+
+send_push_notification = send_push

@@ -70,43 +70,69 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 }
 
 /**
- * Listens for user tapping a push notification and routes to the target screen.
+ * Routes a notification response payload to the appropriate screen.
+ */
+export function handleNotificationRouting(
+  response: Notifications.NotificationResponse,
+  navigate: (name: string, params?: any) => void
+): void {
+  try {
+    const data = response?.notification?.request?.content?.data;
+    if (!data) return;
+
+    if ((data.type === "chat" || data.type === "new_message") && (data.match_id || data.chat_id)) {
+      navigate("Chat", {
+        matchId: data.match_id || data.chat_id,
+        chatId: data.chat_id || data.match_id,
+        otherUser: {
+          id: data.sender_id || "",
+          first_name: data.sender_name || "Match",
+          photo_url: data.sender_photo || null,
+        },
+      });
+    } else if (data.type === "match" || data.type === "new_match") {
+      if (data.match_id) {
+        navigate("Chat", {
+          matchId: data.match_id,
+          otherUser: {
+            id: "",
+            first_name: "Match",
+            photo_url: null,
+          },
+        });
+      } else {
+        navigate("MainTabs", { screen: "Likes" });
+      }
+    } else if (data.type === "new_like" || data.type === "super_connect") {
+      navigate("MainTabs", { screen: "Likes" });
+    } else if (data.type === "momentum" || data.type === "match_expiring") {
+      navigate("MainTabs", { screen: "Chats" });
+    } else if (data.type === "subscription" || data.type === "billing") {
+      navigate("Subscriptions");
+    }
+  } catch {}
+}
+
+/**
+ * Handles cold-boot notification tap when app was completely terminated.
+ */
+export async function checkInitialNotificationResponse(
+  navigate: (name: string, params?: any) => void
+): Promise<void> {
+  try {
+    const response = await Notifications.getLastNotificationResponseAsync();
+    if (response) {
+      handleNotificationRouting(response, navigate);
+    }
+  } catch {}
+}
+
+/**
+ * Listens for user tapping a push notification while app is running or backgrounded.
  */
 export function setupNotificationListeners(navigate: (name: string, params?: any) => void) {
   const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-    try {
-      const data = response.notification.request.content.data;
-      if (!data) return;
-
-      if ((data.type === "chat" || data.type === "new_message") && (data.match_id || data.chat_id)) {
-        navigate("Chat", {
-          matchId: data.match_id || data.chat_id,
-          chatId: data.chat_id || data.match_id,
-          otherUser: {
-            id: data.sender_id || "",
-            first_name: data.sender_name || "Match",
-            photo_url: data.sender_photo || null,
-          },
-        });
-      } else if (data.type === "match" || data.type === "new_match") {
-        if (data.match_id) {
-          navigate("Chat", {
-            matchId: data.match_id,
-            otherUser: {
-              id: "",
-              first_name: "Match",
-              photo_url: null,
-            },
-          });
-        } else {
-          navigate("MainTabs", { screen: "Likes" });
-        }
-      } else if (data.type === "new_like") {
-        navigate("MainTabs", { screen: "Likes" });
-      } else if (data.type === "momentum" || data.type === "match_expiring") {
-        navigate("MainTabs", { screen: "Chats" });
-      }
-    } catch {}
+    handleNotificationRouting(response, navigate);
   });
 
   return () => {
