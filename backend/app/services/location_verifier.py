@@ -69,13 +69,17 @@ def verify_location_anti_spoofing(
     lon: float,
     is_mocked: bool = False,
     accuracy_meters: Optional[float] = None,
+    client_ip: Optional[str] = None,
+    headers: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str | None]:
     """
-    Validates GPS authenticity against client-side spoofing and coordinate anomalies:
+    Validates GPS authenticity against client-side spoofing and server-side network corroboration:
     - Rejects mocked/simulated locations (from mock providers / developer apps).
-    - Rejects impossible coordinate bounds.
-    - Rejects null island coordinates (0.0, 0.0).
+    - Rejects impossible coordinate bounds and null island (0.0, 0.0).
     - Rejects spoofed or wildly inaccurate accuracy readings (> 5000m or <= 0m).
+    - Server-side network corroboration via Cloudflare/edge proxy headers:
+      * Validates origin country matches operational zone country (IN).
+      * Validates claimed GPS is within plausible radius of edge IP geolocation (< 600 km).
     """
     if is_mocked:
         return False, "Mock location detected. Please disable mock location apps or developer options."
@@ -91,6 +95,25 @@ def verify_location_anti_spoofing(
             return False, "Invalid location accuracy reading."
         if accuracy_meters > 5000.0:
             return False, "Location accuracy is too low to verify launch zone."
+
+    # Server-side edge network corroboration
+    if headers:
+        h = {k.lower(): v for k, v in headers.items()}
+        country = h.get("cf-ipcountry") or h.get("x-country-code")
+        if country and country.upper() not in ("IN", "XX", "T1"):
+            return False, f"Network location ({country.upper()}) is outside Jainune active launch zones in India."
+
+        ip_lat_str = h.get("cf-iplatitude")
+        ip_lon_str = h.get("cf-iplongitude")
+        if ip_lat_str and ip_lon_str:
+            try:
+                ip_lat = float(ip_lat_str)
+                ip_lon = float(ip_lon_str)
+                dist_km = haversine_distance_km(lat, lon, ip_lat, ip_lon)
+                if dist_km > 600.0:
+                    return False, f"GPS coordinates conflict with network geolocation ({int(dist_km)} km discrepancy)."
+            except (ValueError, TypeError):
+                pass
 
     return True, None
 

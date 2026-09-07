@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import uuid
 from typing import List, Optional
 
 import asyncpg
 import redis.asyncio as aioredis
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

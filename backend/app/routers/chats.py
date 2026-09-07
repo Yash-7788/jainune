@@ -207,7 +207,8 @@ async def get_messages(
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid cursor.")
             before_row = await conn.fetchrow(
-                "SELECT created_at, id FROM messages WHERE id = $1", before_uuid
+                "SELECT created_at, id FROM messages WHERE id = $1 AND chat_id = $2",
+                before_uuid, actual_chat_id,
             )
             if not before_row:
                 rows = []

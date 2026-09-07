@@ -19,7 +19,7 @@ import json
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
@@ -322,6 +322,7 @@ async def step10_city(
 @router.patch("/step/11", response_model=None)
 async def step11_location(
     body: Step11LocationBody,
+    request: Request,
     current_user: CurrentUser,
     db: DBDep,
     redis: RedisDep,
@@ -335,11 +336,14 @@ async def step11_location(
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
 
+    client_ip = request.client.host if request.client else None
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,
         lon=body.longitude,
         is_mocked=body.is_mocked,
         accuracy_meters=body.accuracy_meters,
+        client_ip=client_ip,
+        headers=dict(request.headers),
     )
     if not valid_gps:
         raise HTTPException(

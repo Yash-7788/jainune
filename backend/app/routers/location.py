@@ -65,11 +65,14 @@ async def verify_location(
     await sliding_window_rate_limit(f"ratelimit:loc_verify:{user_id}", 15, 60, redis)
 
     # 1. Anti-spoofing & integrity gate
+    client_ip = request.client.host if request.client else None
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,
         lon=body.longitude,
         is_mocked=body.is_mocked,
         accuracy_meters=body.accuracy_meters,
+        client_ip=client_ip,
+        headers=dict(request.headers),
     )
     if not valid_gps:
         raise HTTPException(

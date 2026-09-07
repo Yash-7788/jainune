@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_pool
 from app.core.security import sliding_window_rate_limit
-from app.dependencies import get_current_user, get_redis_client
+from app.dependencies import get_current_user, get_redis_client, require_admin
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/arcade", tags=["Arcade"])
@@ -243,19 +243,12 @@ async def get_dilemma_results(
 @router.post("/dilemmas", status_code=status.HTTP_201_CREATED)
 async def create_dilemma(
     body: CreateDilemmaBody,
-    current_user: dict = Depends(get_current_user),
+    admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """Admin-only: create a new dilemma card."""
+    user_id = admin.get("user_id") or admin.get("id")
     async with pool.acquire() as conn:
-        # Verify admin role
-        role = await conn.fetchval(
-            "SELECT role FROM admin_users WHERE user_id = $1",
-            current_user["user_id"],
-        )
-        if role not in ("superadmin", "moderator"):
-            raise HTTPException(status_code=403, detail="Admin access required")
-
         dilemma_id = await conn.fetchval(
             """
             INSERT INTO dilemmas
@@ -268,7 +261,7 @@ async def create_dilemma(
             body.option_a,
             body.option_b,
             body.tags,
-            current_user["user_id"],
+            user_id,
         )
 
     return {"id": dilemma_id, "created": True}

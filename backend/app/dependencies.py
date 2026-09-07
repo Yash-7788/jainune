@@ -9,7 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.database import get_pool
 from app.core.redis import get_redis
-from app.core.security import validate_access_token
+from app.core.security import validate_access_token, sliding_window_rate_limit
 
 _bearer = HTTPBearer()
 
@@ -92,3 +92,43 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[dict, Depends(get_current_user)]
+ 
+ 
+# ── Admin Auth ────────────────────────────────────────────────────────────────
+ 
+async def require_admin(
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    """Verify caller has an admin_users row with role in (superadmin, moderator)."""
+    user_id = current_user.get("user_id") or current_user.get("id")
+    try:
+        redis = get_redis()
+        await sliding_window_rate_limit(f"ratelimit:admin:{user_id}", 120, 60, redis)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    async with pool.acquire() as conn:
+        role = await conn.fetchval(
+            "SELECT role FROM admin_users WHERE user_id = $1",
+            user_id,
+        )
+    if role not in ("superadmin", "moderator"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    current_user["admin_role"] = role
+    return current_user
+
+
+def require_superadmin(admin: dict = Depends(require_admin)) -> dict:
+    if admin.get("admin_role") != "superadmin":
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    return admin
+
+
+AdminUser = Annotated[dict, Depends(require_admin)]
+SuperAdminUser = Annotated[dict, Depends(require_superadmin)]

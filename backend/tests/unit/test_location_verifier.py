@@ -137,6 +137,38 @@ class TestLocationVerifier(unittest.TestCase):
         valid, err = verify_location_anti_spoofing(18.5204, 73.8567, accuracy_meters=-5.0)
         self.assertFalse(valid)
 
+        # Server-side edge check: foreign country IP header must be rejected
+        valid, err = verify_location_anti_spoofing(
+            19.0760, 72.8777,
+            headers={"cf-ipcountry": "US"}
+        )
+        self.assertFalse(valid)
+        self.assertIn("outside Jainune active launch zones in India", err)
+
+        # Server-side edge check: massive GPS vs network IP coordinate mismatch (>600km)
+        valid, err = verify_location_anti_spoofing(
+            19.0760, 72.8777, # Claimed Mumbai
+            headers={
+                "cf-ipcountry": "IN",
+                "cf-iplatitude": "28.6139", # Delhi IP ~1150km away
+                "cf-iplongitude": "77.2090",
+            }
+        )
+        self.assertFalse(valid)
+        self.assertIn("GPS coordinates conflict with network geolocation", err)
+
+        # Server-side edge check: legitimate Indian regional network location passes
+        valid, err = verify_location_anti_spoofing(
+            19.0760, 72.8777, # Mumbai
+            headers={
+                "cf-ipcountry": "IN",
+                "cf-iplatitude": "18.95",
+                "cf-iplongitude": "72.82",
+            }
+        )
+        self.assertTrue(valid)
+        self.assertIsNone(err)
+
     def test_delhi_coordinates_strictly_excluded(self):
         """Delhi coordinates must return False (waitlist gate)."""
         # Connaught Place

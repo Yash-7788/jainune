@@ -26,8 +26,10 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.dependencies import get_current_user
 from app.routers.admin import require_admin
+from app.routers.arcade import create_dilemma, CreateDilemmaBody
+from app.routers.chats import get_messages
 from app.routers.users import block_user, unblock_user
-from app.services.core_people_finder import CorePeopleFinder
+from app.services.core_people_finder import CorePeopleFinder, _get_cached_feed
 
 
 def _make_mock_pool():
@@ -200,6 +202,62 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as ctx:
             await require_admin(current_user={"user_id": user_id}, pool=pool)
         self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_cached_feed_redis_error_logs_and_returns_none(self):
+        """O6: Redis decode failure in _get_cached_feed must log warning and return None without NameError."""
+        redis = AsyncMock()
+        redis.get.return_value = "invalid-json-{"
+        res = await _get_cached_feed(uuid.uuid4(), redis)
+        self.assertIsNone(res)
+
+    async def test_chat_cursor_lookup_scoped_to_chat_id(self):
+        """O8: Message cursor lookup must strictly verify AND chat_id = $2 to prevent oracle cross-chat timestamp leak."""
+        pool, conn = _make_mock_pool()
+        current_user = {"id": str(uuid.uuid4())}
+        chat_id = uuid.uuid4()
+        cursor_id = uuid.uuid4()
+
+        # Mock participant check
+        conn.fetchrow.side_effect = [
+            {"id": chat_id, "user_a_id": uuid.UUID(current_user["id"]), "user_b_id": uuid.uuid4()}, # chat row
+            None, # cursor lookup row
+        ]
+
+        await get_messages(
+            chat_id=chat_id,
+            limit=20,
+            cursor=str(cursor_id),
+            before=None,
+            current_user=current_user,
+            db=pool,
+        )
+
+        # Check cursor query call args
+        cursor_query_calls = [
+            call for call in conn.fetchrow.call_args_list
+            if "SELECT created_at, id FROM messages" in call[0][0]
+        ]
+        self.assertTrue(len(cursor_query_calls) > 0)
+        self.assertIn("AND chat_id = $2", cursor_query_calls[0][0][0])
+        self.assertEqual(cursor_query_calls[0][0][2], chat_id)
+
+    async def test_create_dilemma_with_admin_dependency(self):
+        """O9: create_dilemma consumes require_admin dependency properly."""
+        pool, conn = _make_mock_pool()
+        admin_id = uuid.uuid4()
+        admin_user = {"user_id": admin_id, "admin_role": "moderator"}
+        conn.fetchval.return_value = uuid.uuid4()
+
+        body = CreateDilemmaBody(
+            question_text="Would you prefer early morning samayik or late evening pratikraman?",
+            option_a="Morning samayik",
+            option_b="Evening pratikraman",
+            tags=["rituals", "daily_life"],
+        )
+
+        res = await create_dilemma(body, admin=admin_user, pool=pool)
+        self.assertTrue(res["created"])
+        self.assertIn("INSERT INTO dilemmas", conn.fetchval.call_args[0][0])
 
 
 if __name__ == "__main__":
