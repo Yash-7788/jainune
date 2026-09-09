@@ -42,3 +42,13 @@ desktop.ini
 coverage/
 .nyc_output/
 test-results/
+
+# Cryptographic keys, certs & keystores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets/
+credentials/
