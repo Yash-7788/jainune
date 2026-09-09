@@ -11,7 +11,7 @@ import uuid
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, status, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.security import sliding_window_rate_limit
@@ -28,7 +28,7 @@ _MAX_VOICE_BYTES = 5 * 1024 * 1024    # 5 MB
 _ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
 _ALLOWED_VOICE_CT = {
     "audio/mp4", "audio/mpeg", "audio/ogg", "audio/webm",
-    "audio/m4a", "audio/x-m4a", "audio/aac",
+    "audio/m4a", "audio/x-m4a", "audio/aac", "audio/wav",
 }
 
 
@@ -38,9 +38,9 @@ _ALLOWED_VOICE_CT = {
 
 class UploadRequestBody(BaseModel):
     media_type: Literal["photo", "voice"]
-    content_type: str
-    file_size_bytes: int
-    position: int = 1  # photo ordering slot (1–6)
+    content_type: str = Field(..., max_length=64)
+    file_size_bytes: int = Field(..., ge=1, le=_MAX_PHOTO_BYTES)
+    position: int = Field(1, ge=1, le=6)  # photo ordering slot (1–6)
 
 
 class UploadRequestResponse(BaseModel):
