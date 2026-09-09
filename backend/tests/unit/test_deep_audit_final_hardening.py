@@ -8,9 +8,14 @@ Unit tests for Final Deep Audits:
 """
 
 import asyncio
+import sys
 import unittest
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+
+for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.config", "botocore.exceptions"]:
+    if mod not in sys.modules:
+        sys.modules[mod] = MagicMock()
 
 from fastapi import HTTPException
 
@@ -1532,6 +1537,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         # 3. Security response headers middleware
         from app.main import add_security_headers
         mock_req = MagicMock()
+        mock_req.url.path = "/v1/users/me"
         mock_resp = MagicMock()
         mock_resp.headers = {}
         async def mock_call_next(req):
@@ -1542,6 +1548,18 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.headers.get("X-Frame-Options"), "DENY")
         self.assertIn("max-age=31536000", res.headers.get("Strict-Transport-Security", ""))
         self.assertIn("default-src 'none'", res.headers.get("Content-Security-Policy", ""))
+        self.assertEqual(res.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin")
+        self.assertIn("camera=()", res.headers.get("Permissions-Policy", ""))
+
+        # 3b. Legal page CSP allows inline styles for rendered markdown
+        mock_legal_req = MagicMock()
+        mock_legal_req.url.path = "/legal/privacy"
+        mock_legal_resp = MagicMock()
+        mock_legal_resp.headers = {}
+        async def mock_legal_call(req):
+            return mock_legal_resp
+        res_legal = await add_security_headers(mock_legal_req, mock_legal_call)
+        self.assertIn("default-src 'self'", res_legal.headers.get("Content-Security-Policy", ""))
 
         # 4. CORS origin lock
         from app.core.config import settings
