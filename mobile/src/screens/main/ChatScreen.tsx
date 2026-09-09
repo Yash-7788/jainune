@@ -50,7 +50,7 @@ import {
 } from "../../api/chatApi";
 import { getSubscriptionStatus } from "../../api/profileApi";
 import { extractError } from "../../api/client";
-import { MAX_MESSAGE_LENGTH } from "../../security/inputValidation";
+import { MAX_MESSAGE_LENGTH, validateUuid } from "../../security/inputValidation";
 import ContentModerationSheet, {
   scanMessage,
   DetectedType,
@@ -160,6 +160,11 @@ export default function ChatScreen() {
 
   // Load message history
   const loadMessages = useCallback(async (cursorParam?: string) => {
+    if (!matchId || !validateUuid(matchId)) {
+      setLoading(false);
+      setError({ title: "Invalid Chat", message: "Invalid chat identifier." });
+      return;
+    }
     try {
       const msgs = await getMessages(matchId, cursorParam);
       if (msgs.length < 30) setHasMore(false);
@@ -185,6 +190,7 @@ export default function ChatScreen() {
 
   // WebSocket connection with clean teardown, exponential backoff, and max 5 attempts
   const connectWebSocket = useCallback(async () => {
+    if (!matchId || !validateUuid(matchId)) return;
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;

@@ -139,14 +139,23 @@ export function scanMessage(text: string): MessageScanResult {
   return { safe: detections.length === 0, detections };
 }
 
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function validateUuid(val: string): boolean {
+  return UUID_RE.test(val.trim());
+}
+
+export const XSS_INJECTION_RE =
+  /<\s*(?:script|iframe|object|embed|svg|img|body|link|style)\b|javascript:|vbscript:|data:text\/html|\bon\w+\s*=/i;
+
 export function validateMessage(text: string): { valid: boolean; error?: string; scan?: MessageScanResult } {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { valid: false, error: "Message cannot be empty." };
   if (trimmed.length > MAX_MESSAGE_LENGTH) {
     return { valid: false, error: `Message too long (max ${MAX_MESSAGE_LENGTH} chars).` };
   }
-  // HTML/script injection
-  if (/<script|<iframe|javascript:/i.test(trimmed)) {
+  // HTML/script injection and XSS vectors
+  if (XSS_INJECTION_RE.test(trimmed)) {
     return { valid: false, error: "Message contains invalid content." };
   }
   const scan = scanMessage(trimmed);
