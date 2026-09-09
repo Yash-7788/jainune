@@ -28,5 +28,17 @@ yarn-error.log*
 # OS & Editor
 .DS_Store
 Thumbs.db
+desktop.ini
 .vscode/
 .idea/
+*.swp
+*.bak
+
+# Temporary & Test artifacts
+*.tmp
+*.temp
+*.cache/
+*.log
+coverage/
+.nyc_output/
+test-results/

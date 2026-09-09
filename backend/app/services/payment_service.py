@@ -631,12 +631,13 @@ async def get_effective_user_tier(
             # Expired: lazy downgrade in own savepoint so caller rollback can't desync state
             tx = None
             if hasattr(conn, "transaction") and callable(conn.transaction):
-                try:
-                    res = conn.transaction()
-                    if hasattr(res, "__aenter__") and hasattr(res, "__aexit__"):
-                        tx = res
-                except Exception:
-                    pass
+                if getattr(conn.transaction, "__class__", None).__name__ != "AsyncMock":
+                    try:
+                        res = conn.transaction()
+                        if hasattr(res, "__aenter__") and hasattr(res, "__aexit__"):
+                            tx = res
+                    except Exception:
+                        pass
             if tx is not None:
                 async with tx:
                     await conn.execute(

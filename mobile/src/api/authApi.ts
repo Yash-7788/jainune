@@ -34,6 +34,7 @@ export function sanitizeOAuthToken(token: string): string {
 export function sanitizeName(name: string): string {
   return name
     .trim()
+    // eslint-disable-next-line no-control-regex
     .replace(/[<>'"\u0000-\u001f]/g, "")
     .slice(0, 64);
 }

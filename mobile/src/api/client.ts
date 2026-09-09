@@ -77,7 +77,7 @@ function createClient(baseURL: string): AxiosInstance {
   });
 }
 
-let _client = createClient(SERVER_URLS[0]);
+const _client = createClient(SERVER_URLS[0]);
 let _isRefreshing = false;
 let _refreshQueue: Array<(token: string | null) => void> = [];
 

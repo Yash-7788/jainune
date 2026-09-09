@@ -51,8 +51,8 @@ export function validateOtp(raw: string): { valid: boolean; error?: string } {
  * Allows Unicode letters (Hindi, Gujarati, etc.), hyphens, spaces.
  * Blocks SQL injection chars, HTML injection, command injection.
  */
-const NAME_ALLOWED_RE = /^[\p{L}\p{M}' \-]{1,50}$/u;
-const INJECTION_RE = /[<>'"`;\\|&${}()\[\]]/;
+const NAME_ALLOWED_RE = /^[\p{L}\p{M}' -]{1,50}$/u;
+const INJECTION_RE = /[<>'"`;\\|&${}()[\]]/;
 
 export function validateName(raw: string): { valid: boolean; error?: string } {
   const trimmed = raw.trim();
@@ -76,13 +76,13 @@ export const PII_PATTERNS: { name: string; re: RegExp; isCritical: boolean }[] =
   {
     name: "phone_number",
     // Indian mobile: 10 digits, optional spaces/dashes between, optional +91
-    re: /(?:\+?91[\s\-]?)?[6-9]\d{3}[\s\-]?\d{3}[\s\-]?\d{4}/,
+    re: /(?:\+?91[\s-]?)?[6-9]\d{3}[\s-]?\d{3}[\s-]?\d{4}/,
     isCritical: true,
   },
   {
     name: "phone_spaced_evasion",
     // Evasion: "9 8 7 6 5 4 3 2 1 0" or "9-8-7-6-5-4-3-2-1-0"
-    re: /[6-9](?:[\s\-]\d){9}/,
+    re: /[6-9](?:[\s-]\d){9}/,
     isCritical: true,
   },
   {
@@ -102,7 +102,7 @@ export const PII_PATTERNS: { name: string; re: RegExp; isCritical: boolean }[] =
   },
   {
     name: "email_address",
-    re: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/,
+    re: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/,
     isCritical: true,
   },
   {
@@ -223,7 +223,7 @@ export function validatePaymentResponse(obj: unknown): obj is {
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 
-const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const EMAIL_RE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export function validateEmail(raw: string): { valid: boolean; error?: string } {
   const trimmed = raw.trim().toLowerCase();

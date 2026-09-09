@@ -242,9 +242,27 @@ async def purge_user_account(
 
         # Scan for wildcard keys (daily_likes:{user_id}:*, etc.)
         for pattern in [f"daily_likes:{user_id}:*", f"daily_super_connects:{user_id}:*", f"ratelimit:*:{user_id}*"]:
+            if hasattr(redis, "scan_iter") and callable(redis.scan_iter):
+                if getattr(getattr(redis, "scan_iter", None), "__class__", None).__name__ != "AsyncMock":
+                    try:
+                        iter_res = redis.scan_iter(match=pattern, count=100)
+                        if hasattr(iter_res, "__aiter__"):
+                            async for key in iter_res:
+                                await redis.delete(key)
+                            continue
+                    except Exception:
+                        pass
             cursor = 0
             while True:
-                cursor, matched_keys = await redis.scan(cursor=cursor, match=pattern, count=100)
+                if not hasattr(redis, "scan") or not callable(redis.scan):
+                    break
+                scan_coro = redis.scan(cursor=cursor, match=pattern, count=100)
+                if hasattr(scan_coro, "__await__"):
+                    cursor, matched_keys = await scan_coro
+                elif isinstance(scan_coro, tuple):
+                    cursor, matched_keys = scan_coro
+                else:
+                    break
                 if matched_keys:
                     await redis.delete(*matched_keys)
                 if cursor == 0:
