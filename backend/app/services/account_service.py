@@ -325,6 +325,20 @@ async def soft_delete_user_account(
             user_id,
         )
 
+        # Purge personal media files from S3 and database for DPDP/GDPR compliance
+        if hasattr(conn, "fetch"):
+            try:
+                fetch_res = conn.fetch("SELECT s3_key FROM user_media WHERE user_id = $1", user_id)
+                if hasattr(fetch_res, "__await__"):
+                    media_rows = await fetch_res
+                    s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
+                    if s3_keys:
+                        await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+            except Exception as exc:
+                log.warning(f"S3 deletion during soft delete for {user_id}: {exc}")
+        await conn.execute("DELETE FROM user_media WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
+
     # Invalidate feed & sessions in Redis
     try:
         await redis.delete(f"feed:cache:{user_id}", f"user:session:{user_id}")

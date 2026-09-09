@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -228,6 +228,16 @@ class PromptItem(BaseModel):
     prompt_key: str = Field(..., max_length=64)
     response_text: str = Field(..., min_length=5, max_length=200)
     position: int = Field(..., ge=1, le=3)
+
+    @field_validator("response_text", mode="before")
+    @classmethod
+    def sanitize_response(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", v.strip())
+            cleaned = re.sub(r"<\s*script[^>]*>.*?<\s*/\s*script\s*>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+            cleaned = re.sub(r"[<>]", "", cleaned)
+            return cleaned
+        return v
 
 
 class Step18PromptsBody(BaseModel):

@@ -204,10 +204,15 @@ function normalizeResponse<T>(data: any): ApiResponse<T> {
 
 export async function apiPost<T = unknown>(
   path: string,
-  body?: unknown
+  body?: unknown,
+  idempotencyKey?: string
 ): Promise<ApiResponse<T>> {
   return withRetry(async () => {
-    const resp = await _client.post<ApiResponse<T>>(path, body);
+    const config: AxiosRequestConfig = {};
+    if (idempotencyKey) {
+      config.headers = { "X-Idempotency-Key": idempotencyKey };
+    }
+    const resp = await _client.post<ApiResponse<T>>(path, body, config);
     return normalizeResponse<T>(resp.data);
   });
 }
