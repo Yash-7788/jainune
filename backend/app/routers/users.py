@@ -59,6 +59,17 @@ class UpdateProfileBody(BaseModel):
     fcm_token: Optional[str] = Field(None, max_length=256)
     model_config = {"extra": "forbid"}
 
+    @field_validator("first_name", "bio", "job_title", "company", "education", "city", "state", mode="before")
+    @classmethod
+    def sanitize_text_fields(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            import re
+            cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", v.strip())
+            cleaned = re.sub(r"<\s*script[^>]*>.*?<\s*/\s*script\s*>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+            cleaned = re.sub(r"[<>]", "", cleaned)
+            return cleaned
+        return v
+
 
 # ---------------------------------------------------------------------------
 # Subscription tier limits

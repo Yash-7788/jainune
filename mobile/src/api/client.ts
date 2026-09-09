@@ -64,6 +64,10 @@ export async function getRefreshToken(): Promise<string | null> {
   return SecureStore.getItemAsync(SECURE_KEYS.REFRESH_TOKEN);
 }
 
+export async function getUserId(): Promise<string | null> {
+  return SecureStore.getItemAsync(SECURE_KEYS.USER_ID);
+}
+
 // ── Axios instance factory ────────────────────────────────────────────────────
 
 function createClient(baseURL: string): AxiosInstance {

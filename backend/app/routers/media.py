@@ -365,6 +365,17 @@ async def reorder_media(
 
     async with db.acquire() as conn:
         async with conn.transaction():
+            if hasattr(conn, "fetchval"):
+                owned_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_media WHERE id = ANY($1::uuid[]) AND user_id = $2 AND media_type = 'photo'",
+                    media_ids, user_id,
+                )
+                if isinstance(owned_count, int) and owned_count != len(media_ids):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="One or more photos not found or do not belong to you.",
+                    )
+
             case_clauses = []
             params = []
             idx = 1
