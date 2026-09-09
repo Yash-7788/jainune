@@ -67,7 +67,16 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "X-Idempotency-Key"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Idempotency-Key",
+        "X-Store-Webhook-Token",
+        "X-Razorpay-Signature",
+        "X-Turnstile-Token",
+        "X-Client-Platform",
+        "X-App-Version",
+    ],
 )
 
 
