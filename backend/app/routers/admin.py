@@ -74,8 +74,8 @@ class RejectMediaBody(BaseModel):
 
 @router.get("/users")
 async def list_users(
-    status_filter: Optional[str] = Query(None, alias="status"),
-    search: Optional[str] = Query(None, description="Search by phone or name"),
+    status_filter: Optional[str] = Query(None, alias="status", pattern="^(active|suspended|banned|pending_review)$"),
+    search: Optional[str] = Query(None, max_length=64, description="Search by phone or name"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     admin: dict = Depends(require_admin),
@@ -85,17 +85,23 @@ async def list_users(
     conditions = ["account_status != 'deleted'"]
     params: list = []
 
-    if status_filter:
-        params.append(status_filter)
+    status_filter_val = status_filter if isinstance(status_filter, str) else None
+    search_val = search if isinstance(search, str) else None
+    limit_val = limit if isinstance(limit, int) else getattr(limit, "default", 25)
+    offset_val = offset if isinstance(offset, int) else getattr(offset, "default", 0)
+
+    if status_filter_val:
+        params.append(status_filter_val)
         conditions.append(f"account_status = ${len(params)}")
 
-    if search:
-        params.append(f"%{search}%")
+    if search_val:
+        escaped = search_val.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
         n = len(params)
         conditions.append(f"(first_name ILIKE ${n} OR phone_number ILIKE ${n})")
 
     where = " AND ".join(conditions)
-    params.extend([limit, offset])
+    params.extend([limit_val, offset_val])
 
     query = f"""
         SELECT id, phone_number, first_name, account_status,
@@ -124,8 +130,8 @@ async def list_users(
     return {
         "users": users_list,
         "total": total,
-        "limit": limit,
-        "offset": offset,
+        "limit": limit_val,
+        "offset": offset_val,
     }
 
 

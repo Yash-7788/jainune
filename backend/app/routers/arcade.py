@@ -472,7 +472,7 @@ async def roll_lucky_dice(
     (SUBSCRIPTION_SPEC.md §4.3: Lucky Match Dice Roll)
     """
     await sliding_window_rate_limit(f"ratelimit:arcade:roll:{current_user['user_id']}", 30, 60, redis)
-    import random
+    import secrets
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Concurrency lock on user arcade wallet to serialize burst requests
@@ -505,7 +505,8 @@ async def roll_lucky_dice(
                 current_user["user_id"],
             )
 
-    roll_outcome = [random.randint(1, 6), random.randint(1, 6)]
+    sys_rand = secrets.SystemRandom()
+    roll_outcome = [sys_rand.randint(1, 6), sys_rand.randint(1, 6)]
     return {
         "success": True,
         "action": "dice_roll",

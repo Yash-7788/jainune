@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatThread(BaseModel):
@@ -35,11 +35,11 @@ class ChatMessage(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    message_type: str = "text"
-    type: Optional[str] = None
-    content: Optional[str] = None
-    media_url: Optional[str] = None
-    media_id: Optional[str] = None
+    message_type: str = Field("text", max_length=32)
+    type: Optional[str] = Field(None, max_length=32)
+    content: Optional[str] = Field(None, max_length=2000)
+    media_url: Optional[str] = Field(None, max_length=1024)
+    media_id: Optional[str] = Field(None, max_length=128)
     user_disclaimer_approved: bool = False
 
     def validate_content(self) -> None:
@@ -50,7 +50,7 @@ class SendMessageRequest(BaseModel):
         if self.message_type in ("photo", "image") and self.media_url:
             self.message_type = "photo"
 
-        if self.message_type == "text" and not self.content:
+        if self.message_type == "text" and not (self.content and self.content.strip()):
             raise ValueError("content required for text messages")
         if self.message_type in ("image", "photo", "voice", "gif") and not self.media_url:
             raise ValueError("media_url required for media messages")

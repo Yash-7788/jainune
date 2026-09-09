@@ -306,7 +306,10 @@ async def send_message(
             detail="This chat has expired.",
         )
 
-    body.validate_content()
+    try:
+        body.validate_content()
+    except ValueError as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err))
 
     other_id = chat["participant_2_id"] if chat["participant_1_id"] == user_id else chat["participant_1_id"]
 
