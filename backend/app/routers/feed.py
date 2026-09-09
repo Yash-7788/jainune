@@ -110,6 +110,10 @@ async def get_daily_compatible(
     )
     locked_until = midnight_ist.isoformat()
 
+    if candidate and isinstance(candidate, dict):
+        candidate.pop("_behavioral_affinity", None)
+        candidate.pop("_cultural_score", None)
+
     return DailyCompatibleResponse(
         candidate=candidate,
         pairing_algorithm=candidate.get("pairing_algorithm", "brre_fallback") if candidate else "none",
