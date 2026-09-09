@@ -74,6 +74,17 @@ def _status(step: int, completed: bool, hint: str | None = None) -> dict:
     }
 
 
+_ALLOWED_USER_COLUMNS = {
+    "first_name", "date_of_birth", "gender", "show_me", "looking_for",
+    "dietary_strictness", "eats_root_vegetables", "eats_onion_garlic",
+    "community_sect", "paryushan_mode", "city", "state", "location",
+    "max_distance_km", "open_to_relocation", "height_cm", "job_title",
+    "company", "education", "bio", "consent_core_matchmaking",
+    "consent_family_contact", "consent_relocation", "consent_marketing",
+    "onboarding_step", "onboarding_completed", "account_status",
+}
+
+
 async def _update_user(
     conn,
     user_id: uuid.UUID,
@@ -83,6 +94,9 @@ async def _update_user(
     """Build and execute a parameterized UPDATE for the given fields + step."""
     if not fields:
         return
+    for col in fields.keys():
+        if col not in _ALLOWED_USER_COLUMNS:
+            raise ValueError(f"Unauthorized column in user update: {col}")
     set_clauses = ", ".join(
         f"{col} = ${i + 1}" for i, col in enumerate(fields.keys())
     )

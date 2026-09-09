@@ -51,7 +51,7 @@ def _delete_s3_keys_sync(s3_keys: list[str]) -> None:
         try:
             s3.delete_object(Bucket=settings.aws_s3_production_bucket, Key=key)
         except ClientError as ce:
-            log.debug(f"Could not delete {key} from prod bucket: {ce}")
+            log.debug("Could not delete %s from prod bucket: %s", key, ce)
         except Exception:
             pass
 
@@ -60,7 +60,7 @@ def _delete_s3_keys_sync(s3_keys: list[str]) -> None:
             quarantine_key = key.replace("media/", "uploads/")
             s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
         except ClientError as ce:
-            log.debug(f"Could not delete {quarantine_key} from quarantine bucket: {ce}")
+            log.debug("Could not delete %s from quarantine bucket: %s", quarantine_key, ce)
         except Exception:
             pass
 
@@ -335,7 +335,7 @@ async def soft_delete_user_account(
                     if s3_keys:
                         await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
             except Exception as exc:
-                log.warning(f"S3 deletion during soft delete for {user_id}: {exc}")
+                log.warning("S3 deletion during soft delete for %s: %s", user_id, exc)
         await conn.execute("DELETE FROM user_media WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
 

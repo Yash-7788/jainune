@@ -178,11 +178,16 @@ async def vote_on_dilemma(
                 return {"already_voted": True, "choice": existing_choice or body.choice}
 
             # Atomically update denormalized counter
-            col = "total_votes_a" if body.choice == "A" else "total_votes_b"
-            await conn.execute(
-                f"UPDATE dilemmas SET {col} = {col} + 1 WHERE id = $1",
-                dilemma_id,
-            )
+            if body.choice == "A":
+                await conn.execute(
+                    "UPDATE dilemmas SET total_votes_a = total_votes_a + 1 WHERE id = $1",
+                    dilemma_id,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE dilemmas SET total_votes_b = total_votes_b + 1 WHERE id = $1",
+                    dilemma_id,
+                )
 
     return {"voted": True, "choice": body.choice}
 
