@@ -122,11 +122,8 @@ def verify_bot_integrity(
                 break
     ua = str(ua).strip()
 
-    # 2. Missing or suspicious User-Agent
-    if not ua:
-        return True, "Missing User-Agent header"
-
-    if _RE_BOT_UA.search(ua):
+    # 2. Suspicious or automated User-Agent detection
+    if ua and _RE_BOT_UA.search(ua):
         return True, f"Automated traffic / bot detected ({ua})"
 
     # 3. Turnstile token verification
