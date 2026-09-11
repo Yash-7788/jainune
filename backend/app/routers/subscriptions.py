@@ -426,15 +426,19 @@ async def razorpay_webhook(
         from app.core.redis import get_redis
         r = None
         order_lock_key = f"lock:payment:order:{order_id}" if order_id else None
+        proc_lock_key = f"lock:payment:proc:{payment_id}" if payment_id else None
         order_lock_acquired = True
+        proc_lock_acquired = True
         try:
             r = get_redis()
             if payment_id:
-                processed = await r.set(f"payment:processed:{payment_id}", "1", nx=True, ex=86400)
-                if not processed:
+                if await r.get(f"payment:processed:{payment_id}"):
                     return {"received": True, "status": "already_processed"}
+                proc_lock_acquired = await r.set(proc_lock_key, "1", nx=True, ex=30)
+                if not proc_lock_acquired:
+                    return {"received": True, "status": "lock_busy"}
             if order_lock_key:
-                order_lock_acquired = await r.set(order_lock_key, "1", nx=True, ex=15)
+                order_lock_acquired = await r.set(order_lock_key, "1", nx=True, ex=30)
                 if not order_lock_acquired:
                     return {"received": True, "status": "lock_busy"}
         except Exception:
@@ -442,13 +446,21 @@ async def razorpay_webhook(
 
         try:
             await payment_service.process_payment_captured(event, pool)
+            if r and payment_id:
+                try:
+                    await r.set(f"payment:processed:{payment_id}", "1", ex=86400)
+                except Exception:
+                    pass
         except ValueError as exc:
             log.error("Payment validation error on webhook: %s", exc)
             raise HTTPException(status_code=400, detail=str(exc))
         finally:
-            if r and order_lock_key and order_lock_acquired:
+            if r:
                 try:
-                    await r.delete(order_lock_key)
+                    if proc_lock_key and proc_lock_acquired:
+                        await r.delete(proc_lock_key)
+                    if order_lock_key and order_lock_acquired:
+                        await r.delete(order_lock_key)
                 except Exception:
                     pass
     elif event_name in ("payment.refunded", "refund.processed", "refund.created"):

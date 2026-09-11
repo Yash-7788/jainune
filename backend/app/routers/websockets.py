@@ -99,11 +99,15 @@ async def websocket_chat(
             return
 
         ticket_key = f"ws:ticket:{ticket}"
-        uid_val = await redis.get(ticket_key)
+        try:
+            uid_val = await redis.getdel(ticket_key)
+        except Exception:
+            _GETDEL_LUA = "local val = redis.call('GET', KEYS[1]); if val then redis.call('DEL', KEYS[1]) end; return val"
+            uid_val = await redis.eval(_GETDEL_LUA, 1, ticket_key)
+
         if not uid_val:
             await websocket.close(code=4001, reason="Invalid or expired ticket.")
             return
-        await redis.delete(ticket_key)  # Single-use guarantee
         raw_uid = uid_val.decode() if isinstance(uid_val, bytes) else uid_val
         user_id = uuid.UUID(raw_uid)
     except Exception:
@@ -181,6 +185,12 @@ async def websocket_chat(
         sub_channels.add(f"chat:{row['match_id']}")
     await pubsub.subscribe(*sub_channels)
 
+    presence_key = f"presence:chat:{real_chat_id}:{user_id}"
+    try:
+        await redis.set(presence_key, "1", ex=75)
+    except Exception:
+        pass
+
     # ── 5. Concurrent tasks ──────────────────────────────────────────────────
 
     async def _producer() -> None:
@@ -191,6 +201,9 @@ async def websocket_chat(
                     continue
                 try:
                     data = json.loads(raw_msg["data"])
+                    if isinstance(data, dict) and data.get("type") == "chat_closed":
+                        await websocket.close(code=4003, reason=f"Chat closed: {data.get('reason', 'unmatched')}")
+                        break
                     await asyncio.wait_for(websocket.send_json(data), timeout=5.0)
                 except (asyncio.TimeoutError, Exception):
                     break
@@ -210,6 +223,11 @@ async def websocket_chat(
 
                 if not isinstance(data, dict):
                     continue
+
+                try:
+                    await redis.set(presence_key, "1", ex=75)
+                except Exception:
+                    pass
 
                 msg_type = data.get("type", "")
                 if msg_type == "ping":
@@ -250,6 +268,10 @@ async def websocket_chat(
             await asyncio.gather(*pending, return_exceptions=True)
     finally:
         # ── 6. Cleanup ───────────────────────────────────────────────────────
+        try:
+            await redis.delete(presence_key)
+        except Exception:
+            pass
         try:
             await pubsub.unsubscribe(*sub_channels)
         except Exception:

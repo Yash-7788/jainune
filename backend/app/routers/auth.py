@@ -26,7 +26,8 @@ from app.core.security import (
     validate_access_token,
     verify_otp,
 )
-from app.dependencies import CurrentUser, DBDep, RedisDep
+from app.core.redis import get_redis
+from app.dependencies import CurrentUser, CurrentUserForLogout, DBDep, RedisDep
 from app.core.responses import err, ok
 from app.models.schemas.auth import (
     AccessTokenResponse,
@@ -176,8 +177,8 @@ async def _issue_token_response(
             )
             if hasattr(res, "__await__"):
                 await res
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Failed to record session replacement state in Redis: %s", e)
 
     return ok(TokenResponse(
         user_id=str(user_id),
@@ -633,26 +634,36 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
         )
         is_new_user = row is None
         if is_new_user:
-            if email:
+            try:
+                if email:
+                    user_id = await conn.fetchval(
+                        """
+                        INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
+                        VALUES ($1, $2, $3, TRUE, 'google')
+                        ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
+                        RETURNING id
+                        """,
+                        str(google_sub), email, name,
+                    )
+                else:
+                    user_id = await conn.fetchval(
+                        """
+                        INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
+                        VALUES ($1, $2, TRUE, 'google')
+                        ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
+                        RETURNING id
+                        """,
+                        str(google_sub), name,
+                    )
+            except Exception:
+                # Concurrent login or existing google_id under different email
                 user_id = await conn.fetchval(
-                    """
-                    INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
-                    VALUES ($1, $2, $3, TRUE, 'google')
-                    ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
-                    RETURNING id
-                    """,
-                    str(google_sub), email, name,
+                    "SELECT id FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
+                    str(google_sub), email,
                 )
-            else:
-                user_id = await conn.fetchval(
-                    """
-                    INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
-                    VALUES ($1, $2, TRUE, 'google')
-                    ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
-                    RETURNING id
-                    """,
-                    str(google_sub), name,
-                )
+                if not user_id:
+                    raise
+                is_new_user = False
             row = await conn.fetchrow(
                 "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
                 user_id,
@@ -720,26 +731,36 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
         )
         is_new_user = row is None
         if is_new_user:
-            if email:
+            try:
+                if email:
+                    user_id = await conn.fetchval(
+                        """
+                        INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
+                        VALUES ($1, $2, $3, TRUE, 'apple')
+                        ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
+                        RETURNING id
+                        """,
+                        str(apple_sub), email, first_name,
+                    )
+                else:
+                    user_id = await conn.fetchval(
+                        """
+                        INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
+                        VALUES ($1, $2, TRUE, 'apple')
+                        ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
+                        RETURNING id
+                        """,
+                        str(apple_sub), first_name,
+                    )
+            except Exception:
+                # Concurrent login or existing apple_id under different email
                 user_id = await conn.fetchval(
-                    """
-                    INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
-                    VALUES ($1, $2, $3, TRUE, 'apple')
-                    ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
-                    RETURNING id
-                    """,
-                    str(apple_sub), email, first_name,
+                    "SELECT id FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
+                    str(apple_sub), email,
                 )
-            else:
-                user_id = await conn.fetchval(
-                    """
-                    INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
-                    VALUES ($1, $2, TRUE, 'apple')
-                    ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
-                    RETURNING id
-                    """,
-                    str(apple_sub), first_name,
-                )
+                if not user_id:
+                    raise
+                is_new_user = False
             row = await conn.fetchrow(
                 "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
                 user_id,
@@ -778,9 +799,6 @@ def _unpack_grace_payload(raw_val: bytes | str) -> dict | None:
             ).hexdigest()
             if hmac.compare_digest(wrapper["sig"], expected_sig):
                 return wrapper["data"]
-            return None
-        if isinstance(wrapper, dict) and "access_token" in wrapper:
-            return wrapper
         return None
     except Exception:
         return None
@@ -928,7 +946,7 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
 
 @router.post("/logout", summary="Logout and invalidate token session")
 async def logout_endpoint(
-    current_user: CurrentUser,
+    current_user: CurrentUserForLogout,
     db: DBDep,
     redis: RedisDep,
     credentials: HTTPAuthorizationCredentials = Security(_bearer),

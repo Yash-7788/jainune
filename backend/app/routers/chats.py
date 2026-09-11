@@ -467,11 +467,13 @@ async def send_message(
     for ch in channels:
         await redis.publish(ch, payload_str)
 
-    # Dispatch FCM push notification to recipient
+    # Dispatch FCM push notification to recipient only if not actively in this chat
     try:
-        from app.workers.notification_worker import notify_new_message
-        preview_text = msg.content[:80] if msg.content else "Sent a media attachment"
-        notify_new_message.delay(str(actual_chat_id), str(user_id), preview_text)
+        recipient_active = await redis.get(f"presence:chat:{actual_chat_id}:{other_id}")
+        if not recipient_active:
+            from app.workers.notification_worker import notify_new_message
+            preview_text = msg.content[:80] if msg.content else "Sent a media attachment"
+            notify_new_message.delay(str(actual_chat_id), str(user_id), preview_text)
     except Exception:
         pass
 
@@ -550,5 +552,16 @@ async def unmatch_chat(
     # Invalidate feed caches immediately
     await redis.delete(f"feed:cache:{user_id}")
     await redis.delete(f"feed:cache:{other_id}")
+
+    # Evict active WebSocket sessions over Redis
+    try:
+        eviction_payload = json.dumps({"type": "chat_closed", "reason": "unmatched"})
+        channels = {f"chat:{actual_chat_id}", f"chat:{chat_id}"}
+        if chat.get("match_id"):
+            channels.add(f"chat:{chat['match_id']}")
+        for ch in channels:
+            await redis.publish(ch, eviction_payload)
+    except Exception:
+        pass
 
     return {"success": True, "message": "Successfully unmatched. Chat thread locked."}

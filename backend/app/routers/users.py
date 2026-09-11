@@ -709,6 +709,16 @@ async def block_user(
                 """,
                 blocker_id, user_id,
             )
+            chat_rows = await conn.fetch(
+                """
+                SELECT id, match_id FROM chats
+                WHERE (participant_1_id = $1 AND participant_2_id = $2)
+                   OR (participant_1_id = $2 AND participant_2_id = $1)
+                   OR (participant_a = $1 AND participant_b = $2)
+                   OR (participant_a = $2 AND participant_b = $1)
+                """,
+                blocker_id, user_id,
+            )
             await conn.execute(
                 """
                 UPDATE chats
@@ -726,6 +736,12 @@ async def block_user(
         r = get_redis()
         await r.delete(f"feed:cache:{blocker_id}")
         await r.delete(f"feed:cache:{user_id}")
+        eviction_payload = json.dumps({"type": "chat_closed", "reason": "blocked"})
+        for crow in chat_rows:
+            cid = crow["id"]
+            await r.publish(f"chat:{cid}", eviction_payload)
+            if crow.get("match_id"):
+                await r.publish(f"chat:{crow['match_id']}", eviction_payload)
     except Exception:
         pass
 

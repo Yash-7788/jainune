@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     jwt_public_key_path: str = "/etc/secrets/jwt_rsa.pub"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
+    jwt_secret_key: str = "default_jwt_hmac_secret_32_bytes_len"
     otp_pepper_secret: str = "default_test_pepper_secret_32_bytes_len"
     google_client_id: str = ""
     apple_bundle_id: str = "com.jainune.app"

@@ -184,13 +184,14 @@ async def sliding_window_rate_limit(
     now_ms = int(time.time() * 1000)
     window_start = now_ms - (window_seconds * 1000)
 
+    member = f"{now_ms}:{secrets.token_hex(4)}"
     try:
         pipe = redis.pipeline()
         if hasattr(pipe, "__await__"):
             pipe = await pipe
 
         r1 = pipe.zremrangebyscore(key, 0, window_start)
-        r2 = pipe.zadd(key, {f"{now_ms}:{secrets.token_hex(4)}": now_ms})
+        r2 = pipe.zadd(key, {member: now_ms})
         r3 = pipe.zcard(key)
         r4 = pipe.expire(key, window_seconds + 1)
         for r in (r1, r2, r3, r4):
@@ -209,6 +210,12 @@ async def sliding_window_rate_limit(
         )
 
     if count > limit:
+        try:
+            rem = redis.zrem(key, member)
+            if hasattr(rem, "__await__"):
+                await rem
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded.",
