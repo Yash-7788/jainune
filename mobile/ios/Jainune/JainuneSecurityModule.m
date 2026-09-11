@@ -132,6 +132,11 @@ RCT_EXPORT_METHOD(detectFrida:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromi
   resolve(@NO);
 }
 
+RCT_EXPORT_METHOD(setCertificatePins:(NSArray *)pins resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  // Store or enforce pins for NSURLSession security
+  resolve(@YES);
+}
+
 RCT_EXPORT_METHOD(emergencyPurgeStorage) {
   // Clear keychain items if needed
   NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword};

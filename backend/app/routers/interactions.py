@@ -52,7 +52,7 @@ async def _update_behavior_vector_ema(
     actor_id: uuid.UUID,
     target_id: uuid.UUID,
     action: str,
-    db,
+    conn_or_db,
 ) -> None:
     """
     Exponential Moving Average update of actor's revealed_preference_vector.
@@ -92,8 +92,13 @@ async def _update_behavior_vector_ema(
           AND t.revealed_preference_vector IS NOT NULL
           AND uv.revealed_preference_vector IS NOT NULL
         """
-    async with db.acquire() as conn:
-        await conn.execute(sql, actor_id, target_id)
+    if hasattr(conn_or_db, "transaction"):
+        await conn_or_db.execute(sql, actor_id, target_id)
+    elif hasattr(conn_or_db, "acquire"):
+        async with conn_or_db.acquire() as conn:
+            await conn.execute(sql, actor_id, target_id)
+    else:
+        await conn_or_db.execute(sql, actor_id, target_id)
 
 
 # ---------------------------------------------------------------------------
@@ -192,19 +197,16 @@ async def record_interaction_action(
                 # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
                 limit = 10 if tier == "free" else (50 if tier == "gold" else None)
                 if limit is not None:
-                    # Read before incrementing to avoid inflating count on rejection
-                    current_likes = int(await redis.get(like_key) or 0)
-                    if current_likes >= limit:
+                    new_count = await redis.incr(like_key)
+                    tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
+                    await redis.expire(like_key, max(ttl_seconds, 60))
+                    if new_count > limit:
+                        await redis.decr(like_key)
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,
                             detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
                         )
-                    new_count = await redis.incr(like_key)
-                    if new_count == 1:
-                        # Expire strictly at upcoming IST midnight
-                        tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
-                        await redis.expire(like_key, max(ttl_seconds, 60))
             elif body.action == "super_connect":
                 # Concurrency lock to prevent double-spending super connect credits
                 await conn.execute(
@@ -302,13 +304,15 @@ async def record_interaction_action(
                         chat_id, match_row["id"],
                     )
 
+            # EMA vector update (inside same connection/transaction)
+            try:
+                await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
+            except Exception:
+                pass
+
     # ── Async side effects (outside DB transaction) ──────────────────────────
 
-    # EMA vector update (fire-and-forget; non-critical)
-    try:
-        await _update_behavior_vector_ema(actor_id, target_id, body.action, db)
-    except Exception:
-        pass  # Never fail the request over vector update
+    # Dispatch push notifications asynchronously
 
     # Dispatch push notifications asynchronously
     if match_created and match_id_to_notify:
@@ -367,15 +371,18 @@ async def get_my_matches(
         COALESCE(u.profession, u.job_title) AS profession,
         u.education,
         u.is_photo_verified,
-        COALESCE((
-            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position))
-            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
-        ), '[]'::json) AS photos
+        COALESCE(photos_agg.photos, '[]'::json) AS photos
     FROM matches m
     JOIN users u ON (u.id = CASE WHEN COALESCE(m.user_a, m.user_a_id, m.user_id_1) = $1 THEN COALESCE(m.user_b, m.user_b_id, m.user_id_2) ELSE COALESCE(m.user_a, m.user_a_id, m.user_id_1) END)
+    LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position)) AS photos
+        FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved' AND um.is_processed = TRUE
+    ) photos_agg ON TRUE
     WHERE (COALESCE(m.user_a, m.user_a_id, m.user_id_1) = $1 OR COALESCE(m.user_b, m.user_b_id, m.user_id_2) = $1)
       AND m.status IN ('active', 'matched')
-      AND u.account_status = 'active'
+      AND u.account_status NOT IN ('banned', 'deleted', 'suspended')
+      AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
+      AND u.deleted_at IS NULL
       AND u.is_paused = FALSE
       AND NOT EXISTS (
           SELECT 1 FROM user_blocks ub
@@ -442,15 +449,18 @@ async def get_users_who_liked_me(
         COALESCE(u.profession, u.job_title) AS profession,
         u.education,
         u.is_photo_verified,
-        COALESCE((
-            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position))
-            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
-        ), '[]'::json) AS photos
+        COALESCE(photos_agg.photos, '[]'::json) AS photos
     FROM interactions i
     JOIN users u ON u.id = i.actor_id
+    LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position)) AS photos
+        FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved' AND um.is_processed = TRUE
+    ) photos_agg ON TRUE
     WHERE i.target_id = $1
       AND i.action_type IN ('like', 'super_connect')
-      AND u.account_status = 'active'
+      AND u.account_status NOT IN ('banned', 'deleted', 'suspended')
+      AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
+      AND u.deleted_at IS NULL
       AND u.is_paused = FALSE
       AND NOT EXISTS (
           SELECT 1 FROM interactions back

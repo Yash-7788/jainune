@@ -313,8 +313,15 @@ class TestMessagingAndPaymentRecovery(unittest.IsolatedAsyncioTestCase):
         admin_user = {"user_id": uuid.uuid4(), "role": "admin"}
         mock_pool = MagicMock()
 
+        mock_redis = MagicMock()
+        mock_redis.zremrangebyscore = AsyncMock()
+        mock_redis.zcard = AsyncMock(return_value=0)
+        mock_redis.zadd = AsyncMock()
+        mock_redis.expire = AsyncMock()
+
         # Test admin campaign broadcast
-        with patch("app.services.messaging_service.broadcast_promotional_campaign", new_callable=AsyncMock) as mock_bcast:
+        with patch("app.routers.admin.get_redis", return_value=mock_redis), \
+             patch("app.services.messaging_service.broadcast_promotional_campaign", new_callable=AsyncMock) as mock_bcast:
             mock_bcast.return_value = {"campaign": "test", "sent": 10}
             bcast_body = BroadcastCampaignBody(
                 campaign_name="test_camp",
@@ -326,9 +333,16 @@ class TestMessagingAndPaymentRecovery(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(res["success"])
             mock_bcast.assert_called_once()
 
+        # Verify fail-closed when Redis is unavailable (BUG-056)
+        with patch("app.routers.admin.get_redis", side_effect=RuntimeError("Redis down")):
+            with self.assertRaises(HTTPException) as ctx:
+                await trigger_campaign_broadcast(body=bcast_body, admin=admin_user, pool=mock_pool)
+            self.assertEqual(ctx.exception.status_code, 503)
+
         # Test admin refund
         superadmin_user = {"user_id": uuid.uuid4(), "role": "superadmin"}
-        with patch("app.services.payment_service.initiate_refund", new_callable=AsyncMock) as mock_refund:
+        with patch("app.routers.admin.get_redis", return_value=mock_redis), \
+             patch("app.services.payment_service.initiate_refund", new_callable=AsyncMock) as mock_refund:
             mock_refund.return_value = {"success": True, "refund_id": "rfnd_admin_123"}
             ref_body = AdminRefundBody(
                 razorpay_payment_id="pay_admin_target_123",

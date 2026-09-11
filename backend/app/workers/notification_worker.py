@@ -23,17 +23,18 @@ import asyncpg
 from app.celery_app import celery_app
 from app.core.config import settings
 from app.services.push_notifications import send_push, send_push_multicast
+from app.workers.worker_pool import get_worker_conn, run_worker_task
 
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# DB helper — ephemeral connection per task
+# DB helper — worker process pooled connection
 # ---------------------------------------------------------------------------
 
 
 async def _get_conn() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.database_url)
+    return await get_worker_conn()
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ def notify_new_match(self, match_id: str) -> None:
             await conn.close()
 
     try:
-        asyncio.run(_run())
+        run_worker_task(_run())
     except Exception as exc:
         log.error("notify_new_match failed: %s", exc)
         raise self.retry(exc=exc, countdown=60)
@@ -137,7 +138,7 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
             await conn.close()
 
     try:
-        asyncio.run(_run())
+        run_worker_task(_run())
     except Exception as exc:
         log.error("notify_new_message failed: %s", exc)
         raise self.retry(exc=exc, countdown=30)
@@ -180,7 +181,7 @@ def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
             await conn.close()
 
     try:
-        asyncio.run(_run())
+        run_worker_task(_run())
     except Exception as exc:
         log.error("notify_new_like failed: %s", exc)
         raise self.retry(exc=exc, countdown=60)
@@ -237,7 +238,7 @@ def notify_match_expiring(self, match_id: str) -> None:
             await conn.close()
 
     try:
-        asyncio.run(_run())
+        run_worker_task(_run())
     except Exception as exc:
         log.error("notify_match_expiring failed: %s", exc)
         raise self.retry(exc=exc, countdown=120)
@@ -269,6 +270,7 @@ def send_daily_digest() -> None:
                     AND (i.action_type = 'like' OR i.interaction_type = 'like')
                     AND i.created_at > NOW() - INTERVAL '24 hours'
                 WHERE u.account_status = 'active'
+                  AND u.subscription_tier IN ('gold', 'platinum', 'jainune_plus')
                   AND u.fcm_token IS NOT NULL
                   AND u.fcm_token != ''
                 GROUP BY u.fcm_token
@@ -280,24 +282,27 @@ def send_daily_digest() -> None:
                 log.info("send_daily_digest: no eligible users")
                 return
 
-            tokens = [r["fcm_token"] for r in rows]
-            # Per-user count matters, so we send individually
-            results = await asyncio.gather(
-                *[
-                    send_push(
-                        r["fcm_token"],
-                        "People are interested in you! 💛",
-                        f"{r['like_count']} {'person' if r['like_count'] == 1 else 'people'} liked your profile today.",
-                        {"type": "daily_digest"},
-                        db_conn=conn,
-                    )
-                    for r in rows
-                ],
-                return_exceptions=True,
-            )
-            success = sum(1 for r in results if r is True)
-            log.info("send_daily_digest: sent=%d total=%d", success, len(tokens))
+            # Group eligible users by like_count for multicast batching
+            from collections import defaultdict
+            count_groups: dict[int, list[str]] = defaultdict(list)
+            for r in rows:
+                count_groups[r["like_count"]].append(r["fcm_token"])
+
+            BATCH_SIZE = 500
+            total_sent = 0
+            total_failed = 0
+            for count, group_tokens in count_groups.items():
+                title = "People are interested in you! 💛"
+                body = f"{count} {'person' if count == 1 else 'people'} liked your profile today."
+                data = {"type": "daily_digest"}
+                for i in range(0, len(group_tokens), BATCH_SIZE):
+                    batch = group_tokens[i : i + BATCH_SIZE]
+                    res = await send_push_multicast(batch, title, body, data, db_conn=conn)
+                    total_sent += res.get("success", 0)
+                    total_failed += res.get("failure", 0)
+
+            log.info("send_daily_digest: sent=%d failed=%d total=%d", total_sent, total_failed, len(rows))
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())

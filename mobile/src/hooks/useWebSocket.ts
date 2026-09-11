@@ -1,6 +1,6 @@
 /**
  * useWebSocket — Reusable WebSocket hook for real-time chat
- * - Ticket-based authentication handshake with JWT token fallback
+ * - Ticket-based single-use authentication handshake (BUG-005, BUG-031)
  * - Automatic ping/pong keepalive
  * - Exponential backoff auto-reconnect
  * - Full type safety
@@ -20,13 +20,17 @@ export interface UseWebSocketOptions {
   onMessage?: (message: any) => void;
   onTyping?: (senderId: string) => void;
   onReadReceipt?: (senderId: string, messageId?: string) => void;
+  onPermanentFailure?: () => void;
 }
+
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 export function useWebSocket({
   chatId,
   onMessage,
   onTyping,
   onReadReceipt,
+  onPermanentFailure,
 }: UseWebSocketOptions) {
   const [status, setStatus] = useState<WebSocketStatus>("disconnected");
   const ws = useRef<WebSocket | null>(null);
@@ -35,18 +39,13 @@ export function useWebSocket({
   const reconnectAttempts = useRef(0);
   const isMounted = useRef(true);
 
-  // Acquire authentication credentials
+  // Acquire authentication credentials via single-use ticket (BUG-005, BUG-031)
   const getAuthParam = async (): Promise<string | null> => {
     try {
       const ticketRes = await apiPost<{ ticket: string }>("/ws/ticket", {});
       if (ticketRes.success && ticketRes.data?.ticket) {
         return `ticket=${ticketRes.data.ticket}`;
       }
-    } catch {}
-
-    try {
-      const token = await getAccessToken();
-      if (token) return `token=${token}`;
     } catch {}
 
     return null;
@@ -130,6 +129,14 @@ export function useWebSocket({
         return;
       }
 
+      // Cap maximum reconnection attempts (BUG-054)
+      if (reconnectAttempts.current >= MAX_RECONNECT_ATTEMPTS) {
+        if (onPermanentFailure) {
+          onPermanentFailure();
+        }
+        return;
+      }
+
       // Exponential backoff up to 16s
       const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 16000);
       reconnectAttempts.current += 1;
@@ -143,10 +150,15 @@ export function useWebSocket({
         socket.close();
       }
     };
-  }, [chatId, cleanup, onMessage, onTyping, onReadReceipt]);
+  }, [chatId, cleanup, onMessage, onTyping, onReadReceipt, onPermanentFailure]);
+
+  useEffect(() => {
+    reconnectAttempts.current = 0;
+  }, [chatId]);
 
   useEffect(() => {
     isMounted.current = true;
+    reconnectAttempts.current = 0;
     connect();
 
     // Reconnect when app returns from background; teardown on background/inactive

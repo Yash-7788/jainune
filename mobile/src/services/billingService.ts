@@ -125,6 +125,15 @@ export async function purchaseSubscription(
       const NativeIap = (global as any).RNIap || null;
       if (NativeIap && typeof NativeIap.requestSubscription === "function") {
         const purchase = await NativeIap.requestSubscription({ sku: plan.plan_id });
+        // Handle iOS StoreKit deferred state (Ask to Buy / Parental Controls) (BUG-098)
+        if (purchase?.transactionState === "deferred" || purchase?.transactionState === 4) {
+          return {
+            success: true,
+            activated: false,
+            pending_verification: true,
+            message: "Purchase is pending approval (Ask to Buy / Parental controls). Access will be activated once confirmed.",
+          };
+        }
         return {
           success: true,
           activated: true,
@@ -144,6 +153,14 @@ export async function purchaseSubscription(
     } catch (err: any) {
       if (err?.code === "E_USER_CANCELLED") {
         return { success: false, error: "CANCELLED" };
+      }
+      if (err?.code === "E_DEFERRED_PAYMENT" || err?.transactionState === "deferred" || err?.transactionState === 4) {
+        return {
+          success: true,
+          activated: false,
+          pending_verification: true,
+          message: "Purchase is pending approval (Ask to Buy / Parental controls). Access will be activated once confirmed.",
+        };
       }
       throw err;
     }
@@ -288,3 +305,6 @@ export async function purchaseArcadeRolls(
     throw err;
   }
 }
+
+export const initiatePurchase = purchaseSubscription;
+

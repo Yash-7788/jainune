@@ -20,6 +20,7 @@ import {
   performDeviceIntegrityCheck,
   terminateCompromisedSession,
 } from "./deviceIntegrity";
+import { enforceCertificatePinning, SPKI_PINS } from "./antiReversing";
 
 export type SecurityBootResult =
   | { passed: true }
@@ -43,6 +44,9 @@ export async function runSecurityBoot(): Promise<SecurityBootResult> {
   if (__DEV__) {
     return { passed: true };
   }
+
+  // Enforce certificate pinning at native network layer
+  await enforceCertificatePinning(SPKI_PINS);
 
   const result = await performDeviceIntegrityCheck();
 

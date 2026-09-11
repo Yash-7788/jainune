@@ -1,10 +1,10 @@
 -- =============================================================================
 -- MIGRATION 0016: Zero-Downtime Concurrent Spatial & Vector Maintenance
 -- =============================================================================
--- In production PostgreSQL, index rebuilds take exclusive write locks (ACCESS EXCLUSIVE)
--- unless CONCURRENTLY is specified.
--- Note: In PostgreSQL, CREATE INDEX CONCURRENTLY and REINDEX INDEX CONCURRENTLY
+-- In PostgreSQL, CREATE INDEX CONCURRENTLY and REINDEX INDEX CONCURRENTLY
 -- must run as standalone commands outside of an explicit transaction block (BEGIN/COMMIT).
+-- run_migrations.py automatically detects CONCURRENTLY and executes outside a transaction.
+-- For manual out-of-band maintenance, see scripts/maintenance/reindex_concurrent.sql.
 -- =============================================================================
 
 -- 1. Concurrent PostGIS Geography GIST Index
@@ -21,3 +21,5 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ubv_hnsw_cosine
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_active_gender_city
     ON users (gender, city, community_sect)
     WHERE account_status = 'active' AND is_paused = FALSE;
+
+

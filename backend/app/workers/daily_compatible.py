@@ -29,6 +29,7 @@ from app.celery_app import celery_app
 from app.core.config import settings
 from app.services.core_people_finder import CorePeopleFinder
 from app.services.stable_marriage import StableMarriageEngine
+from app.workers.worker_pool import get_worker_conn, run_worker_task
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ BATCH_SIZE = 500              # users fetched per DB batch
 
 
 async def _get_conn() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.database_url)
+    return await get_worker_conn()
 
 
 async def _get_redis() -> aioredis.Redis:
@@ -53,7 +54,7 @@ async def _get_redis() -> aioredis.Redis:
 @celery_app.task(name="app.workers.daily_compatible.run_daily_compatible")
 def run_daily_compatible() -> None:
     """Beat-scheduled task: pre-compute feed queues and stable proposals."""
-    asyncio.run(_run_async())
+    run_worker_task(_run_async())
 
 
 async def _run_async() -> None:
@@ -68,7 +69,7 @@ async def _run_async() -> None:
             """
             SELECT
                 id, gender, show_me, looking_for,
-                dietary_strictness, community_sect,
+                dietary_strictness, community_sect, city,
                 ST_X(location::geometry) AS longitude,
                 ST_Y(location::geometry) AS latitude,
                 max_distance_km, open_to_relocation,
@@ -144,7 +145,17 @@ async def _run_async() -> None:
         if len(marriage_users) >= 2:
             try:
                 engine = StableMarriageEngine()
-                proposals = engine.compute(marriage_users, feed_queues)
+                proposals = []
+                if len(marriage_users) > 200:
+                    clusters: dict[str, list[dict]] = {}
+                    for u in marriage_users:
+                        loc_key = str(u.get("city") or "general").strip().lower()
+                        clusters.setdefault(loc_key, []).append(u)
+                    for cluster_users in clusters.values():
+                        if len(cluster_users) >= 2:
+                            proposals.extend(engine.compute(cluster_users, feed_queues))
+                else:
+                    proposals = engine.compute(marriage_users, feed_queues)
 
                 if proposals:
                     # Write proposals to DB with canonical pair ordering (min, max)

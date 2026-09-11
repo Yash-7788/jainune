@@ -48,6 +48,7 @@ from app.models.schemas.user import (
     Step22CompleteBody,
 )
 from app.services.location_verifier import (
+    snap_to_geohash_6,
     verify_location_anti_spoofing,
     verify_location_zone,
 )
@@ -92,6 +93,7 @@ async def _update_user(
     fields: dict,
 ) -> None:
     """Build and execute a parameterized UPDATE for the given fields + step."""
+    await _require_onboarding_not_completed(user_id, conn)
     if not fields:
         return
     for col in fields.keys():
@@ -116,9 +118,14 @@ async def _guard_rate_limit(user_id: uuid.UUID, redis) -> None:
     await sliding_window_rate_limit(key, limit=60, window_seconds=3600, redis=redis)
 
 
-async def _require_onboarding_not_completed(user_id: uuid.UUID, db) -> None:
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
+async def _require_onboarding_not_completed(user_id: uuid.UUID, db_or_conn) -> None:
+    if hasattr(db_or_conn, "acquire"):
+        async with db_or_conn.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT onboarding_completed FROM users WHERE id = $1", user_id
+            )
+    else:
+        row = await db_or_conn.fetchrow(
             "SELECT onboarding_completed FROM users WHERE id = $1", user_id
         )
     if row and row["onboarding_completed"]:
@@ -372,22 +379,26 @@ async def step11_location(
             detail="Jainune is currently active in Mumbai MMR, Pune, and Bengaluru. We'll be in your city soon! 🚀",
         )
 
+    snapped_lat, snapped_lon = snap_to_geohash_6(body.latitude, body.longitude)
     async with db.acquire() as conn:
-        # ST_MakePoint(lon, lat) per PostGIS convention; SRID 4326
-        await conn.execute(
-            """
-            UPDATE users
-            SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
-                location_zone = $3,
-                onboarding_step = 11,
-                updated_at = NOW()
-            WHERE id = $4
-            """,
-            body.longitude,
-            body.latitude,
-            zone["id"],
-            current_user.id,
-        )
+        async with conn.transaction():
+            await _require_onboarding_not_completed(current_user.id, conn)
+            # ST_MakePoint(lon, lat) per PostGIS convention; SRID 4326
+            # Coordinates pre-snapped to Geohash-6 centroid (~1.2km) in application code (BUG-036)
+            await conn.execute(
+                """
+                UPDATE users
+                SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
+                    location_zone = $3,
+                    onboarding_step = 11,
+                    updated_at = NOW()
+                WHERE id = $4
+                """,
+                snapped_lon,
+                snapped_lat,
+                zone["id"],
+                current_user.id,
+            )
     return _status(11, False, "Set local discovery radius on step 12.")
 
 

@@ -47,9 +47,14 @@ async def run_migrations():
             with open(sql_file, "r", encoding="utf-8") as f:
                 sql_content = f.read()
 
-            async with conn.transaction():
+            # In PostgreSQL, CONCURRENTLY and VACUUM cannot run inside explicit transaction blocks
+            if "CONCURRENTLY" in sql_content.upper() or "VACUUM" in sql_content.upper():
                 await conn.execute(sql_content)
                 await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
+            else:
+                async with conn.transaction():
+                    await conn.execute(sql_content)
+                    await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
             print(f"  [DONE] {version}")
 
         print("\nAll database migrations successfully reconciled!")
@@ -91,9 +96,13 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
             with open(down_file, "r", encoding="utf-8") as f:
                 down_sql = f.read()
 
-            async with conn.transaction():
+            if "CONCURRENTLY" in down_sql.upper() or "VACUUM" in down_sql.upper():
                 await conn.execute(down_sql)
                 await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
+            else:
+                async with conn.transaction():
+                    await conn.execute(down_sql)
+                    await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
 
             print(f"  [ROLLED BACK] {version}")
             rolled_back_count += 1

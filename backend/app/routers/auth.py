@@ -14,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import hmac
 import logging
 from app.core.config import settings
+from app.core.database import get_pool
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -49,6 +50,28 @@ _bearer = HTTPBearer()
 OTP_TTL_SECONDS = 180
 OTP_RATE_WINDOW_SECONDS = 3600
 OTP_RATE_LIMIT = 3
+
+# Allowed email domains allowlist matching mobile client (BUG-037)
+ALLOWED_EMAIL_DOMAINS = frozenset({
+    "jainune.com",
+    # Google
+    "gmail.com", "googlemail.com",
+    # Microsoft
+    "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "outlook.in", "hotmail.co.in", "live.in",
+    # Yahoo
+    "yahoo.com", "yahoo.co.in", "yahoo.in", "ymail.com", "rocketmail.com",
+    # Apple
+    "icloud.com", "me.com", "mac.com",
+    # Proton
+    "proton.me", "protonmail.com",
+    # Zoho
+    "zoho.com", "zohomail.in", "zoho.in",
+    # Indian
+    "rediffmail.com", "sify.com",
+    # Other major
+    "aol.com", "gmx.com", "mail.com", "fastmail.com", "hey.com",
+})
 
 
 def mask_phone(phone: str) -> str:
@@ -115,19 +138,41 @@ async def _issue_token_response(
     refresh_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
 
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
-    await conn.execute(
-        """
-        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (user_id) DO UPDATE
-          SET token_hash = EXCLUDED.token_hash,
-              expires_at = EXCLUDED.expires_at,
-              created_at = NOW()
-        """,
-        user_id, refresh_hash, expires_at,
+
+    old_token_hash = await conn.fetchval(
+        "SELECT token_hash FROM refresh_tokens WHERE user_id = $1",
+        user_id,
     )
-    # Touch last active
-    await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
+
+    # Atomic transaction for token write and activity timestamp (BUG-073)
+    async with conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO UPDATE
+              SET token_hash = EXCLUDED.token_hash,
+                  expires_at = EXCLUDED.expires_at,
+                  created_at = NOW()
+            """,
+            user_id, refresh_hash, expires_at,
+        )
+        # Touch last active
+        await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
+
+    # Track old token as replaced by login rather than rotated/theft (BUG-064)
+    if old_token_hash:
+        try:
+            r = get_redis()
+            res = r.set(
+                f"auth:replaced_by_login:{old_token_hash}",
+                str(user_id),
+                ex=settings.refresh_token_expire_days * 86400,
+            )
+            if hasattr(res, "__await__"):
+                await res
+        except Exception:
+            pass
 
     return ok(TokenResponse(
         user_id=str(user_id),
@@ -142,11 +187,40 @@ async def _issue_token_response(
 # ── POST /v1/auth/otp/request ─────────────────────────────────────────────────
 
 @router.post("/otp/request")
-async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = None) -> dict:
+async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = None, db: DBDep = None) -> dict:
     # IP rate limit: 15 OTP requests per minute per IP
     if request:
         client_ip = get_trusted_client_ip(request)
         await sliding_window_rate_limit(f"ratelimit:auth:otp:ip:{client_ip}", 15, 60, redis)
+
+    # Pre-check account status to prevent OTP dispatch to banned/suspended accounts
+    pool = db
+    if pool is None:
+        try:
+            pool = get_pool()
+        except RuntimeError:
+            pool = None
+    if pool is not None:
+        async with pool.acquire() as conn:
+            user_row = await conn.fetchrow(
+                "SELECT account_status, deleted_at, suspend_until FROM users WHERE phone_number = $1",
+                body.phone_number,
+            )
+            if user_row:
+                status_val = user_row["account_status"]
+                su = (
+                    (suspend_until if getattr(suspend_until, "tzinfo", None) else suspend_until.replace(tzinfo=timezone.utc))
+                    if isinstance(suspend_until, datetime)
+                    else None
+                )
+                is_suspended = status_val == "suspended" and (
+                    suspend_until is None or su is None or su > datetime.now(timezone.utc)
+                )
+                if status_val in ("banned", "deleted") or deleted_at is not None or is_suspended:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Unable to send verification code. Please check your credentials or contact support.",
+                    )
 
     # Rate limit: 3 OTP requests per phone per hour
     rate_key = f"auth:otp_rate:{body.phone_number}"
@@ -158,6 +232,10 @@ async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = 
     # Store HMAC in Redis, never the raw OTP
     session_key = f"auth:otp:{body.phone_number}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
+    # Reset attempt counter on fresh OTP request (BUG-008)
+    del_res = redis.delete(f"auth:attempts:{body.phone_number}")
+    if hasattr(del_res, "__await__"):
+        await del_res
 
     # Dispatch via MSG91 SMS or WhatsApp
     channel = getattr(body, "channel", "sms") or "sms"
@@ -202,18 +280,14 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
                     "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE phone_number = $1",
                     body.phone_number,
                 )
+                if not existing:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account not found after conflict resolution")
                 _assert_account_active(existing)
                 user_id = existing["id"]
                 is_new_user = False
                 onboarding_completed = _row_val(existing, "onboarding_completed", False) or False
             else:
-                row = await conn.fetchrow(
-                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                    user_id,
-                )
-                if row:
-                    _assert_account_active(row)
-                    onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+                onboarding_completed = False
         else:
             _assert_account_active(row)
             user_id = row["id"]
@@ -226,7 +300,7 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 # ── POST /v1/auth/email/otp/request ──────────────────────────────────────────
 
 @router.post("/email/otp/request")
-async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: RedisDep) -> dict:
+async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: RedisDep, db: DBDep = None) -> dict:
     is_bot, bot_msg = await asyncio.to_thread(
         verify_bot_integrity,
         dict(request.headers),
@@ -236,11 +310,47 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
-    is_disposable, reason = is_disposable_email(body.email)
+    is_disposable, reason = await asyncio.to_thread(is_disposable_email, body.email)
     if is_disposable:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
     clean_email = body.email.strip().lower()
+    domain = clean_email.split("@")[-1] if "@" in clean_email else ""
+    if domain not in ALLOWED_EMAIL_DOMAINS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration is restricted to supported email providers (Gmail, Outlook, Yahoo, Apple, etc.).",
+        )
+
+    # Check account status before dispatching email OTP (BUG-062)
+    pool = db
+    if pool is None:
+        try:
+            pool = get_pool()
+        except RuntimeError:
+            pool = None
+    if pool is not None:
+        async with pool.acquire() as conn:
+            user_row = await conn.fetchrow(
+                "SELECT account_status, deleted_at, suspend_until FROM users WHERE email = $1",
+                clean_email,
+            )
+            if user_row:
+                status_val = user_row["account_status"]
+                su = (
+                    (suspend_until if getattr(suspend_until, "tzinfo", None) else suspend_until.replace(tzinfo=timezone.utc))
+                    if isinstance(suspend_until, datetime)
+                    else None
+                )
+                is_suspended = status_val == "suspended" and (
+                    suspend_until is None or su is None or su > datetime.now(timezone.utc)
+                )
+                if status_val in ("banned", "deleted") or deleted_at is not None or is_suspended:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Unable to send verification code. Please check your credentials or contact support.",
+                    )
+
     rate_key = f"auth:email_otp_rate:{clean_email}"
     await sliding_window_rate_limit(rate_key, OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS, redis)
 
@@ -248,6 +358,10 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
     otp_hash = hash_otp(clean_email, otp)
     session_key = f"auth:email_otp:{clean_email}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
+    # Reset attempt counter on fresh email OTP request (BUG-008)
+    del_res = redis.delete(f"auth:email_attempts:{clean_email}")
+    if hasattr(del_res, "__await__"):
+        await del_res
 
     # Deliver branded OTP email
     await send_email_otp(clean_email, otp)
@@ -269,8 +383,7 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
     session_key = f"auth:email_otp:{clean_email}"
 
     attempts = await redis.incr(rate_key)
-    if attempts == 1:
-        await redis.expire(rate_key, 300)
+    await redis.expire(rate_key, 300)
     if attempts > 5:
         await redis.delete(session_key)
         raise HTTPException(
@@ -301,19 +414,30 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
                 """
                 INSERT INTO users (email, is_email_verified, auth_provider)
                 VALUES ($1, TRUE, 'email')
-                ON CONFLICT (email) DO UPDATE SET last_active_at = NOW(), is_email_verified = TRUE
+                ON CONFLICT (email) DO NOTHING
                 RETURNING id
                 """,
                 clean_email,
             )
-            row = await conn.fetchrow(
-                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                user_id,
-            )
-            if row:
-                _assert_account_active(row)
-                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
+            if user_id is None:
+                existing = await conn.fetchrow(
+                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1",
+                    clean_email,
+                )
+                if not existing:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account not found after conflict resolution")
+                _assert_account_active(existing)
+                user_id = existing["id"]
+                is_new_user = False
+                onboarding_completed = _row_val(existing, "onboarding_completed", False) or False
             else:
+                row = await conn.fetchrow(
+                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                    user_id,
+                )
+                if not row:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account not found after insert")
+                _assert_account_active(row)
                 onboarding_completed = False
         else:
             _assert_account_active(row)
@@ -341,6 +465,11 @@ def _verify_google_token(id_token: str) -> dict:
         }
         if settings.google_client_id:
             decode_kwargs["audience"] = settings.google_client_id
+        elif settings.environment == "production":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Google OAuth audience not configured for production.",
+            )
         else:
             decode_kwargs["options"]["verify_aud"] = False
 
@@ -348,6 +477,8 @@ def _verify_google_token(id_token: str) -> dict:
         if payload.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
             raise ValueError("Invalid issuer")
         return payload
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning("Google ID token signature verification failed: %s", e)
         raise HTTPException(
@@ -368,6 +499,11 @@ def _verify_apple_token(id_token: str) -> dict:
         }
         if settings.apple_bundle_id:
             decode_kwargs["audience"] = settings.apple_bundle_id
+        elif settings.environment == "production":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Apple OAuth audience not configured for production.",
+            )
         else:
             decode_kwargs["options"]["verify_aud"] = False
 
@@ -375,6 +511,8 @@ def _verify_apple_token(id_token: str) -> dict:
         if payload.get("iss") != "https://appleid.apple.com":
             raise ValueError("Invalid issuer")
         return payload
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning("Apple ID token signature verification failed: %s", e)
         raise HTTPException(
@@ -417,7 +555,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google account identification missing.")
 
     if email:
-        is_disp, reason = is_disposable_email(email, allow_custom_domains=True)
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
@@ -501,7 +639,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple account identification missing.")
 
     if email:
-        is_disp, reason = is_disposable_email(email, allow_custom_domains=True)
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
@@ -551,6 +689,33 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
+def _pack_grace_payload(resp_data: dict) -> str:
+    raw_str = json.dumps(resp_data, sort_keys=True)
+    sig = hmac.new(settings.jwt_secret_key.encode(), raw_str.encode(), hashlib.sha256).hexdigest()
+    return json.dumps({"data": resp_data, "sig": sig})
+
+
+def _unpack_grace_payload(raw_val: bytes | str) -> dict | None:
+    try:
+        decoded = raw_val.decode() if isinstance(raw_val, bytes) else raw_val
+        wrapper = json.loads(decoded)
+        if isinstance(wrapper, dict) and "data" in wrapper and "sig" in wrapper:
+            raw_data = json.dumps(wrapper["data"], sort_keys=True)
+            expected_sig = hmac.new(
+                settings.jwt_secret_key.encode(),
+                raw_data.encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            if hmac.compare_digest(wrapper["sig"], expected_sig):
+                return wrapper["data"]
+            return None
+        if isinstance(wrapper, dict) and "access_token" in wrapper:
+            return wrapper
+        return None
+    except Exception:
+        return None
+
+
 # ── POST /v1/auth/token/refresh ───────────────────────────────────────────────
 
 @router.post("/token/refresh")
@@ -563,8 +728,17 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
     # 1. Check if token was recently rotated within concurrency grace window (15s)
     cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
     if cached_grace:
-        payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
-        return ok(payload)
+        payload = _unpack_grace_payload(cached_grace)
+        if payload:
+            return ok(payload)
+
+    # Check if session was replaced by login from another device (BUG-064)
+    was_replaced = await redis.get(f"auth:replaced_by_login:{token_hash}")
+    if was_replaced:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired due to login from another device. Please sign in again.",
+        )
 
     # 2. Check for replay/reuse of an already-rotated token past grace window (Theft Detection)
     reused_user_id = await redis.get(f"auth:revoked_rt:{token_hash}")
@@ -595,8 +769,16 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 # Concurrency check: If winner committed while loser waited on lock
                 cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
                 if cached_grace:
-                    payload = json.loads(cached_grace.decode() if isinstance(cached_grace, bytes) else cached_grace)
-                    return ok(payload)
+                    payload = _unpack_grace_payload(cached_grace)
+                    if payload:
+                        return ok(payload)
+
+                was_replaced = await redis.get(f"auth:replaced_by_login:{token_hash}")
+                if was_replaced:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session expired due to login from another device. Please sign in again.",
+                    )
 
                 # Recheck revocation/reuse post-lock (O-5)
                 reused_user_id = await redis.get(f"auth:revoked_rt:{token_hash}")
@@ -654,10 +836,10 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 expires_in=settings.access_token_expire_minutes * 60,
             ).model_dump(mode="json")
 
-            # Set grace window (15s) and revocation record before releasing lock
+            # Set grace window (15s) and revocation record before releasing lock (BUG-087)
             await redis.set(
                 f"auth:grace_rt:{token_hash}",
-                json.dumps(resp_data),
+                _pack_grace_payload(resp_data),
                 ex=15,
             )
             await redis.set(

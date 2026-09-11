@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]
     sentry_dsn: str = ""
+    metrics_secret_token: str = ""
 
     # Database
     database_url: str = "postgresql://postgres:password@localhost:5432/jainune_dev"
@@ -73,6 +74,10 @@ class Settings(BaseSettings):
     turnstile_secret_key: str = ""
     cloudflare_origin_secret: str = ""
 
+    # App Store / Google Play Store Webhook Secret (BUG-026)
+    store_webhook_secret: str = ""
+    webhook_secret: str = ""
+
     @model_validator(mode="after")
     def audit_production_environment(self) -> "Settings":
         if self.environment.lower() == "production":
@@ -97,6 +102,19 @@ class Settings(BaseSettings):
                 errors.append("turnstile_secret_key must be set for Cloudflare Turnstile anti-bot verification in production")
             if not self.sentry_dsn:
                 errors.append("sentry_dsn must be configured for error tracking and observability in production")
+            if not self.metrics_secret_token or len(self.metrics_secret_token) < 16:
+                errors.append("metrics_secret_token must be configured with a secure token (>=16 chars) in production")
+            if not self.google_client_id or self.google_client_id.startswith("test_") or "mock" in self.google_client_id:
+                errors.append("google_client_id must be set to a valid production OAuth client ID in production")
+            if not self.apple_bundle_id or self.apple_bundle_id.startswith("test_") or "mock" in self.apple_bundle_id:
+                errors.append("apple_bundle_id must be configured with the production bundle ID in production")
+            if not self.smtp_host:
+                errors.append("smtp_host must be configured for email OTP delivery in production")
+            import os
+            if not self.fcm_service_account_path or not os.path.isfile(self.fcm_service_account_path):
+                errors.append(f"fcm_service_account_path '{self.fcm_service_account_path}' not found")
+            if self.store_webhook_secret and (self.store_webhook_secret.startswith("test_") or "mock" in self.store_webhook_secret):
+                errors.append("store_webhook_secret cannot use test/mock credentials in production")
 
             if errors:
                 raise ValueError(

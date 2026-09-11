@@ -9,6 +9,7 @@ Active Launch Zones:
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -18,10 +19,13 @@ from app.core.security import get_trusted_client_ip, sliding_window_rate_limit
 from app.dependencies import get_current_user, RedisDep
 import asyncpg
 
+log = logging.getLogger(__name__)
+
 from app.core.responses import ok
 from app.services.location_verifier import (
     LAUNCH_ZONES,
     save_city_waitlist,
+    snap_to_geohash_6,
     verify_location_anti_spoofing,
     verify_location_zone,
 )
@@ -35,7 +39,7 @@ class VerifyLocationRequest(BaseModel):
     phone_number: Optional[str] = Field(None, max_length=16)
     city_hint: Optional[str] = Field(None, max_length=128)
     is_mocked: bool = Field(False, description="Device mock location or developer option flag")
-    accuracy_meters: Optional[float] = Field(None, description="GPS horizontal accuracy in meters")
+    accuracy_meters: Optional[float] = Field(None, ge=0.0, le=10000.0, description="GPS horizontal accuracy in meters")
 
 
 class LocationZoneResponse(BaseModel):
@@ -85,27 +89,33 @@ async def verify_location(
     if is_allowed and zone:
         import uuid
         try:
+            snapped_lat, snapped_lon = snap_to_geohash_6(body.latitude, body.longitude)
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE users
-                    SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
-                        location_zone = $3,
-                        updated_at = NOW()
-                    WHERE id = $4
-                    """,
-                    body.longitude,
-                    body.latitude,
-                    zone["id"],
-                    uuid.UUID(str(user_id)),
-                )
-        except Exception:
-            pass
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326),
+                            location_zone = $3,
+                            updated_at = NOW()
+                        WHERE id = $4
+                        """,
+                        snapped_lon,
+                        snapped_lat,
+                        zone["id"],
+                        uuid.UUID(str(user_id)),
+                    )
+        except Exception as exc:
+            log.error("Failed to update user location in DB for user %s: %s", user_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update location.",
+            )
 
         try:
             await redis.delete(f"feed:cache:{user_id}")
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to invalidate feed cache for user %s: %s", user_id, exc)
 
         return ok({
             "allowed": True,
@@ -126,8 +136,8 @@ async def verify_location(
             city_hint=body.city_hint,
             pool=pool,
         )
-    except Exception:
-        pass  # Graceful fallback if waitlist logging fails
+    except Exception as exc:
+        log.warning("Waitlist registration failed for %s: %s", phone, exc)
 
     return ok({
         "allowed": False,

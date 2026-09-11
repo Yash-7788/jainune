@@ -37,9 +37,12 @@ if "celery" not in sys.modules:
     mock_celery_app = MagicMock()
     mock_celery_app.task = lambda *args, **kwargs: (lambda fn: fn)
     mock_celery.Celery.return_value = mock_celery_app
+    mock_celery.__path__ = []
     sys.modules["celery"] = mock_celery
 if "celery.schedules" not in sys.modules:
     sys.modules["celery.schedules"] = MagicMock()
+if "celery.signals" not in sys.modules:
+    sys.modules["celery.signals"] = MagicMock()
 
 import app.celery_app
 app.celery_app.celery_app.task = lambda *args, **kwargs: (lambda fn: fn)

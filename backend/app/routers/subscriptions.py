@@ -479,7 +479,8 @@ async def store_notification_webhook(
     Apple StoreKit / Google Play RTDN server-to-server webhook.
     Handles grace periods, billing retries, account holds, and refund revocations.
     """
-    if not settings.webhook_secret or x_store_token != settings.webhook_secret:
+    expected_secret = getattr(settings, "store_webhook_secret", None) or getattr(settings, "webhook_secret", "")
+    if not expected_secret or x_store_token != expected_secret:
         raise HTTPException(status_code=403, detail="Invalid store webhook token")
 
     if not body.user_id:

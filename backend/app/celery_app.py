@@ -29,6 +29,7 @@ celery_app = Celery(
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
     include=[
+        "app.workers.worker_pool",
         "app.workers.telemetry_worker",
         "app.workers.ephemeral_reaper",
         "app.workers.daily_compatible",

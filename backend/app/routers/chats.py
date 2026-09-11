@@ -38,17 +38,20 @@ async def _assert_participant(
     db,
 ) -> dict:
     """Fetch chat row and verify the requesting user is a participant. Accepts chat_id or match_id."""
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT id, match_id, participant_1_id, participant_2_id,
-                   is_ephemeral, expires_at, is_unmatched
-            FROM chats
-            WHERE (id = $1 OR match_id = $1)
-              AND (participant_1_id = $2 OR participant_2_id = $2)
-            """,
-            chat_id, user_id,
-        )
+    sql = """
+        SELECT id, match_id, participant_1_id, participant_2_id,
+               is_ephemeral, expires_at, is_unmatched,
+               (expires_at IS NOT NULL AND expires_at < NOW()) AS is_expired
+        FROM chats
+        WHERE (id = $1 OR match_id = $1)
+          AND (participant_1_id = $2 OR participant_2_id = $2)
+    """
+    if hasattr(db, "acquire"):
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(sql, chat_id, user_id)
+    else:
+        row = await db.fetchrow(sql, chat_id, user_id)
+
     if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -65,12 +68,15 @@ async def _assert_participant(
 async def list_chats(
     current_user: CurrentUser,
     db: DBDep,
+    redis: RedisDep = None,
 ) -> ChatListResponse:
     """
     Returns all active chat threads for the current user, ordered by most
     recent message. Includes other participant's name, photo, and last message.
     """
     user_id = uuid.UUID(str(current_user["id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:chats:list:{user_id}", 60, 60, redis)
 
     async with db.acquire() as conn:
         rows = await conn.fetch(
@@ -85,25 +91,48 @@ async def list_chats(
                     WHEN c.participant_1_id = $1 THEN c.participant_2_id
                     ELSE c.participant_1_id
                 END AS other_user_id,
+                other_u.first_name AS other_user_first_name,
+                CASE
+                    WHEN other_u.account_status = 'suspended' THEN NULL
+                    ELSE photo.cdn_url
+                END AS other_user_photo_url,
                 -- Last message
                 lm.content   AS last_message_text,
                 lm.created_at AS last_message_at,
                 -- Unread count
-                (
-                    SELECT COUNT(*) FROM messages m2
-                    WHERE m2.chat_id = c.id
-                      AND m2.sender_id != $1
-                      AND m2.is_read = FALSE
-                ) AS unread_count
+                COALESCE(unread.unread_count, 0) AS unread_count
             FROM chats c
+            JOIN users other_u ON other_u.id = (
+                CASE
+                    WHEN c.participant_1_id = $1 THEN c.participant_2_id
+                    ELSE c.participant_1_id
+                END
+            )
+            LEFT JOIN LATERAL (
+                SELECT cdn_url FROM user_media
+                WHERE user_id = other_u.id
+                  AND media_type = 'photo'
+                  AND is_processed = TRUE
+                  AND status = 'approved'
+                ORDER BY position ASC
+                LIMIT 1
+            ) photo ON TRUE
             LEFT JOIN LATERAL (
                 SELECT content, created_at FROM messages
                 WHERE chat_id = c.id
                 ORDER BY created_at DESC
                 LIMIT 1
             ) lm ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS unread_count
+                FROM messages m2
+                WHERE m2.chat_id = c.id
+                  AND m2.sender_id != $1
+                  AND m2.is_read = FALSE
+            ) unread ON TRUE
             WHERE (c.participant_1_id = $1 OR c.participant_2_id = $1)
               AND c.is_unmatched = FALSE
+              AND other_u.account_status NOT IN ('banned', 'deleted', 'suspended')
               AND NOT EXISTS (
                   SELECT 1 FROM user_blocks ub
                   WHERE (ub.blocker_id = $1 AND ub.blocked_id = (CASE WHEN c.participant_1_id = $1 THEN c.participant_2_id ELSE c.participant_1_id END))
@@ -114,44 +143,21 @@ async def list_chats(
             user_id,
         )
 
-        # Batch-fetch other participants' names + primary photo
-        other_ids = [r["other_user_id"] for r in rows]
-        user_meta: dict[str, dict] = {}
-        if other_ids:
-            u_rows = await conn.fetch(
-                """
-                SELECT u.id, u.first_name,
-                       (SELECT cdn_url FROM user_media
-                        WHERE user_id = u.id AND media_type = 'photo'
-                          AND is_processed = TRUE
-                        ORDER BY position ASC LIMIT 1) AS photo_url
-                FROM users u
-                WHERE u.id = ANY($1::uuid[])
-                """,
-                other_ids,
-            )
-            for u in u_rows:
-                user_meta[str(u["id"])] = {
-                    "first_name": u["first_name"],
-                    "photo_url": u["photo_url"],
-                }
-
-    threads = []
-    for r in rows:
-        other_id = str(r["other_user_id"])
-        meta = user_meta.get(other_id, {})
-        threads.append(ChatThread(
+    threads = [
+        ChatThread(
             id=r["id"],
             match_id=r["match_id"],
             other_user_id=r["other_user_id"],
-            other_user_first_name=meta.get("first_name", ""),
-            other_user_photo_url=meta.get("photo_url"),
+            other_user_first_name=r["other_user_first_name"] or "",
+            other_user_photo_url=r["other_user_photo_url"],
             last_message_text=r["last_message_text"],
             last_message_at=r["last_message_at"],
             unread_count=r["unread_count"],
             is_ephemeral=r["is_ephemeral"],
             expires_at=r["expires_at"],
-        ))
+        )
+        for r in rows
+    ]
 
     return ChatListResponse(threads=threads)
 
@@ -194,9 +200,22 @@ async def get_messages(
     limit: int = Query(default=30, ge=1, le=100),
     before: Optional[str] = Query(default=None, description="Cursor: message UUID for pagination"),
     cursor: Optional[str] = Query(default=None, description="Cursor alias for pagination"),
+    redis: RedisDep = None,
 ) -> ChatHistoryResponse:
     user_id = uuid.UUID(str(current_user["id"]))
+    if redis is not None:
+        await sliding_window_rate_limit(f"ratelimit:chats:get:{user_id}", 60, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
+    if chat.get("is_unmatched"):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Chat thread is closed due to unmatch.",
+        )
+    if chat.get("is_expired"):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This chat has expired.",
+        )
     actual_chat_id = chat["id"]
     cursor_val = before or cursor
 
@@ -289,83 +308,92 @@ async def send_message(
     user_id = uuid.UUID(str(current_user["id"]))
     await sliding_window_rate_limit(f"ratelimit:chats:msg:{user_id}", 60, 60, redis)
 
-    chat = await _assert_participant(chat_id, user_id, db)
-    actual_chat_id = chat["id"]
-
-    if chat.get("is_unmatched"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Chat thread is closed due to unmatch.",
-        )
-
-    # Validate ephemeral expiry
-    from datetime import datetime, timezone
-    if chat.get("expires_at") and chat["expires_at"] < datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="This chat has expired.",
-        )
-
-    try:
-        body.validate_content()
-    except ValueError as err:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err))
-
-    other_id = chat["participant_2_id"] if chat["participant_1_id"] == user_id else chat["participant_1_id"]
-
-    # Check user blocks
-    async with db.acquire() as conn:
-        blocked = await conn.fetchval(
-            """
-            SELECT 1 FROM user_blocks
-            WHERE (blocker_id = $1 AND blocked_id = $2)
-               OR (blocker_id = $2 AND blocked_id = $1)
-            """,
-            user_id, other_id,
-        )
-        if blocked:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Communication is blocked.",
-            )
-
-        recipient_status = await conn.fetchval(
-            "SELECT account_status FROM users WHERE id = $1",
-            other_id,
-        )
-        if recipient_status in ("deleted", "banned"):
-            raise HTTPException(
-                status_code=status.HTTP_410_GONE,
-                detail="Recipient account is no longer active.",
-            )
-
-        effective_tier = await get_effective_user_tier(user_id, conn)
-
-    is_subscribed = effective_tier in ("jainune_plus", "gold", "platinum")
-
-    # Filter content if text message
-    final_content = body.content
-    is_moderated = False
-    mod_type = None
-    mod_disclaimer = None
-
-    if body.message_type == "text" and body.content:
-        from app.services.chat_safety_filter import filter_chat_content
-        mod_result = await filter_chat_content(
-            content=body.content,
-            chat_id=actual_chat_id,
-            user_id=user_id,
-            redis=redis,
-            is_subscribed=is_subscribed,
-            user_disclaimer_approved=body.user_disclaimer_approved,
-        )
-        final_content = mod_result.content
-        is_moderated = mod_result.is_moderated
-        mod_type = mod_result.moderation_type
-        mod_disclaimer = mod_result.moderation_disclaimer
-
     async with db.acquire() as conn:
         async with conn.transaction():
+            chat = await _assert_participant(chat_id, user_id, conn)
+            actual_chat_id = chat["id"]
+
+            if chat.get("is_unmatched"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Chat thread is closed due to unmatch.",
+                )
+
+            # Validate ephemeral expiry atomically via DB NOW() (BUG-070)
+            if chat.get("is_expired"):
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail="This chat has expired.",
+                )
+            elif chat.get("expires_at"):
+                is_expired = await conn.fetchval(
+                    "SELECT (expires_at < NOW()) FROM chats WHERE id = $1",
+                    actual_chat_id,
+                )
+                if is_expired:
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail="This chat has expired.",
+                    )
+
+            try:
+                body.validate_content()
+            except ValueError as err:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err))
+
+            other_id = chat["participant_2_id"] if chat["participant_1_id"] == user_id else chat["participant_1_id"]
+
+            # Check user blocks atomically in the same transaction (BUG-063)
+            blocked = await conn.fetchval(
+                """
+                SELECT 1 FROM user_blocks
+                WHERE (blocker_id = $1 AND blocked_id = $2)
+                   OR (blocker_id = $2 AND blocked_id = $1)
+                LIMIT 1
+                """,
+                user_id, other_id,
+            )
+            if blocked:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Communication is blocked.",
+                )
+
+            # Check recipient status including suspended (BUG-066)
+            recipient_status = await conn.fetchval(
+                "SELECT account_status FROM users WHERE id = $1",
+                other_id,
+            )
+            if recipient_status in ("deleted", "banned", "suspended"):
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail="Recipient account is no longer active.",
+                )
+
+            effective_tier = await get_effective_user_tier(user_id, conn)
+            is_subscribed = effective_tier in ("jainune_plus", "gold", "platinum")
+
+            # Filter content if text message
+            final_content = body.content
+            is_moderated = False
+            mod_type = None
+            mod_disclaimer = None
+
+            if body.message_type == "text" and body.content:
+                from app.services.chat_safety_filter import filter_chat_content
+                mod_result = await filter_chat_content(
+                    content=body.content,
+                    chat_id=actual_chat_id,
+                    user_id=user_id,
+                    redis=redis,
+                    is_subscribed=is_subscribed,
+                    user_disclaimer_approved=body.user_disclaimer_approved,
+                )
+                final_content = mod_result.content
+                is_moderated = mod_result.is_moderated
+                mod_type = mod_result.moderation_type
+                mod_disclaimer = mod_result.moderation_disclaimer
+
             row = await conn.fetchrow(
                 """
                 INSERT INTO messages (

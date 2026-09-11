@@ -15,7 +15,7 @@ import logging
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.database import get_pool
@@ -160,11 +160,29 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
 async def get_my_profile(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis = Depends(get_redis),
 ):
-    """Return the authenticated user's full profile."""
+    """Return the authenticated user's full profile with 60s caching."""
     user_id = UUID(str(current_user.get("id") or current_user.get("user_id")))
+    cache_key = f"profile:{user_id}"
+    if redis:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                cached_data = json.loads(cached) if isinstance(cached, (str, bytes)) else cached
+                return cached_data
+        except Exception:
+            pass
+
     async with pool.acquire() as conn:
         data = await _get_user_row(user_id, conn)
+
+    if redis:
+        try:
+            await redis.set(cache_key, json.dumps(data, default=str), ex=60)
+        except Exception:
+            pass
+
     return data
 
 
@@ -187,6 +205,7 @@ async def update_my_prompts(
     body: UpdatePromptsBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis = Depends(get_redis),
 ):
     """Update profile prompts (1 to 3 items)."""
     user_id = current_user["user_id"]
@@ -198,6 +217,11 @@ async def update_my_prompts(
                     "INSERT INTO user_prompts (user_id, prompt_key, response_text, position) VALUES ($1, $2, $3, $4)",
                     user_id, p.prompt_key, p.response_text, p.position,
                 )
+    if redis:
+        try:
+            await redis.delete(f"feed:cache:{user_id}", f"profile:{user_id}")
+        except Exception:
+            pass
     return {"success": True, "message": "Prompts updated successfully"}
 
 
@@ -216,8 +240,16 @@ async def update_my_profile(
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields provided")
 
-    # Build dynamic SET clause
-    set_clauses = [f"{col} = ${i + 2}" for i, col in enumerate(updates)]
+    # Defensive column whitelist mapping strictly to predefined column identifiers (BUG-023)
+    # Column names must never be derived from untrusted user input.
+    _SAFE_COL_SET_TEMPLATES = {
+        k: f"{k} = ${{}}" for k in UpdateProfileBody.model_fields.keys()
+    }
+    set_clauses = [
+        _SAFE_COL_SET_TEMPLATES[col].format(i + 2)
+        for i, col in enumerate(updates)
+        if col in _SAFE_COL_SET_TEMPLATES
+    ]
     values = list(updates.values())
     query = f"""
         UPDATE users
@@ -238,7 +270,9 @@ async def update_my_profile(
 
     try:
         r = get_redis()
-        await r.delete(f"feed:cache:{current_user['user_id']}")
+        if r:
+            await r.delete(f"profile:{current_user['user_id']}")
+            await r.delete(f"feed:cache:{current_user['user_id']}")
     except Exception:
         pass
 
@@ -336,17 +370,22 @@ async def delete_my_account(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
     redis = Depends(get_redis),
+    request: Request = None,
 ):
     """
     Account deletion endpoint:
-    - hard_delete=False (default): Anonymizes PII, sets account_status='deleted', revokes sessions,
-      and preserves financial records for 7-year regulatory retention with a 72-hour hard purge schedule.
-    - hard_delete=True: Physically deletes non-financial records immediately. If active subscription exists,
-      safely falls back to soft-delete.
+    - Default: Soft delete, scrubs PII, sets account_status='deleted'.
+    - Hard delete is gated to superadmin/admin roles only (BUG-001).
     """
     from app.services.account_service import purge_user_account, soft_delete_user_account
 
     user_id = current_user["user_id"]
+    if hard_delete and request is not None:
+        user_role = current_user.get("role") or current_user.get("admin_role")
+        if user_role not in ("admin", "superadmin") and not current_user.get("is_admin"):
+            hard_delete = False
+
+    log.info("User %s requested account deletion (hard_delete=%s). Reason: %s", user_id, hard_delete, reason or "none provided")
     async with pool.acquire() as conn:
         if hard_delete:
             result = await purge_user_account(user_id, conn, redis)
@@ -368,7 +407,10 @@ async def delete_my_account(
                 "error": None,
             }
         else:
-            result = await soft_delete_user_account(user_id, conn, redis)
+            if reason:
+                result = await soft_delete_user_account(user_id, conn, redis, reason=reason)
+            else:
+                result = await soft_delete_user_account(user_id, conn, redis)
             return {
                 "success": True,
                 "data": {

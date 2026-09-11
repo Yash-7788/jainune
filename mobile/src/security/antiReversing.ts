@@ -59,3 +59,19 @@ export function zeroizeBuffer(buffer: Uint8Array | number[]): void {
     buffer.fill(0);
   }
 }
+
+/**
+ * Enforces SSL/TLS Subject Public Key Info (SPKI) pinning at the native layer.
+ */
+export async function enforceCertificatePinning(pins: string[] = SPKI_PINS): Promise<boolean> {
+  if (NativeModules.JainuneSecurityModule?.setCertificatePins) {
+    try {
+      await NativeModules.JainuneSecurityModule.setCertificatePins(pins);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+

@@ -41,7 +41,7 @@ services:
     restart: always
     env_file:
       - .env.production
-    command: celery -A app.celery_app worker -B --loglevel=info --concurrency=4 -Q default,notifications,batch
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q default,notifications,batch
     user: "10001:10001"
     init: true
     security_opt:
@@ -63,3 +63,37 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jainune_prod_beat
+    restart: always
+    env_file:
+      - .env.production
+    command: celery -A app.celery_app beat --loglevel=info -s /var/celerybeat/celerybeat-schedule
+    volumes:
+      - celerybeat_data:/var/celerybeat
+    user: "10001:10001"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  celerybeat_data:

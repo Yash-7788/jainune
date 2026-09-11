@@ -230,8 +230,7 @@ async def filter_chat_content(
     if len(stripped_char) == 1:
         single_char_key = f"chat:safety:single_chars:{chat_id}:{user_id}"
         count = await redis.incr(single_char_key)
-        if count == 1:
-            await redis.expire(single_char_key, 86400 * 30)
+        await redis.expire(single_char_key, 7 * 86400)
 
         if count >= 3:
             return ModerationResult(

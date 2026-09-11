@@ -210,8 +210,9 @@ async def presign_upload_get(
     redis: RedisDep,
     type: str = Query("photo", pattern="^(photo|voice)$"),
 ) -> UploadRequestResponse:
+    # Compatibility adapter for mobile with full capacity (BUG-055)
     ct = "image/jpeg" if type == "photo" else "audio/m4a"
-    size = 2 * 1024 * 1024 if type == "photo" else 1024 * 1024
+    size = _MAX_PHOTO_BYTES if type == "photo" else _MAX_VOICE_BYTES
     body = UploadRequestBody(
         media_type=type,
         content_type=ct,

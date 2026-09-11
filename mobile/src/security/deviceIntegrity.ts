@@ -171,31 +171,18 @@ async function checkDebuggerAttached(): Promise<boolean> {
 }
 
 /**
- * Probes for Frida server on localhost:27042 and frida-gadget in loaded maps.
+ * Probes for Frida instrumentation via native security module (BUG-057).
+ * Pure native inspection (/proc/self/maps on Android, dyld on iOS) in <1ms,
+ * eliminating 300ms localhost cleartext socket probe delay on startup.
  */
 async function checkFridaInstrumentation(): Promise<boolean> {
   if (NativeModules.JainuneSecurityModule?.detectFrida) {
-    return await NativeModules.JainuneSecurityModule.detectFrida();
-  }
-
-  // Socket probe on default Frida port 27042
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300);
-    const resp = await fetch("http://127.0.0.1:27042", {
-      method: "GET",
-      signal: controller.signal,
-    }).catch(() => null);
-    clearTimeout(timeoutId);
-
-    // If port 27042 responds, Frida server is running
-    if (resp !== null) {
-      return true;
+    try {
+      return await NativeModules.JainuneSecurityModule.detectFrida();
+    } catch {
+      return false;
     }
-  } catch {
-    // Port closed, normal state
   }
-
   return false;
 }
 

@@ -14,6 +14,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
 import uuid
 from uuid import UUID
@@ -68,6 +69,7 @@ class CreateDilemmaBody(BaseModel):
 async def get_dilemma_feed(
     limit: int = Query(default=10, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
+    cursor: Optional[str] = Query(default=None),
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
     redis: aioredis.Redis = Depends(get_redis_client),
@@ -75,31 +77,64 @@ async def get_dilemma_feed(
     """
     Returns dilemmas the current user has not voted on yet, newest-first.
     Already-voted dilemmas appear at the end with user_choice populated.
+    Supports cursor pagination via ISO timestamp or fallback offset.
     """
     await sliding_window_rate_limit(f"ratelimit:arcade:feed:{current_user['user_id']}", 60, 60, redis)
+    cursor_dt = None
+    if cursor:
+        try:
+            cursor_dt = datetime.fromisoformat(cursor.strip())
+        except Exception:
+            cursor_dt = None
+
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                d.id,
-                d.question_text,
-                d.option_a,
-                d.option_b,
-                d.tags,
-                d.total_votes_a,
-                d.total_votes_b,
-                dv.choice AS user_choice
-            FROM dilemmas d
-            LEFT JOIN dilemma_votes dv
-                ON dv.dilemma_id = d.id AND dv.user_id = $1
-            WHERE d.is_active = TRUE
-            ORDER BY (dv.choice IS NULL) DESC, d.created_at DESC
-            LIMIT $2 OFFSET $3
-            """,
-            current_user["user_id"],
-            limit,
-            offset,
-        )
+        if cursor_dt:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    d.id,
+                    d.question_text,
+                    d.option_a,
+                    d.option_b,
+                    d.tags,
+                    d.total_votes_a,
+                    d.total_votes_b,
+                    dv.choice AS user_choice
+                FROM dilemmas d
+                LEFT JOIN dilemma_votes dv
+                    ON dv.dilemma_id = d.id AND dv.user_id = $1
+                WHERE d.is_active = TRUE
+                  AND d.created_at < $2
+                ORDER BY (dv.choice IS NULL) DESC, d.created_at DESC
+                LIMIT $3
+                """,
+                current_user["user_id"],
+                cursor_dt,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    d.id,
+                    d.question_text,
+                    d.option_a,
+                    d.option_b,
+                    d.tags,
+                    d.total_votes_a,
+                    d.total_votes_b,
+                    dv.choice AS user_choice
+                FROM dilemmas d
+                LEFT JOIN dilemma_votes dv
+                    ON dv.dilemma_id = d.id AND dv.user_id = $1
+                WHERE d.is_active = TRUE
+                ORDER BY (dv.choice IS NULL) DESC, d.created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                current_user["user_id"],
+                limit,
+                offset,
+            )
 
     return [
         {
@@ -366,24 +401,30 @@ async def spin_serendipity_wheel(
             show_me = current_user.get("show_me")
             target_gender = "man" if show_me in ("men", "man") else ("woman" if show_me in ("women", "woman") else None)
 
+            # Bounded candidate pool sample to eliminate full-table scan on random() (BUG-033)
             candidate = await conn.fetchrow(
                 """
+                WITH candidate_pool AS (
+                    SELECT id, first_name, city
+                    FROM users u
+                    WHERE u.id != $1
+                      AND u.account_status = 'active'
+                      AND u.is_paused = FALSE
+                      AND u.onboarding_completed = TRUE
+                      AND ($2::text IS NULL OR u.gender = $2::text)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM user_blocks ub
+                          WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                             OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM interactions i
+                          WHERE i.actor_id = $1 AND i.target_id = u.id
+                      )
+                    LIMIT 50
+                )
                 SELECT id, first_name, city
-                FROM users u
-                WHERE u.id != $1
-                  AND u.account_status = 'active'
-                  AND u.is_paused = FALSE
-                  AND u.onboarding_completed = TRUE
-                  AND ($2::text IS NULL OR u.gender = $2::text)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM user_blocks ub
-                      WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
-                         OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM interactions i
-                      WHERE i.actor_id = $1 AND i.target_id = u.id
-                  )
+                FROM candidate_pool
                 ORDER BY random()
                 LIMIT 1
                 """,

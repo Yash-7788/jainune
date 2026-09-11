@@ -61,8 +61,7 @@ async def verify_otp(
     session_key = f"auth:otp:{phone_number}"
 
     attempts = await redis.incr(rate_key)
-    if attempts == 1:
-        await redis.expire(rate_key, 300)
+    await redis.expire(rate_key, 300)
     if attempts > 5:
         await redis.delete(session_key)
         raise HTTPException(
@@ -169,41 +168,45 @@ async def sliding_window_rate_limit(
     window_seconds: int,
     redis: aioredis.Redis,
 ) -> None:
-    """Sliding-window rate limiter using Redis sorted set."""
-    if redis is None or not hasattr(redis, "pipeline"):
+    """Sliding-window rate limiter using Redis sorted set with atomic pipeline and fail-closed behavior."""
+    from fastapi.params import Depends
+    if isinstance(redis, Depends):
         return
 
+    if redis is None or not hasattr(redis, "pipeline"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limiting service unavailable.",
+        )
+
     import time
+    import secrets
     now_ms = int(time.time() * 1000)
     window_start = now_ms - (window_seconds * 1000)
 
-    import secrets
-    pipe = redis.pipeline()
-    if hasattr(pipe, "__await__"):
-        try:
+    try:
+        pipe = redis.pipeline()
+        if hasattr(pipe, "__await__"):
             pipe = await pipe
-        except Exception:
-            return
-    if not hasattr(pipe, "zremrangebyscore"):
-        return
 
-    res1 = pipe.zremrangebyscore(key, 0, window_start)
-    if hasattr(res1, "__await__"):
-        await res1
-    res2 = pipe.zadd(key, {f"{now_ms}:{secrets.token_hex(4)}": now_ms})
-    if hasattr(res2, "__await__"):
-        await res2
-    res3 = pipe.zcard(key)
-    if hasattr(res3, "__await__"):
-        await res3
-    res4 = pipe.expire(key, window_seconds + 1)
-    if hasattr(res4, "__await__"):
-        await res4
-    results = None
-    if callable(getattr(pipe, "execute", None)):
+        r1 = pipe.zremrangebyscore(key, 0, window_start)
+        r2 = pipe.zadd(key, {f"{now_ms}:{secrets.token_hex(4)}": now_ms})
+        r3 = pipe.zcard(key)
+        r4 = pipe.expire(key, window_seconds + 1)
+        for r in (r1, r2, r3, r4):
+            if hasattr(r, "__await__"):
+                await r
+
         res = pipe.execute()
         results = await res if hasattr(res, "__await__") else res
-    count = results[2] if isinstance(results, (list, tuple)) and len(results) > 2 else 1
+        count = results[2] if isinstance(results, (list, tuple)) and len(results) > 2 else 1
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limiting service unavailable.",
+        )
 
     if count > limit:
         raise HTTPException(

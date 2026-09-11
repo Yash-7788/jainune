@@ -179,3 +179,53 @@ async def save_city_waitlist(
             lon,
             city_hint,
         )
+
+
+def snap_to_geohash_6(lat: float, lon: float) -> tuple[float, float]:
+    """Snap raw coordinates to Geohash-6 cell centroid (~1.2km) in pure Python (BUG-036)."""
+    _BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    lat_interval, lon_interval = [-90.0, 90.0], [-180.0, 180.0]
+    is_even = True
+    bit = 0
+    ch = 0
+    geohash = []
+    while len(geohash) < 6:
+        if is_even:
+            mid = (lon_interval[0] + lon_interval[1]) / 2.0
+            if lon > mid:
+                ch |= (1 << (4 - bit))
+                lon_interval[0] = mid
+            else:
+                lon_interval[1] = mid
+        else:
+            mid = (lat_interval[0] + lat_interval[1]) / 2.0
+            if lat > mid:
+                ch |= (1 << (4 - bit))
+                lat_interval[0] = mid
+            else:
+                lat_interval[1] = mid
+        is_even = not is_even
+        if bit < 4:
+            bit += 1
+        else:
+            geohash.append(_BASE32[ch])
+            bit = 0
+            ch = 0
+
+    lat_int, lon_int = [-90.0, 90.0], [-180.0, 180.0]
+    is_even = True
+    for c in geohash:
+        cd = _BASE32.index(c)
+        for mask in [16, 8, 4, 2, 1]:
+            if is_even:
+                if cd & mask:
+                    lon_int[0] = (lon_int[0] + lon_int[1]) / 2.0
+                else:
+                    lon_int[1] = (lon_int[0] + lon_int[1]) / 2.0
+            else:
+                if cd & mask:
+                    lat_int[0] = (lat_int[0] + lat_int[1]) / 2.0
+                else:
+                    lat_int[1] = (lat_int[0] + lat_int[1]) / 2.0
+            is_even = not is_even
+    return round((lat_int[0] + lat_int[1]) / 2.0, 6), round((lon_int[0] + lon_int[1]) / 2.0, 6)

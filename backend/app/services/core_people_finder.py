@@ -22,6 +22,8 @@ import redis.asyncio as aioredis
 
 log = logging.getLogger(__name__)
 
+_background_tasks: set[asyncio.Task] = set()
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -118,19 +120,23 @@ async def fetch_recommended_feed(
     if not force_refresh:
         cached = await _get_cached_feed(user_id, redis)
         if cached:
-            batch = cached[:limit]
-            remaining = cached[limit:]
-            # Slide the cache forward
-            if remaining:
-                await _cache_feed(user_id, remaining, redis)
+            if len(cached) >= limit:
+                batch = cached[:limit]
+                remaining = cached[limit:]
+                # Slide the cache forward
+                if remaining:
+                    await _cache_feed(user_id, remaining, redis)
+                else:
+                    await redis.delete(f"feed:cache:{user_id}")
+                return {
+                    "candidates": batch,
+                    "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                    "exhausted": len(remaining) == 0,
+                    "from_cache": True,
+                }
             else:
+                # Partial cache drained below limit: clear stale cache and trigger full pipeline (BUG-012)
                 await redis.delete(f"feed:cache:{user_id}")
-            return {
-                "candidates": batch,
-                "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
-                "exhausted": len(remaining) == 0,
-                "from_cache": True,
-            }
 
     # L0 + L1 + L2 + L3: Full pipeline
     candidates = await _run_pipeline(user_id, user_data, db, limit * 2)
@@ -146,7 +152,9 @@ async def fetch_recommended_feed(
             for c in candidates:
                 pipe.hincrby("buffer:user_impressions_48h", str(c["id"]), 1)
             await pipe.execute()
-            asyncio.create_task(_async_flush_impressions(db, redis))
+            t = asyncio.create_task(_async_flush_impressions(db, redis))
+            _background_tasks.add(t)
+            t.add_done_callback(_background_tasks.discard)
         except Exception:
             pass
 
@@ -167,7 +175,6 @@ async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> N
         counts = await redis.hgetall("buffer:user_impressions_48h")
         if not counts:
             return
-        await redis.delete("buffer:user_impressions_48h")
         updates = [
             (int(v), uuid.UUID(k.decode() if isinstance(k, bytes) else k))
             for k, v in counts.items()
@@ -177,6 +184,9 @@ async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> N
                 "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
                 updates,
             )
+        # Delete only after DB commit succeeds (BUG-084)
+        if counts:
+            await redis.hdel("buffer:user_impressions_48h", *counts.keys())
     except Exception:
         pass
 
@@ -324,6 +334,11 @@ async def _run_pipeline(
                 SELECT 1 FROM user_blocks ub
                 WHERE (ub.blocker_id = $8 AND ub.blocked_id = u.id)
                    OR (ub.blocker_id = u.id AND ub.blocked_id = $8)
+            )
+            -- Candidates must have at least one approved photo in feed (BUG-038)
+            AND EXISTS (
+                SELECT 1 FROM user_media um
+                WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
             )
         ORDER BY COALESCE(b.revealed_preference_vector <=> $2::vector, 2.0) ASC
         LIMIT 200
@@ -535,6 +550,10 @@ async def fetch_daily_compatible(
                   WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
                      OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
               )
+              AND EXISTS (
+                  SELECT 1 FROM user_media um
+                  WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
+              )
             ORDER BY dp.proposed_at DESC
             LIMIT 1
             """,
@@ -565,6 +584,10 @@ async def fetch_daily_compatible(
                       SELECT 1 FROM user_blocks ub
                       WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
                          OR (ub.blocker_id = u.id AND ub.blocked_id = $1)
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM user_media um
+                      WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved'
                   )
                 ORDER BY COALESCE(
                     b.revealed_preference_vector <=>

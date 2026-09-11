@@ -148,6 +148,16 @@ async def _run_moderation(
                     """,
                     cdn_url, prod_key, media_id,
                 )
+                # Activate user if onboarding completed and was waiting for media approval (BUG-038)
+                if user_id:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET account_status = 'active', updated_at = NOW()
+                        WHERE id = $1 AND onboarding_step = 22 AND account_status = 'pending_media'
+                        """,
+                        user_id,
+                    )
             # Delete raw upload from quarantine bucket
             await asyncio.to_thread(_delete_from_quarantine, s3_key)
         else:
@@ -161,6 +171,17 @@ async def _run_moderation(
                     """,
                     reason, media_id,
                 )
+                # If no valid photos remain, downgrade user from active to pending_media (BUG-038)
+                if user_id and media_type == "photo":
+                    remaining = await conn.fetchval(
+                        "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = 'photo' AND status IN ('approved', 'pending')",
+                        user_id,
+                    )
+                    if not remaining:
+                        await conn.execute(
+                            "UPDATE users SET account_status = 'pending_media', updated_at = NOW() WHERE id = $1 AND account_status = 'active'",
+                            user_id,
+                        )
             # Delete from quarantine
             await asyncio.to_thread(_delete_from_quarantine, s3_key)
 

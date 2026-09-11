@@ -30,6 +30,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from app.celery_app import celery_app
 from app.core.config import settings
+from app.workers.worker_pool import get_worker_conn, run_worker_task
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ DELETED_USER_RETENTION_DAYS = 30
 
 
 async def _get_conn() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.database_url)
+    return await get_worker_conn()
 
 
 def _s3_client():
@@ -67,12 +68,11 @@ def reap_ephemeral_media() -> None:
 
     async def _run():
         conn = await _get_conn()
-        s3 = _s3_client()
-        if not s3:
-            log.info("reap_ephemeral_media: AWS S3 client unavailable/mock, skipping S3 purge")
-            await conn.close()
-            return
         try:
+            s3 = _s3_client()
+            if not s3:
+                log.info("reap_ephemeral_media: AWS S3 client unavailable/mock, skipping S3 purge")
+                return
             rows = await conn.fetch(
                 """
                 SELECT id, s3_key
@@ -105,7 +105,7 @@ def reap_ephemeral_media() -> None:
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +125,19 @@ def downgrade_expired_subscriptions() -> None:
         try:
             result = await conn.execute(
                 """
+                WITH to_downgrade AS (
+                    SELECT id FROM users
+                    WHERE subscription_tier != 'free'
+                      AND subscription_valid_until IS NOT NULL
+                      AND subscription_valid_until < NOW()
+                    LIMIT 500
+                )
                 UPDATE users
-                   SET subscription_tier       = 'free',
-                       subscription_valid_until = NULL,
-                       updated_at               = NOW()
-                 WHERE subscription_tier != 'free'
-                   AND subscription_valid_until IS NOT NULL
-                   AND subscription_valid_until < NOW()
+                   SET subscription_tier        = 'free',
+                       subscription_valid_until  = NULL,
+                       super_connect_credits     = 0,
+                       updated_at                = NOW()
+                 WHERE id IN (SELECT id FROM to_downgrade)
                 """
             )
             # asyncpg returns 'UPDATE N'
@@ -141,7 +147,7 @@ def downgrade_expired_subscriptions() -> None:
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -160,23 +166,54 @@ def reap_stale_matches() -> None:
         conn = await _get_conn()
         try:
             # --- Step 1: expire silent matches ---
-            expired_ids = await conn.fetch(
-                f"""
-                UPDATE matches
-                   SET status     = 'expired',
-                       expired_at = NOW()
-                 WHERE status IN ('active', 'matched')
-                   AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
-                RETURNING id
-                """
-            )
-            if expired_ids:
-                exp_list = [r["id"] for r in expired_ids]
-                await conn.execute(
-                    "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
-                    exp_list,
+            tx = conn.transaction() if hasattr(conn, "transaction") and callable(conn.transaction) else None
+            if tx is not None and hasattr(tx, "__aenter__") and not asyncio.iscoroutine(tx):
+                async with tx:
+                    expired_ids = await conn.fetch(
+                        f"""
+                        UPDATE matches
+                           SET status     = 'expired',
+                               expired_at = NOW()
+                         WHERE status IN ('active', 'matched')
+                           AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
+                        RETURNING id
+                        """
+                    )
+                    if expired_ids:
+                        exp_list = [r["id"] for r in expired_ids]
+                        await conn.execute(
+                            "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                            exp_list,
+                        )
+            else:
+                expired_ids = await conn.fetch(
+                    f"""
+                    UPDATE matches
+                       SET status     = 'expired',
+                           expired_at = NOW()
+                     WHERE status IN ('active', 'matched')
+                       AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
+                    RETURNING id
+                    """
                 )
+                if expired_ids:
+                    exp_list = [r["id"] for r in expired_ids]
+                    await conn.execute(
+                        "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                        exp_list,
+                    )
+            if expired_ids:
                 log.info("reap_stale_matches: expired %d matches and closed chats", len(expired_ids))
+                try:
+                    from app.core.redis import get_redis
+                    r = get_redis()
+                    if r and hasattr(r, "scan_iter"):
+                        for mid in exp_list:
+                            pattern = f"chat:safety:single_chars:{mid}:*"
+                            async for k in r.scan_iter(pattern):
+                                await r.delete(k)
+                except Exception:
+                    pass
 
             # --- Step 2: warn matches expiring within EXPIRY_WARN_HOURS ---
             warn_ids = await conn.fetch(
@@ -206,7 +243,7 @@ def reap_stale_matches() -> None:
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +254,7 @@ def reap_stale_matches() -> None:
 @celery_app.task(name="app.workers.ephemeral_reaper.purge_deleted_users")
 def purge_deleted_users() -> None:
     """
-    Hard-delete users soft-deleted > 72 hours ago per DPDP Act & UI terms.
+    Hard-delete users soft-deleted > DELETED_USER_RETENTION_DAYS days ago per DPDP Act & UI terms.
     Excludes users with active paid subscriptions to retain billing and audit integrity.
     Archives all payment and transaction records to financial_audit_logs (7-year RBI retention).
     """
@@ -226,10 +263,10 @@ def purge_deleted_users() -> None:
         conn = await _get_conn()
         try:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT id FROM users
                 WHERE account_status = 'deleted'
-                  AND deleted_at < NOW() - INTERVAL '72 hours'
+                  AND deleted_at < NOW() - INTERVAL '{DELETED_USER_RETENTION_DAYS} days'
                   AND (subscription_tier = 'free' OR subscription_valid_until IS NULL OR subscription_valid_until < NOW())
                 LIMIT 100
                 """
@@ -285,7 +322,10 @@ def purge_deleted_users() -> None:
                 ids,
             )
             from app.services.account_service import _delete_s3_keys_sync
-            _delete_s3_keys_sync([mk["s3_key"] for mk in media_keys if mk.get("s3_key")])
+            await asyncio.to_thread(
+                _delete_s3_keys_sync,
+                [mk["s3_key"] for mk in media_keys if mk.get("s3_key")],
+            )
 
             # Hard delete — cascades non-financial data
             result = await conn.execute(
@@ -297,7 +337,7 @@ def purge_deleted_users() -> None:
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -327,4 +367,4 @@ def reap_stale_payment_intents() -> None:
         finally:
             await conn.close()
 
-    asyncio.run(_run())
+    run_worker_task(_run())

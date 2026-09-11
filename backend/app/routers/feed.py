@@ -41,7 +41,25 @@ async def get_feed(
     # Rate limit: 20 feed requests per minute per user (SECURITY.md 10.1)
     await sliding_window_rate_limit(f"ratelimit:feed:{user_id}", 20, 60, redis)
 
-    # Enrich current_user with location + behavior vector for pipeline
+    # Check cache first to avoid unnecessary DB connection acquisition (BUG-080)
+    if not refresh:
+        from app.services.core_people_finder import _get_cached_feed
+        cached = await _get_cached_feed(user_id, redis)
+        if cached and len(cached) >= limit:
+            result = await fetch_recommended_feed(
+                user_id=user_id,
+                user_data=dict(current_user),
+                db=db,
+                redis=redis,
+                limit=limit,
+                force_refresh=False,
+            )
+            for c in result["candidates"]:
+                c.pop("_behavioral_affinity", None)
+                c.pop("_cultural_score", None)
+            return FeedResponse(**result)
+
+    # Enrich current_user with location + behavior vector for pipeline on cache miss
     async with db.acquire() as conn:
         extra = await conn.fetchrow(
             """

@@ -24,20 +24,28 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 import asyncpg
 
 from app.core.database import get_pool
 from app.core.redis import get_redis
-from app.core.security import sliding_window_rate_limit
+from app.core.security import get_trusted_client_ip, sliding_window_rate_limit
 from app.dependencies import get_current_user, require_admin, require_superadmin
 from app.services.messaging_service import _mask_phone
 from app.services.dignity_engine import recompute_trust_score
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", tags=["Admin"])
+
+
+def _extract_admin_network_info(request: Request = None) -> tuple[str, Optional[str]]:
+    if not request:
+        return "127.0.0.1", None
+    ip = get_trusted_client_ip(request)
+    ua = request.headers.get("user-agent", "")[:500] if hasattr(request, "headers") else None
+    return ip or "127.0.0.1", ua
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +150,10 @@ async def get_user_detail(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """Full user record including PII — for moderator review with role-based redaction."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
+    is_superadmin = admin.get("admin_role") == "superadmin"
+
+    if is_superadmin:
+        query = """
             SELECT
                 u.*,
                 (SELECT COUNT(*) FROM reports WHERE reported_id = u.id) AS report_count,
@@ -152,14 +161,30 @@ async def get_user_detail(
                 (SELECT COUNT(*) FROM user_media WHERE user_id = u.id AND status = 'approved') AS media_count
             FROM users u
             WHERE u.id = $1
-            """,
-            user_id,
-        )
+        """
+    else:
+        query = """
+            SELECT
+                u.id, u.phone_number, u.email, u.first_name, u.gender, u.date_of_birth,
+                u.height_cm, u.marital_status, u.dietary_preference, u.gotra,
+                u.sub_sect, u.sampradaya, u.bio, u.job_title, u.company, u.education,
+                u.account_status, u.subscription_tier, u.trust_score, u.created_at, u.updated_at,
+                u.last_active_at, u.location_zone, u.is_verified, u.is_paused,
+                u.suspend_until, u.deleted_at,
+                (SELECT COUNT(*) FROM reports WHERE reported_id = u.id) AS report_count,
+                (SELECT COUNT(*) FROM dignity_badges WHERE to_user_id = u.id) AS badge_count,
+                (SELECT COUNT(*) FROM user_media WHERE user_id = u.id AND status = 'approved') AS media_count
+            FROM users u
+            WHERE u.id = $1
+        """
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     res = dict(row)
-    if admin.get("admin_role") != "superadmin":
+    if not is_superadmin:
         from app.services.messaging_service import _mask_phone, _mask_email
         if res.get("phone_number"):
             res["phone_number"] = _mask_phone(res["phone_number"])
@@ -171,6 +196,14 @@ async def get_user_detail(
             "income",
             "income_range",
             "annual_income",
+            "fcm_token",
+            "apns_token",
+            "device_token",
+            "google_id",
+            "apple_id",
+            "auth_provider",
+            "impressions_last_48h",
+            "super_connect_credits",
         ):
             res.pop(sensitive_col, None)
     return res
@@ -182,8 +215,10 @@ async def ban_user(
     body: BanBody,
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
+    request: Request = None,
 ):
     """Permanently ban a user. Logs the action in admin_audit_log and revokes active sessions."""
+    admin_ip, admin_ua = _extract_admin_network_info(request)
     async with pool.acquire() as conn:
         async with conn.transaction():
             res = await conn.execute(
@@ -202,12 +237,14 @@ async def ban_user(
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
-                    (admin_user_id, target_user_id, action, reason)
-                VALUES ($1, $2, 'ban', $3)
+                    (admin_user_id, target_user_id, action, reason, ip_address, user_agent)
+                VALUES ($1, $2, 'ban', $3, $4::inet, $5)
                 """,
                 admin["user_id"],
                 user_id,
                 body.reason,
+                admin_ip,
+                admin_ua,
             )
 
     try:
@@ -225,11 +262,13 @@ async def suspend_user(
     body: SuspendBody,
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
+    request: Request = None,
 ):
     """Temporarily suspend a user for N days."""
     from datetime import datetime, timedelta, timezone
 
     suspend_until = datetime.now(tz=timezone.utc) + timedelta(days=body.suspend_until_days)
+    admin_ip, admin_ua = _extract_admin_network_info(request)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -250,12 +289,14 @@ async def suspend_user(
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
-                    (admin_user_id, target_user_id, action, reason)
-                VALUES ($1, $2, 'suspend', $3)
+                    (admin_user_id, target_user_id, action, reason, ip_address, user_agent)
+                VALUES ($1, $2, 'suspend', $3, $4::inet, $5)
                 """,
                 admin["user_id"],
                 user_id,
                 body.reason,
+                admin_ip,
+                admin_ua,
             )
 
     try:
@@ -272,8 +313,10 @@ async def reinstate_user(
     user_id: UUID,
     admin: dict = Depends(require_superadmin),
     pool: asyncpg.Pool = Depends(get_pool),
+    request: Request = None,
 ):
     """Lift a suspension or ban. Superadmin only."""
+    admin_ip, admin_ua = _extract_admin_network_info(request)
     async with pool.acquire() as conn:
         async with conn.transaction():
             res = await conn.execute(
@@ -292,11 +335,13 @@ async def reinstate_user(
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
-                    (admin_user_id, target_user_id, action, reason)
-                VALUES ($1, $2, 'reinstate', 'Manual reinstate by superadmin')
+                    (admin_user_id, target_user_id, action, reason, ip_address, user_agent)
+                VALUES ($1, $2, 'reinstate', 'Manual reinstate by superadmin', $3::inet, $4)
                 """,
                 admin["user_id"],
                 user_id,
+                admin_ip,
+                admin_ua,
             )
     return {"reinstated": True, "user_id": user_id}
 
@@ -333,7 +378,14 @@ async def list_reports(
             limit,
             offset,
         )
-    return {"reports": [dict(r) for r in rows]}
+    reports_list = []
+    is_superadmin = admin.get("admin_role") == "superadmin"
+    for r in rows:
+        d = dict(r)
+        if not is_superadmin and d.get("reported_phone"):
+            d["reported_phone"] = _mask_phone(d["reported_phone"])
+        reports_list.append(d)
+    return {"reports": reports_list}
 
 
 @router.post("/reports/{report_id}/resolve", status_code=status.HTTP_200_OK)
@@ -342,8 +394,10 @@ async def resolve_report(
     body: ResolveReportBody,
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
+    request: Request = None,
 ):
     """Mark a report as resolved and log the action taken."""
+    admin_ip, admin_ua = _extract_admin_network_info(request)
     async with pool.acquire() as conn:
         report = await conn.fetchrow(
             "SELECT reported_id FROM reports WHERE id = $1",
@@ -375,6 +429,10 @@ async def resolve_report(
                     "UPDATE users SET account_status = 'banned', updated_at = NOW() WHERE id = $1",
                     report["reported_id"],
                 )
+                await conn.execute(
+                    "DELETE FROM refresh_tokens WHERE user_id = $1",
+                    report["reported_id"],
+                )
             elif body.action_taken == "suspended":
                 from datetime import datetime, timedelta, timezone
                 suspend_until = datetime.now(tz=timezone.utc) + timedelta(days=7)
@@ -383,21 +441,34 @@ async def resolve_report(
                     suspend_until,
                     report["reported_id"],
                 )
+                await conn.execute(
+                    "DELETE FROM refresh_tokens WHERE user_id = $1",
+                    report["reported_id"],
+                )
 
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
-                    (admin_user_id, target_user_id, action, reason)
-                VALUES ($1, $2, $3, $4)
+                    (admin_user_id, target_user_id, action, reason, ip_address, user_agent)
+                VALUES ($1, $2, $3, $4, $5::inet, $6)
                 """,
                 admin["user_id"],
                 report["reported_id"],
                 f"report_resolved:{body.action_taken}",
                 body.notes or "",
+                admin_ip,
+                admin_ua,
             )
 
             # Recompute trust score for reported user inside the same transaction
             await recompute_trust_score(report["reported_id"], conn)
+
+    if body.action_taken in ("banned", "suspended"):
+        try:
+            r = get_redis()
+            await r.delete(f"user:session:{report['reported_id']}", f"feed:cache:{report['reported_id']}")
+        except Exception:
+            pass
 
     return {"resolved": True, "report_id": report_id}
 
@@ -431,7 +502,14 @@ async def list_pending_media(
             limit,
             offset,
         )
-    return {"media": [dict(r) for r in rows]}
+    media_list = []
+    is_superadmin = admin.get("admin_role") == "superadmin"
+    for r in rows:
+        d = dict(r)
+        if not is_superadmin and d.get("phone_number"):
+            d["phone_number"] = _mask_phone(d["phone_number"])
+        media_list.append(d)
+    return {"media": media_list}
 
 
 @router.post("/media/{media_id}/approve", status_code=status.HTTP_200_OK)
@@ -504,7 +582,18 @@ async def get_dashboard_stats(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Key operational metrics for the admin dashboard."""
+    """Key operational metrics for the admin dashboard with 60s Redis caching (BUG-034)."""
+    r = None
+    try:
+        r = get_redis()
+        if r:
+            cached = await r.get("admin:stats:dashboard")
+            if cached:
+                import json
+                return json.loads(cached.decode() if isinstance(cached, bytes) else cached)
+    except Exception:
+        r = None
+
     async with pool.acquire() as conn:
         stats = await conn.fetchrow(
             """
@@ -522,7 +611,15 @@ async def get_dashboard_stats(
                 (SELECT COUNT(*) FROM matches WHERE created_at > NOW() - INTERVAL '24h') AS matches_24h
             """
         )
-    return dict(stats)
+    res = dict(stats) if stats else {}
+    try:
+        if r:
+            import json
+            await r.set("admin:stats:dashboard", json.dumps(res, default=str), ex=60)
+    except Exception:
+        pass
+
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -551,8 +648,14 @@ async def trigger_campaign_broadcast(
     try:
         r = get_redis()
         await sliding_window_rate_limit(f"ratelimit:admin:broadcast:{admin['user_id']}", 5, 3600, r)
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("Rate limit check failed for broadcast campaign: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limiting unavailable. Broadcast campaign rejected for safety.",
+        )
 
     from app.services.messaging_service import broadcast_promotional_campaign
     res = await broadcast_promotional_campaign(
@@ -594,8 +697,10 @@ async def admin_refund_subscription(
     try:
         r = get_redis()
         await sliding_window_rate_limit(f"ratelimit:admin:refund:{admin['user_id']}", 20, 3600, r)
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("Rate limit service unavailable for admin refund: %s", exc)
 
     from app.services import payment_service
     res = await payment_service.initiate_refund(

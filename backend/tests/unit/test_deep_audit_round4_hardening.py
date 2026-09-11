@@ -229,6 +229,70 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cdn_url, "https://cdn.jainune.com/media/xyz.webp")
         self.assertNotIn("com//media", cdn_url)
 
+    def test_08_purge_deleted_users_uses_asyncio_to_thread_for_s3_delete(self):
+        """purge_deleted_users must delegate blocking S3 deletion to threadpool."""
+        from app.workers.ephemeral_reaper import purge_deleted_users
+        import asyncio
+
+        mock_conn = _mock_async_conn()
+        user_id = uuid.uuid4()
+        mock_conn.fetch.side_effect = [
+            [{"id": user_id}],  # SELECT id FROM users WHERE account_status = 'deleted'...
+            [{"s3_key": "user_photos/test.webp"}],  # SELECT s3_key FROM user_media...
+        ]
+        mock_conn.execute.return_value = "DELETE 1"
+
+        with patch("app.workers.ephemeral_reaper._get_conn", new_callable=AsyncMock) as mock_get_conn, \
+             patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread, \
+             patch("app.services.account_service._delete_s3_keys_sync") as mock_delete_s3:
+            mock_get_conn.return_value = mock_conn
+            purge_deleted_users()
+            self.assertTrue(mock_to_thread.called)
+            # Verify the target function was _delete_s3_keys_sync and keys were passed
+            self.assertEqual(mock_to_thread.call_args[0][0], mock_delete_s3)
+            self.assertEqual(mock_to_thread.call_args[0][1], ["user_photos/test.webp"])
+
+    async def test_09_daily_likes_redis_ttl_refreshed_on_every_incr(self):
+        """record_interaction_action must refresh Redis TTL on every like increment."""
+        from app.routers.interactions import record_interaction_action
+        from app.models.schemas.interaction import InteractionActionRequest
+
+        actor_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        body = InteractionActionRequest(target_id=target_id, action="like")
+
+        conn = _mock_async_conn()
+        conn.fetchrow.side_effect = [
+            {"id": target_id, "account_status": "active", "deleted_at": None},  # target user check
+            None,                                                                # existing interaction check
+            None,                                                                # mutual like check (no mutual)
+        ]
+        conn.fetchval.side_effect = [
+            0,     # user_blocks check
+        ]
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__.return_value = conn
+
+        mock_redis = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[0, 1, 1, True])
+        mock_redis.pipeline.return_value = mock_pipe
+        # Simulate new_count = 2 (not first increment)
+        mock_redis.incr = AsyncMock(return_value=2)
+        mock_redis.expire = AsyncMock(return_value=True)
+
+        with patch("app.services.payment_service.get_effective_user_tier", new_callable=AsyncMock) as mock_tier:
+            mock_tier.return_value = "free"
+            res = await record_interaction_action(
+                body=body,
+                current_user={"id": str(actor_id)},
+                db=pool,
+                redis=mock_redis,
+            )
+            self.assertTrue(res.success)
+            self.assertTrue(mock_redis.incr.called)
+            self.assertTrue(mock_redis.expire.called)
+
 
 if __name__ == "__main__":
     unittest.main()

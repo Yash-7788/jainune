@@ -102,7 +102,9 @@ async def file_report(
         )
 
         # Evaluate auto-action thresholds
-        await _evaluate_auto_action(reported_id, conn)
+        actioned = await _evaluate_auto_action(reported_id, conn)
+        if actioned:
+            await recompute_trust_score(reported_id, conn)
 
     return {"id": report_id, "duplicate": False}
 
@@ -110,7 +112,7 @@ async def file_report(
 async def _evaluate_auto_action(
     user_id: UUID,
     conn: asyncpg.Connection,
-) -> None:
+) -> bool:
     """
     Evaluate abuse reports against user_id.
     Prevents unreviewed brigading:
@@ -137,7 +139,7 @@ async def _evaluate_auto_action(
     elif count >= AUTO_SUSPEND_THRESHOLD:
         new_status = "suspended"
     else:
-        return
+        return False
 
     current_status = await conn.fetchval(
         "SELECT account_status FROM users WHERE id = $1",
@@ -145,7 +147,7 @@ async def _evaluate_auto_action(
     )
 
     if current_status in ("banned", "deleted") or current_status == new_status:
-        return  # already actioned
+        return False  # already actioned
 
     await conn.execute(
         """
@@ -161,6 +163,7 @@ async def _evaluate_auto_action(
         user_id,
         valid_reporters_count,
     )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +262,7 @@ async def recompute_trust_score(
         SELECT
             u.is_photo_verified,
             u.created_at,
-            (SELECT COUNT(*) FROM media
+            (SELECT COUNT(*) FROM user_media
              WHERE user_id = u.id AND media_type = 'voice' AND status = 'approved'
             ) AS has_voice,
             (SELECT COUNT(*) FROM reports

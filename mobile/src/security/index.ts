@@ -18,6 +18,7 @@ export {
   disableScreenCaptureProtection,
   zeroizeBuffer,
   SPKI_PINS,
+  enforceCertificatePinning,
 } from "./antiReversing";
 
 export {

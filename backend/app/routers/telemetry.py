@@ -13,6 +13,7 @@ The async telemetry_worker drains the stream and writes to DB.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import List, Optional
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/telemetry", tags=["telemetry"])
 
 # ---------------------------------------------------------------------------
@@ -163,11 +165,15 @@ async def ingest_events(
         await pipe.execute()
         accepted = len(batch.events)
         dropped = 0
-    except Exception:
+    except Exception as exc:
+        log.warning("Telemetry pipeline execution failed; dropping %d events: %s", len(batch.events), exc)
         accepted = 0
         dropped = len(batch.events)
 
     return TelemetryResponse(accepted=accepted, dropped=dropped)
+
+
+_ALLOWED_INTERACTION_ACTIONS = {"like", "pass", "super_connect", "superlike", "view", "skip"}
 
 
 class InteractionEventPayload(BaseModel):
@@ -178,6 +184,13 @@ class InteractionEventPayload(BaseModel):
     prompt_dwell_ms: int = 0
     voice_played_ratio: float = 0.0
     comment_char_count: int = 0
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        if v not in _ALLOWED_INTERACTION_ACTIONS:
+            raise ValueError(f"Unknown action '{v}'. Allowed: {_ALLOWED_INTERACTION_ACTIONS}")
+        return v
 
 
 @router.post(
@@ -206,5 +219,6 @@ async def ingest_interaction_event(
     try:
         await redis.xadd("telemetry:stream", entry, maxlen=50_000, approximate=True)
         return TelemetryResponse(accepted=1, dropped=0)
-    except Exception:
+    except Exception as exc:
+        log.warning("Interaction telemetry xadd failed for actor %s: %s", actor_id, exc)
         return TelemetryResponse(accepted=0, dropped=1)

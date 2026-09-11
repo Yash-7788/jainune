@@ -1744,6 +1744,8 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("otp_pepper_secret", err_str)
         self.assertIn("database_url", err_str)
         self.assertIn("razorpay_key_id", err_str)
+        self.assertIn("smtp_host", err_str)
+        self.assertIn("fcm_service_account_path", err_str)
 
         # 2. Production with full valid credentials passes
         prod_settings = Settings(
@@ -1758,6 +1760,11 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             cloudflare_origin_secret="cf_live_origin_tunnel_secret_9918",
             turnstile_secret_key="0x4AAAAAA_live_turnstile_secret_8819",
             sentry_dsn="https://mock_sentry_key@o992.ingest.sentry.io/18291",
+            metrics_secret_token="prod_metrics_secret_token_12345678",
+            google_client_id="prod_google_client_id_live_99182.apps.googleusercontent.com",
+            apple_bundle_id="com.jainune.app",
+            smtp_host="smtp.sendgrid.net",
+            fcm_service_account_path=__file__,
         )
         self.assertEqual(prod_settings.environment, "production")
 

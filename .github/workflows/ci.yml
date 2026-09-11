@@ -10,6 +10,22 @@ jobs:
   backend-test:
     name: Backend Test & Lint
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:15-3.4
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: jainune_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,16 +41,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          pip install bandit safety
 
       - name: Verify Python Compilation
         run: |
           python -m compileall backend/app
 
+      - name: Security Scan (SAST)
+        run: |
+          bandit -r backend/app -ll -q || true
+
       - name: Run verification script
         run: |
           python verify_endpoints.py
 
-      - name: Run unit tests
+      - name: Run migrations validation
+        env:
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/jainune_test
+        run: |
+          cd backend
+          python run_migrations.py || true
+
+      - name: Run unit & integration tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/jainune_test
         run: |
           cd backend
           python -m pytest tests/unit -v --tb=short -o addopts=""
@@ -55,9 +85,14 @@ jobs:
       - name: Install dependencies
         run: |
           cd mobile
-          npm install --legacy-peer-deps --no-audit
+          npm install --legacy-peer-deps
 
       - name: TypeScript validation
         run: |
           cd mobile
           npm run type-check
+
+      - name: Dependency Vulnerability Audit
+        run: |
+          cd mobile
+          npm audit --audit-level=critical || true

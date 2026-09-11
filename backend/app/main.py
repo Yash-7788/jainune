@@ -1,9 +1,10 @@
+import hmac
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -48,6 +49,13 @@ async def lifespan(app: FastAPI):
     await create_redis()
     yield
     # Shutdown
+    try:
+        import asyncio
+        from app.services.core_people_finder import _background_tasks
+        if _background_tasks:
+            await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+    except Exception:
+        pass
     await close_pool()
     await close_redis()
 
@@ -161,7 +169,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 async def liveness():
     return JSONResponse(
         status_code=200,
-        content={"status": "alive", "version": settings.app_version},
+        content={"status": "alive"},
     )
 
 
@@ -169,7 +177,9 @@ async def liveness():
 
 @app.get("/v1/health", tags=["Health"])
 @app.get("/readyz", tags=["Health"], include_in_schema=False)
-async def health():
+async def health(
+    x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token"),
+):
     db_ok = False
     redis_ok = False
 
@@ -192,23 +202,41 @@ async def health():
         redis_ok = False
 
     is_healthy = db_ok and redis_ok
-    return JSONResponse(
-        status_code=200 if is_healthy else 503,
-        content={
-            "status": "healthy" if is_healthy else "degraded",
+    status_str = "healthy" if is_healthy else "degraded"
+
+    expected = getattr(settings, "metrics_secret_token", "") or (getattr(settings, "secret_key", "") if hasattr(settings, "secret_key") else "")
+    has_token = bool(expected and x_metrics_token and hmac.compare_digest(x_metrics_token, expected))
+
+    if has_token:
+        content = {
+            "status": status_str,
             "version": settings.app_version,
             "checks": {
                 "database": "connected" if db_ok else "disconnected",
                 "redis": "connected" if redis_ok else "disconnected",
             },
-        },
+        }
+    else:
+        content = {"status": status_str}
+
+    return JSONResponse(
+        status_code=200 if is_healthy else 503,
+        content=content,
     )
 
 
 # ── Prometheus Metrics Exposition ────────────────────────────────────────────
 
 @app.get("/metrics", include_in_schema=False)
-async def get_metrics():
+async def get_metrics(
+    request: Request,
+    x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token"),
+):
+    if settings.environment == "production":
+        expected = getattr(settings, "metrics_secret_token", "") or settings.secret_key if hasattr(settings, "secret_key") else getattr(settings, "metrics_secret_token", "")
+        if not expected or not x_metrics_token or not hmac.compare_digest(x_metrics_token, expected):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     content = metrics_registry.generate_prometheus_output(
         version=settings.app_version,
         environment=settings.environment,

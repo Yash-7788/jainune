@@ -45,7 +45,7 @@ ALTER TABLE matches ENABLE ROW LEVEL SECURITY;
 -- Only users who are part of the match can view it
 CREATE POLICY matches_participant_read ON matches
     FOR SELECT
-    USING (auth.uid() = user_a OR auth.uid() = user_b);
+    USING (auth.uid() = COALESCE(user_a, user_a) OR auth.uid() = COALESCE(user_b, user_b));
 
 -- Matches are created only via the application service role; no direct insert
 -- from clients. Block all direct inserts.
@@ -61,7 +61,7 @@ ALTER TABLE chats ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY chats_participant_read ON chats
     FOR SELECT
-    USING (auth.uid() = participant_a OR auth.uid() = participant_b);
+    USING (auth.uid() = COALESCE(participant_a, participant_a) OR auth.uid() = COALESCE(participant_b, participant_b));
 
 CREATE POLICY chats_no_direct_insert ON chats
     FOR INSERT

@@ -176,6 +176,11 @@ async def create_order(
         log.error("Razorpay order creation failed: %s", exc)
         raise ValueError(f"Unable to create payment order: {exc}")
 
+    order_id = order.get("id") if isinstance(order, dict) else None
+    if not order_id or not isinstance(order_id, str) or not order_id.startswith("order_"):
+        log.error("Razorpay returned invalid order id: %r", order_id)
+        raise ValueError(f"Invalid Razorpay order_id format: {order_id!r}")
+
     # Persist intent so webhook can look up user_id and plan from order_id
     async with pool.acquire() as conn:
         await conn.execute(

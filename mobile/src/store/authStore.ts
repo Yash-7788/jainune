@@ -4,6 +4,7 @@
  * Tokens live ONLY in expo-secure-store (never in Zustand state).
  */
 
+import axios from "axios";
 import { create } from "zustand";
 import { getAccessToken, getUserId, clearTokens } from "../api/client";
 import { logout as apiLogout } from "../api/authApi";
@@ -51,13 +52,27 @@ export const useAuthStore = create<AuthStore>((set, _get) => ({
           set({ state: "onboarding", userId: storedUserId, onboardingCompleted: false });
         }
       } catch (err: unknown) {
-        const apiErr = err as { _apiError?: { status?: number }; status?: number } | undefined;
-        const s = apiErr?._apiError?.status || apiErr?.status;
-        if (s === 401 || s === 403) {
+        const isAxios = axios.isAxiosError(err);
+        const hasServerResponse = Boolean(
+          (isAxios && err.response) ||
+          (err as { _apiError?: unknown; status?: number })?._apiError ||
+          (err as { status?: number })?.status
+        );
+
+        if (hasServerResponse) {
+          // Server responded with an error (e.g. 401, 403, 404, 500) -> re-authenticate
           set({ state: "unauthenticated", userId: null });
-        } else {
-          // Offline / network fallback: trust saved session
+        } else if (
+          isAxios &&
+          (!err.response ||
+            err.code === "ECONNABORTED" ||
+            err.code === "ERR_NETWORK" ||
+            err.message === "Network Error")
+        ) {
+          // Genuinely offline or network timeout without server response: fallback to saved session
           set({ state: "authenticated", userId: storedUserId });
+        } else {
+          set({ state: "unauthenticated", userId: null });
         }
       }
     } catch {

@@ -175,6 +175,40 @@ async def _flush_async() -> None:
                     sanitized_rows,
                 )
                 log.info("flush_telemetry_buffer: flushed %d events", len(sanitized_rows))
+
+        # 3. Drain and process vector:update:queue stream (BUG-032)
+        vector_entries = await redis.xrange("vector:update:queue", count=1000)
+        if vector_entries:
+            v_del_ids = []
+            for stream_id, v_entry in vector_entries:
+                v_del_ids.append(stream_id)
+                try:
+                    actor_uid = uuid.UUID(v_entry.get("actor_id"))
+                    target_uid = uuid.UUID(v_entry.get("target_id"))
+                    alpha = float(v_entry.get("alpha", 0.05))
+                    await conn.execute(
+                        """
+                        UPDATE user_behavior_vectors uv
+                        SET revealed_preference_vector = (
+                            uv.revealed_preference_vector + (
+                                t.revealed_preference_vector - uv.revealed_preference_vector
+                            ) * $3
+                        )
+                        FROM user_behavior_vectors t
+                        WHERE uv.user_id = $1
+                          AND t.user_id  = $2
+                          AND t.revealed_preference_vector IS NOT NULL
+                          AND uv.revealed_preference_vector IS NOT NULL
+                        """,
+                        actor_uid,
+                        target_uid,
+                        alpha,
+                    )
+                except Exception as v_exc:
+                    log.warning("Failed processing vector update %s: %s", stream_id, v_exc)
+            if v_del_ids:
+                await redis.xdel("vector:update:queue", *v_del_ids)
+                log.info("flush_telemetry_buffer: processed %d vector updates", len(v_del_ids))
     except Exception as exc:
         log.error("flush_telemetry_buffer failed: %s", exc, exc_info=True)
     finally:
