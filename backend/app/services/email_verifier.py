@@ -7,6 +7,7 @@ Email & Bot Verification Service:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import socket
@@ -15,6 +16,44 @@ from typing import Tuple
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
+
+
+def canonicalize_email(email: str) -> str:
+    """
+    Canonicalizes email address to eliminate subaddressing (+tag) and
+    dot-trick aliases used by automated botnets to register duplicate accounts
+    under a single inbox.
+    """
+    if not email or "@" not in email:
+        return (email or "").strip().lower()
+
+    clean = email.strip().lower()
+    parts = clean.split("@", 1)
+    if len(parts) != 2:
+        return clean
+    local, domain = parts
+
+    # Normalize Google Mail domains
+    if domain in ("gmail.com", "googlemail.com"):
+        domain = "gmail.com"
+        # Gmail ignores dots in username
+        local = local.replace(".", "")
+        # Gmail ignores +suffix
+        local = local.split("+", 1)[0]
+    elif domain in (
+        "outlook.com", "hotmail.com", "live.com", "msn.com", "windowslive.com",
+        "outlook.in", "hotmail.co.in", "live.in",
+        "icloud.com", "me.com", "mac.com",
+        "proton.me", "protonmail.com",
+        "yahoo.com", "yahoo.co.in", "yahoo.in", "ymail.com", "rocketmail.com",
+        "zoho.com", "zohomail.in", "zoho.in",
+        "fastmail.com", "hey.com",
+    ):
+        # Major providers supporting + addressing
+        local = local.split("+", 1)[0]
+
+    return f"{local}@{domain}"
+
 
 # Trusted and approved primary email providers
 _ALLOWED_POPULAR_DOMAINS = {
@@ -137,30 +176,8 @@ def is_disposable_email(email: str, allow_custom_domains: bool = False) -> Tuple
 
 def verify_turnstile_token(token: str, remote_ip: str | None = None) -> bool:
     """Verifies Turnstile response token with Cloudflare siteverify API."""
-    if not settings.turnstile_secret_key:
-        return len(token) >= 10
-
-    import json
-    import urllib.parse
-    import urllib.request
-
-    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-    payload = {
-        "secret": settings.turnstile_secret_key,
-        "response": token,
-    }
-    if remote_ip:
-        payload["remoteip"] = remote_ip
-
-    data = urllib.parse.urlencode(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return bool(body.get("success"))
-    except Exception as exc:
-        log.warning("Turnstile verification request failed: %s", exc)
-        return False
+    from app.core.bot_defense import verify_turnstile_token as _core_verify_turnstile
+    return _core_verify_turnstile(token, remote_ip)
 
 
 def verify_bot_integrity(
@@ -168,27 +185,19 @@ def verify_bot_integrity(
     turnstile_token: str | None = None,
     is_production: bool = False,
     remote_ip: str | None = None,
+    honeypot: str | None = None,
 ) -> Tuple[bool, str]:
     """
     Validates client request to detect automated bot scripts and scrapers.
     Returns (is_bot: bool, reason_message: str).
     """
-    user_agent = headers.get("user-agent", "").lower()
+    from app.core.bot_defense import verify_bot_integrity as _core_verify_bot
+    return _core_verify_bot(headers, turnstile_token, is_production, remote_ip, honeypot)
 
-    # 1. Block known automated scripts & scrapers
-    blocked_agents = [
-        "python-requests", "curl/", "wget/", "scrapy", "postmanruntime",
-        "go-http-client", "httpie", "aiohttp", "urllib", "puppeteer",
-    ]
-    if any(agent in user_agent for agent in blocked_agents):
-        return True, "Automated or unsupported client detected."
 
-    # 2. Turnstile token verification
-    if settings.turnstile_secret_key or (is_production and turnstile_token):
-        if not turnstile_token or not verify_turnstile_token(turnstile_token, remote_ip):
-            return True, "Security verification challenge failed."
-    elif turnstile_token:
-        if len(turnstile_token) < 10:
-            return True, "Security verification challenge failed."
+def get_client_subnet(ip_str: str | None) -> str:
+    """Groups client IP addresses into network subnets to defeat botnets."""
+    from app.core.bot_defense import get_client_subnet as _core_get_client_subnet
+    return _core_get_client_subnet(ip_str)
 
-    return False, ""
+

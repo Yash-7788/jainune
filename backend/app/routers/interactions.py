@@ -9,9 +9,10 @@ On mutual like or super_connect:
   - Invalidates both users' feed caches
   - Updates behavior vector via EMA bump on liked attributes
 """
-from __future__ import annotations
-
+import asyncio
 import json
+import logging
+import time
 import uuid
 from datetime import date, timedelta
 
@@ -22,6 +23,9 @@ from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.models.schemas.interaction import InteractionActionRequest, InteractionActionResponse
 from app.services.core_people_finder import invalidate_feed_cache
 from app.services import payment_service
+
+log = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/v1/interactions", tags=["interactions"])
 
@@ -130,6 +134,25 @@ async def record_interaction_action(
 
     # Anti-bot rate limit: max 60 actions per minute per user (SECURITY.md 8.1)
     await sliding_window_rate_limit(f"ratelimit:interaction:{actor_id}", 60, 60, redis)
+
+    # Behavioral swipe velocity & robotic pacing tracking
+    # Fast humans swipe >= 500ms; scripts fire at < 200ms
+    try:
+        now_ts = time.time()
+        last_ts_raw = await redis.get(f"ratelimit:swipe_last_ts:{actor_id}")
+        if last_ts_raw is not None:
+            delta_ms = (now_ts - float(last_ts_raw)) * 1000.0
+            if delta_ms < 200.0:
+                burst_count = await redis.incr(f"ratelimit:swipe_burst:{actor_id}")
+                await redis.expire(f"ratelimit:swipe_burst:{actor_id}", 10)
+                if burst_count > 5:
+                    log.warning("Bot swipe burst detected for user %s (%s rapid swipes < 200ms)", actor_id, burst_count)
+                    await asyncio.sleep(0.5)
+            else:
+                await redis.delete(f"ratelimit:swipe_burst:{actor_id}")
+        await redis.set(f"ratelimit:swipe_last_ts:{actor_id}", str(now_ts), ex=300)
+    except Exception as exc:
+        log.debug("Swipe velocity check non-blocking failure: %s", exc)
 
     if actor_id == target_id:
         raise HTTPException(

@@ -29,6 +29,8 @@ def _sanitize_string(v: str | None, max_len: int = 255) -> str | None:
 class OTPRequestBody(BaseModel):
     phone_number: str = Field(..., max_length=16, examples=["+919820098200"])
     channel: Optional[str] = Field("sms", pattern="^(sms|whatsapp)$")
+    turnstile_token: Optional[str] = Field(None, max_length=2048)
+    website_trap: Optional[str] = Field(None, max_length=256)
 
     @field_validator("phone_number")
     @classmethod
@@ -55,6 +57,8 @@ class OTPVerifyBody(BaseModel):
 class EmailOTPRequestBody(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     turnstile_token: Optional[str] = Field(None, max_length=2048)
+    website_trap: Optional[str] = Field(None, max_length=256)
+
 
     @field_validator("email")
     @classmethod
@@ -88,6 +92,7 @@ class EmailOTPVerifyBody(BaseModel):
 class GoogleAuthBody(BaseModel):
     id_token: str = Field(..., min_length=10, max_length=4096)
     turnstile_token: Optional[str] = Field(None, max_length=2048)
+    website_trap: Optional[str] = Field(None, max_length=256)
 
     @field_validator("id_token")
     @classmethod
@@ -103,6 +108,7 @@ class AppleAuthBody(BaseModel):
     first_name: Optional[str] = Field(None, max_length=64)
     last_name: Optional[str] = Field(None, max_length=64)
     turnstile_token: Optional[str] = Field(None, max_length=2048)
+    website_trap: Optional[str] = Field(None, max_length=256)
 
     @field_validator("id_token")
     @classmethod

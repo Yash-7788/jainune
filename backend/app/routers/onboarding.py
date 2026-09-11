@@ -147,6 +147,11 @@ async def step2_basic_info(
     db: DBDep,
     redis: RedisDep,
 ) -> dict:
+    if body.website_trap and body.website_trap.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request submission.",
+        )
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
     async with db.acquire() as conn:
@@ -525,6 +530,11 @@ async def step17_bio(
     db: DBDep,
     redis: RedisDep,
 ) -> dict:
+    if body.website_trap and body.website_trap.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request submission.",
+        )
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
     async with db.acquire() as conn:

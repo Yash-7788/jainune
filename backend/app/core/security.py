@@ -325,5 +325,9 @@ def __getattr__(name: str):
     if name == "get_current_user":
         from app.dependencies import get_current_user
         return get_current_user
+    if name in ("get_client_subnet", "verify_bot_integrity"):
+        import app.core.bot_defense as bd
+        return getattr(bd, name)
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 

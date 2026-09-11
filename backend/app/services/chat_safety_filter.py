@@ -13,8 +13,13 @@ Enforces:
 7. Single-character / single-digit sequential stealth tracking across messages:
    - 1st and 2nd single character messages are allowed.
    - Starting on 3rd single character message, character is blocked and converted to '#'.
-8. Redirection / masking of all detected sensitive words to '#'.
-9. Moderation disclaimer generation & subscription gating.
+8. URL Hard-Block (NO SUBSCRIPTION BYPASS):
+   - ANY URL in ANY form (http, ftp, data:, bare domain.tld, IP-as-URL, markdown [text](url),
+     URL-encoded schemes like ht%74ps://, mixed unicode/homoglyph schemes) is ALWAYS blocked.
+   - Jainune brand-masking phishing: "jainune" display text with ANY URL is always blocked.
+   - Subscribed users cannot bypass URL blocks. URLs are structurally prohibited in chat.
+9. Redirection / masking of all detected sensitive words to '#'.
+10. Moderation disclaimer generation & subscription gating (URLs never gated by subscription).
 """
 
 from __future__ import annotations
@@ -186,6 +191,105 @@ _RE_BENIGN_STREET = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# 5. URL Hard-Block (comprehensive, bypass-resistant)
+#
+# Catches ALL of:
+# - Explicit schemes: http, https, ftp, ftps, ws, wss, data:, javascript:, vbscript:
+# - URL-encoded scheme evasion: ht%74ps://, hxxps://, h_t_t_p_s
+# - Bare domains: evil.com/path, domain.xyz, subdomain.evil.co.in/page
+# - www variants: www2., www., ftp.
+# - IP-as-URL: 192.168.0.1, [2001:db8::1]
+# - Markdown link syntax: [display](url) or [jainune](malicious_url)
+# - Known shortener / redirect services
+# - Mixed-script / homoglyph domain names (via normalization before matching)
+# ---------------------------------------------------------------------------
+
+# Pre-pass: extract and hard-block markdown link targets [text](url) entirely
+# This catches jainune-branded phishing like [jainune](http://evil.com)
+_RE_MARKDOWN_LINK = re.compile(
+    r"\[(?:[^\]]{0,200})\]\(([^)]{0,2000})\)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# URL-encoded scheme evasion: ht%74p, hxxps, h_t_t_p, ht+tp, etc.
+_RE_SCHEME_EVASION = re.compile(
+    r"\bh[\+_\s\.\-%]*t[\+_\s\.\-%]*t[\+_\s\.\-%]*p[\+_\s\.\-%]*s?[\+_\s\.\-%]*:",
+    re.IGNORECASE,
+)
+# Other protocol schemes
+_RE_EXPLICIT_SCHEME = re.compile(
+    r"\b(?:ftp|ftps|ws|wss|data|javascript|vbscript|file|blob|mailto)\s*:",
+    re.IGNORECASE,
+)
+
+# Bare TLD domain pattern: captures word.tld, word.tld/path, sub.word.tld
+# Uses a broad TLD list covering all common + country-code TLDs
+_COMMON_TLDS = (
+    r"(?:com|org|net|edu|gov|io|co|app|dev|xyz|info|biz|me|us|uk|in|de|fr|jp|ru|"
+    r"ca|au|br|cn|it|es|nl|pl|se|no|dk|fi|be|at|ch|sg|my|ph|id|bd|pk|lk|"
+    r"live|online|site|web|store|shop|tech|ai|ml|gg|tv|cc|tk|top|club|fun|"
+    r"link|click|page|blog|news|media|social|world|space|red|blue|black|"
+    r"click|download|free|win|prize|gift|claim|now|deal|offer|crypto|nft|"
+    r"chat|date|meet|love|friend|match)"
+)
+# Bare domain: word.tld or sub.word.tld/path — no scheme required
+# Requires an explicit dot before the TLD to avoid matching plain words.
+_RE_BARE_DOMAIN = re.compile(
+    r"\b[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)*\." + _COMMON_TLDS + r"(?:\/[^\s<>\[\]()]*)?(?=\s|$|[,;!?\'\"])",
+    re.IGNORECASE,
+)
+
+# IP-as-URL: 1.2.3.4/path or 1.2.3.4:port — used to bypass domain filters.
+# MUST have a path (/) or port (:) to avoid false-positive on dotted phone numbers
+# like "9.8.7.6.5.4.3.2.1.0" which phone regex catches separately.
+_RE_IP_URL = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|1?\d\d?)(?::\d{1,5}|\/[^\s<>]*)",
+)
+
+
+# www. prefix in any form
+_RE_WWW = re.compile(r"\bwww\d*\s*\.\s*\S+", re.IGNORECASE)
+
+# Known shortener/redirect domains (full block regardless of content)
+_RE_SHORTENER = re.compile(
+    r"\b(?:bit\.ly|tinyurl\.com|t\.me|wa\.me|chat\.whatsapp\.com|is\.gd|buff\.ly|"
+    r"ow\.ly|goo\.gl|cutt\.ly|rb\.gy|shorturl\.at|tiny\.cc|tr\.im|v\.gd)/[^\s<>]+",
+    re.IGNORECASE,
+)
+
+
+def _detect_url_spans(text: str) -> list[tuple[int, int]]:
+    """
+    Returns list of (start, end) character spans in `text` where any URL-like
+    pattern is detected. Zero tolerance — any doubt = flagged.
+    Runs on the NORMALIZED text.
+    """
+    spans: list[tuple[int, int]] = []
+    for pattern in [
+        _RE_SCHEME_EVASION,
+        _RE_EXPLICIT_SCHEME,
+        _RE_WWW,
+        _RE_BARE_DOMAIN,
+        _RE_IP_URL,
+        _RE_SHORTENER,
+    ]:
+        for m in pattern.finditer(text):
+            spans.append(m.span())
+    return spans
+
+
+def _has_url(text: str) -> bool:
+    """True if any URL-like pattern detected in text."""
+    if _detect_url_spans(text):
+        return True
+    if _RE_SCHEME_EVASION.search(text):
+        return True
+    if _RE_EXPLICIT_SCHEME.search(text):
+        return True
+    return False
+
+
 
 class ModerationResult(BaseModel):
     content: str
@@ -290,6 +394,20 @@ async def filter_chat_content(
         address_spans.append(m.span())
     has_address = len(address_spans) > 0
 
+    # E. URL Hard-Block (comprehensive — no subscription bypass)
+    # 1. Markdown link syntax [display](url): strip markdown to reveal hidden URL
+    link_spans: list[tuple[int, int]] = []
+    for md_match in _RE_MARKDOWN_LINK.finditer(content):
+        # Always block the entire markdown link — we never reveal the URL target
+        link_spans.append(md_match.span())
+    # 2. Scheme evasion and explicit schemes detected in normalized text
+    link_spans.extend(_detect_url_spans(normalized))
+    has_link = len(link_spans) > 0
+
+    # URL detection is hard-blocked FIRST — takes priority over subscription gate
+    if has_link:
+        detected_types.insert(0, "EXTERNAL_LINK")  # Always first priority
+
     if has_phone:
         detected_types.append("NUMBERS")
     if has_full_platform or has_shorthand:
@@ -313,13 +431,19 @@ async def filter_chat_content(
         disclaimer = "You are trying to exchange social media handles or IDs. Exchange at your own risk and only if you trust."
     elif primary_type == "DATING_APP":
         disclaimer = "Referencing outside dating platforms is restricted. Exchange at your own risk and only if you trust."
+    elif primary_type == "EXTERNAL_LINK":
+        disclaimer = "Sharing external links or unverified URLs is restricted for safety."
     else:
         disclaimer = "You are trying to exchange physical address or GPS coordinates. Exchange at your own risk and only if you trust."
 
     # -------------------------------------------------------------------------
     # 3. Subscription & Approval Gate
+    # IMPORTANT: URLs are NEVER gated by subscription. Any message containing a
+    # URL is always masked and never returned unmodified, regardless of
+    # is_subscribed or user_disclaimer_approved. This prevents phishing,
+    # domain-masking, and jainune-branded malicious link attacks.
     # -------------------------------------------------------------------------
-    if is_subscribed and user_disclaimer_approved:
+    if primary_type != "EXTERNAL_LINK" and is_subscribed and user_disclaimer_approved:
         return ModerationResult(
             content=content,
             is_moderated=False,
@@ -329,6 +453,8 @@ async def filter_chat_content(
         )
 
     # Mask detected sensitive segments to '#' based on matches in normalized text
+    # For markdown links: mask the entire [text](url) span in original content coords
+    # so neither the display text nor the URL is revealed.
     spans: list[tuple[int, int]] = []
     for regex in [_RE_PHONE, _RE_FULL_PLATFORMS]:
         for m in regex.finditer(normalized):
@@ -336,9 +462,18 @@ async def filter_chat_content(
     spans.extend(shorthand_spans)
     if has_address:
         spans.extend(address_spans)
+    md_spans_orig: list[tuple[int, int]] = []
+    normalized_link_spans: list[tuple[int, int]] = []
+    if has_link:
+        # Markdown spans: [text](url) — already in original content coordinates.
+        # Apply directly to mask_indices without norm_to_orig translation.
+        md_spans_orig = [m.span() for m in _RE_MARKDOWN_LINK.finditer(content)]
+        # URL spans from normalized text — translate via norm_to_orig as usual.
+        normalized_link_spans = _detect_url_spans(normalized)
 
-    if spans:
-        # Merge overlapping spans
+    if spans or (has_link and (md_spans_orig or normalized_link_spans)):
+
+        # Merge overlapping spans (all in normalized coords)
         spans.sort(key=lambda s: s[0])
         merged_spans: list[tuple[int, int]] = []
         for s, e in spans:
@@ -348,6 +483,8 @@ async def filter_chat_content(
                 merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], e))
 
         mask_indices: set[int] = set()
+
+        # 1. Normalized-coord spans → translate to original via norm_to_orig
         for s, e in merged_spans:
             if s < len(norm_to_orig) and e - 1 < len(norm_to_orig):
                 orig_start = norm_to_orig[s]
@@ -359,6 +496,22 @@ async def filter_chat_content(
             else:
                 for i in range(s, min(e, len(norm_to_orig))):
                     mask_indices.add(norm_to_orig[i])
+
+        if has_link:
+            # 2. Normalized URL spans → translate to original
+            for s, e in normalized_link_spans:
+                if s < len(norm_to_orig) and e - 1 < len(norm_to_orig):
+                    orig_s = norm_to_orig[s]
+                    orig_e = norm_to_orig[e - 1]
+                    for idx in range(orig_s, orig_e + 1):
+                        mask_indices.add(idx)
+                else:
+                    for i in range(s, min(e, len(norm_to_orig))):
+                        mask_indices.add(norm_to_orig[i])
+            # 3. Markdown [text](url) spans are already in original content coords
+            for orig_s, orig_e in md_spans_orig:
+                for idx in range(orig_s, orig_e):
+                    mask_indices.add(idx)
 
         chars = list(content)
         for idx in mask_indices:

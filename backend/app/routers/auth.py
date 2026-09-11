@@ -40,7 +40,12 @@ from app.models.schemas.auth import (
     TokenRefreshBody,
     TokenResponse,
 )
-from app.services.email_verifier import is_disposable_email, verify_bot_integrity
+from app.services.email_verifier import (
+    canonicalize_email,
+    get_client_subnet,
+    is_disposable_email,
+    verify_bot_integrity,
+)
 from app.services.messaging_service import dispatch_phone_otp, send_email_otp
 
 log = logging.getLogger(__name__)
@@ -188,10 +193,30 @@ async def _issue_token_response(
 
 @router.post("/otp/request")
 async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = None, db: DBDep = None) -> dict:
-    # IP rate limit: 15 OTP requests per minute per IP
+    if body.website_trap and body.website_trap.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to send verification code. Please check your credentials or contact support.",
+        )
+
+    # IP & Subnet rate limit: 15 per IP / 30 per /24 subnet per minute
     if request:
         client_ip = get_trusted_client_ip(request)
         await sliding_window_rate_limit(f"ratelimit:auth:otp:ip:{client_ip}", 15, 60, redis)
+        client_subnet = get_client_subnet(client_ip)
+        await sliding_window_rate_limit(f"ratelimit:auth:otp:subnet:{client_subnet}", 30, 60, redis)
+
+        is_bot, bot_msg = await asyncio.to_thread(
+            verify_bot_integrity,
+            dict(request.headers),
+            body.turnstile_token,
+            settings.environment.lower() == "production",
+            client_ip,
+            body.website_trap,
+        )
+        if is_bot:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
+
 
     # Pre-check account status to prevent OTP dispatch to banned/suspended accounts
     pool = db
@@ -208,6 +233,8 @@ async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = 
             )
             if user_row:
                 status_val = user_row["account_status"]
+                deleted_at = user_row["deleted_at"]
+                suspend_until = user_row["suspend_until"]
                 su = (
                     (suspend_until if getattr(suspend_until, "tzinfo", None) else suspend_until.replace(tzinfo=timezone.utc))
                     if isinstance(suspend_until, datetime)
@@ -252,7 +279,18 @@ async def request_otp(body: OTPRequestBody, redis: RedisDep, request: Request = 
 # ── POST /v1/auth/otp/verify ──────────────────────────────────────────────────
 
 @router.post("/otp/verify")
-async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -> dict:
+async def verify_otp_endpoint(
+    body: OTPVerifyBody,
+    db: DBDep,
+    redis: RedisDep,
+    request: Request = None,
+) -> dict:
+    if request:
+        client_ip = get_trusted_client_ip(request)
+        await sliding_window_rate_limit(f"ratelimit:auth:otp_verify:ip:{client_ip}", 20, 60, redis)
+        client_subnet = get_client_subnet(client_ip)
+        await sliding_window_rate_limit(f"ratelimit:auth:otp_verify:subnet:{client_subnet}", 50, 60, redis)
+
     await verify_otp(body.phone_number, body.otp, redis)
 
     async with db.acquire() as conn:
@@ -301,21 +339,30 @@ async def verify_otp_endpoint(body: OTPVerifyBody, db: DBDep, redis: RedisDep) -
 
 @router.post("/email/otp/request")
 async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: RedisDep, db: DBDep = None) -> dict:
+    client_ip = get_trusted_client_ip(request)
+    client_subnet = get_client_subnet(client_ip)
+    await sliding_window_rate_limit(f"ratelimit:auth:email_otp:subnet:{client_subnet}", 30, 60, redis)
+
     is_bot, bot_msg = await asyncio.to_thread(
         verify_bot_integrity,
         dict(request.headers),
         body.turnstile_token,
         is_production=settings.environment == "production",
+        remote_ip=client_ip,
+        honeypot=body.website_trap,
     )
     if is_bot:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=bot_msg)
 
-    is_disposable, reason = await asyncio.to_thread(is_disposable_email, body.email)
+
+    clean_email = body.email.strip().lower()
+    canonical_email = canonicalize_email(clean_email)
+
+    is_disposable, reason = await asyncio.to_thread(is_disposable_email, canonical_email)
     if is_disposable:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
-    clean_email = body.email.strip().lower()
-    domain = clean_email.split("@")[-1] if "@" in clean_email else ""
+    domain = canonical_email.split("@")[-1] if "@" in canonical_email else ""
     if domain not in ALLOWED_EMAIL_DOMAINS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -332,11 +379,14 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
     if pool is not None:
         async with pool.acquire() as conn:
             user_row = await conn.fetchrow(
-                "SELECT account_status, deleted_at, suspend_until FROM users WHERE email = $1",
+                "SELECT account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
+                canonical_email,
                 clean_email,
             )
             if user_row:
                 status_val = user_row["account_status"]
+                deleted_at = user_row["deleted_at"]
+                suspend_until = user_row["suspend_until"]
                 su = (
                     (suspend_until if getattr(suspend_until, "tzinfo", None) else suspend_until.replace(tzinfo=timezone.utc))
                     if isinstance(suspend_until, datetime)
@@ -351,15 +401,15 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
                         detail="Unable to send verification code. Please check your credentials or contact support.",
                     )
 
-    rate_key = f"auth:email_otp_rate:{clean_email}"
+    rate_key = f"auth:email_otp_rate:{canonical_email}"
     await sliding_window_rate_limit(rate_key, OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS, redis)
 
     otp = generate_otp()
-    otp_hash = hash_otp(clean_email, otp)
-    session_key = f"auth:email_otp:{clean_email}"
+    otp_hash = hash_otp(canonical_email, otp)
+    session_key = f"auth:email_otp:{canonical_email}"
     await redis.set(session_key, otp_hash.encode(), ex=OTP_TTL_SECONDS)
     # Reset attempt counter on fresh email OTP request (BUG-008)
-    del_res = redis.delete(f"auth:email_attempts:{clean_email}")
+    del_res = redis.delete(f"auth:email_attempts:{canonical_email}")
     if hasattr(del_res, "__await__"):
         await del_res
 
@@ -377,10 +427,22 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
 # ── POST /v1/auth/email/otp/verify ───────────────────────────────────────────
 
 @router.post("/email/otp/verify")
-async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep) -> dict:
+async def verify_email_otp(
+    body: EmailOTPVerifyBody,
+    db: DBDep,
+    redis: RedisDep,
+    request: Request = None,
+) -> dict:
+    if request:
+        client_ip = get_trusted_client_ip(request)
+        await sliding_window_rate_limit(f"ratelimit:auth:email_verify:ip:{client_ip}", 20, 60, redis)
+        client_subnet = get_client_subnet(client_ip)
+        await sliding_window_rate_limit(f"ratelimit:auth:email_verify:subnet:{client_subnet}", 50, 60, redis)
+
     clean_email = body.email.strip().lower()
-    rate_key = f"auth:email_attempts:{clean_email}"
-    session_key = f"auth:email_otp:{clean_email}"
+    canonical_email = canonicalize_email(clean_email)
+    rate_key = f"auth:email_attempts:{canonical_email}"
+    session_key = f"auth:email_otp:{canonical_email}"
 
     attempts = await redis.incr(rate_key)
     await redis.expire(rate_key, 300)
@@ -395,7 +457,7 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
     if not stored_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
 
-    expected_hash = hash_otp(clean_email, body.otp)
+    expected_hash = hash_otp(canonical_email, body.otp)
     stored_str = stored_hash.decode() if isinstance(stored_hash, bytes) else stored_hash
     if not hmac.compare_digest(stored_str, expected_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code.")
@@ -405,7 +467,8 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1",
+            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
+            canonical_email,
             clean_email,
         )
         is_new_user = row is None
@@ -417,11 +480,12 @@ async def verify_email_otp(body: EmailOTPVerifyBody, db: DBDep, redis: RedisDep)
                 ON CONFLICT (email) DO NOTHING
                 RETURNING id
                 """,
-                clean_email,
+                canonical_email,
             )
             if user_id is None:
                 existing = await conn.fetchrow(
-                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1",
+                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
+                    canonical_email,
                     clean_email,
                 )
                 if not existing:
@@ -527,6 +591,8 @@ def _verify_apple_token(id_token: str) -> dict:
 async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: RedisDep) -> dict:
     client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:google:{client_ip}", 20, 60, redis)
+    client_subnet = get_client_subnet(client_ip)
+    await sliding_window_rate_limit(f"ratelimit:auth:google:subnet:{client_subnet}", 50, 60, redis)
 
     is_bot, bot_msg = await asyncio.to_thread(
         verify_bot_integrity,
@@ -548,7 +614,8 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google authentication has expired.")
 
     google_sub = payload.get("sub")
-    email = payload.get("email", "").strip().lower() if payload.get("email") else None
+    raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
+    email = canonicalize_email(raw_email) if raw_email else None
     name = payload.get("name") or payload.get("given_name")
 
     if not google_sub:
@@ -611,6 +678,8 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
 async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: RedisDep) -> dict:
     client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:apple:{client_ip}", 20, 60, redis)
+    client_subnet = get_client_subnet(client_ip)
+    await sliding_window_rate_limit(f"ratelimit:auth:apple:subnet:{client_subnet}", 50, 60, redis)
 
     is_bot, bot_msg = await asyncio.to_thread(
         verify_bot_integrity,
@@ -632,7 +701,8 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple authentication has expired.")
 
     apple_sub = payload.get("sub")
-    email = payload.get("email", "").strip().lower() if payload.get("email") else None
+    raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
+    email = canonicalize_email(raw_email) if raw_email else None
     first_name = body.first_name
 
     if not apple_sub:
@@ -722,6 +792,8 @@ def _unpack_grace_payload(raw_val: bytes | str) -> dict | None:
 async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: DBDep, redis: RedisDep) -> dict:
     client_ip = get_trusted_client_ip(request)
     await sliding_window_rate_limit(f"ratelimit:auth:refresh:{client_ip}", 30, 60, redis)
+    client_subnet = get_client_subnet(client_ip)
+    await sliding_window_rate_limit(f"ratelimit:auth:refresh:subnet:{client_subnet}", 100, 60, redis)
 
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
 

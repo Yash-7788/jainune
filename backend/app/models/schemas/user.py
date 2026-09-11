@@ -72,6 +72,8 @@ class Step02BasicInfoBody(BaseModel):
 
     first_name: str = Field(..., min_length=2, max_length=64)
     date_of_birth: date
+    website_trap: Optional[str] = Field(None, max_length=128)
+
 
     @field_validator("date_of_birth")
     @classmethod
@@ -222,6 +224,8 @@ class Step17BioBody(BaseModel):
     """Step 17: short bio."""
 
     bio: Optional[str] = Field(None, max_length=500)
+    website_trap: Optional[str] = Field(None, max_length=128)
+
 
 
 class PromptItem(BaseModel):
