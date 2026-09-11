@@ -46,101 +46,176 @@ class StableMarriageEngine:
         users: list[dict[str, Any]],
         feed_queues: dict[str, list[str]],
     ) -> list[dict[str, Any]]:
-        """Return list of stable proposals."""
+        """Return list of stable, mutually acceptable proposals."""
         if len(users) < 2:
             return []
 
         uid_to_user = {str(u["id"]): u for u in users}
-
-        # Build proposer and receiver pools
-        proposers = [str(u["id"]) for u in users]  # everyone proposes
-        receiver_prefs: dict[str, list[str]] = {}
-
-        for uid in proposers:
-            # Each user's preference list = their feed queue from CorePeopleFinder
-            receiver_prefs[uid] = feed_queues.get(uid, [])
-
-        # Classic Gale-Shapley
-        # proposer_next[uid] = index into their preference list (next to propose to)
-        proposer_next: dict[str, int] = {uid: 0 for uid in proposers}
-        # current_match[receiver] = current proposer they're tentatively matched to
-        current_match: dict[str, str | None] = {uid: None for uid in proposers}
-        # free proposers
-        free = list(proposers)
-
-        # Build receiver ranking index for O(1) preference lookups
-        # receiver_rank[receiver][proposer] = rank position (lower = better)
-        receiver_rank: dict[str, dict[str, int]] = {
-            uid: {pid: i for i, pid in enumerate(receiver_prefs.get(uid, []))}
-            for uid in proposers
+        normalized_queues = {
+            str(k): [str(cid) for cid in v] for k, v in feed_queues.items()
         }
 
-        iterations = 0
-        max_iterations = len(users) ** 2  # safety cap
+        # Check if user pool cleanly partitions into heterosexual bipartite sets
+        men = [
+            uid for uid, u in uid_to_user.items()
+            if u.get("gender") in ("man", "men") and u.get("show_me") in ("woman", "women", None)
+        ]
+        women = [
+            uid for uid, u in uid_to_user.items()
+            if u.get("gender") in ("woman", "women") and u.get("show_me") in ("man", "men", None)
+        ]
 
-        while free and iterations < max_iterations:
-            iterations += 1
-            proposer = free.pop(0)
-            pref_list = receiver_prefs.get(proposer, [])
-            idx = proposer_next[proposer]
+        is_pure_bipartite = (
+            len(men) > 0
+            and len(women) > 0
+            and (len(men) + len(women) == len(uid_to_user))
+        )
 
-            if idx >= len(pref_list):
-                continue  # exhausted all options
-
-            receiver = pref_list[idx]
-            proposer_next[proposer] = idx + 1
-
-            if receiver not in current_match:
-                # Receiver is not in pool — skip
-                free.append(proposer)
-                continue
-
-            current = current_match[receiver]
-
-            if current is None:
-                # Receiver is free — tentatively match
-                current_match[receiver] = proposer
-            else:
-                # Receiver compares current partner vs new proposer
-                rrank = receiver_rank.get(receiver, {})
-                rank_current = rrank.get(current, math.inf)
-                rank_new = rrank.get(proposer, math.inf)
-
-                if rank_new < rank_current:
-                    # Receiver prefers new proposer — switch
-                    current_match[receiver] = proposer
-                    free.append(current)  # current partner becomes free
-                else:
-                    # Receiver keeps current — proposer stays free
-                    free.append(proposer)
-
-        # Collect all candidate pairings with scores
         candidates: list[dict[str, Any]] = []
-        seen_pairs: set[frozenset] = set()
 
-        for receiver, proposer in current_match.items():
-            if proposer is None or receiver == proposer:
-                continue
-            pair = frozenset({receiver, proposer})
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
+        if is_pure_bipartite:
+            # Deterministic, optimal bipartite Gale-Shapley (proposers = men, receivers = women)
+            proposers = list(men)
+            receivers = set(women)
+            free = list(proposers)
+            proposer_next = {uid: 0 for uid in proposers}
+            current_match: dict[str, str | None] = {uid: None for uid in receivers}
 
-            # Score = mutual rank quality (geometric mean, inverted to [0,1])
-            r_rank = receiver_rank.get(receiver, {}).get(proposer, 999)
-            p_rank = receiver_rank.get(proposer, {}).get(receiver, 999)
-            norm = 50.0
-            r_score = max(0.0, 1.0 - r_rank / norm)
-            p_score = max(0.0, 1.0 - p_rank / norm)
-            score = round(math.sqrt(r_score * p_score), 4)
+            receiver_rank: dict[str, dict[str, int]] = {
+                uid: {pid: i for i, pid in enumerate(normalized_queues.get(uid, []))}
+                for uid in receivers
+            }
+            proposer_rank: dict[str, dict[str, int]] = {
+                uid: {rid: i for i, rid in enumerate(normalized_queues.get(uid, []))}
+                for uid in proposers
+            }
 
-            candidates.append({
-                "user_a": receiver,
-                "user_b": proposer,
-                "score": score,
-            })
+            iterations = 0
+            max_iterations = len(users) ** 2
 
-        # Sort candidate pairs by score descending (best pairs get matched first)
+            while free and iterations < max_iterations:
+                iterations += 1
+                proposer = free.pop(0)
+                pref_list = normalized_queues.get(proposer, [])
+                idx = proposer_next[proposer]
+
+                if idx >= len(pref_list):
+                    continue  # exhausted options
+
+                receiver = pref_list[idx]
+                proposer_next[proposer] = idx + 1
+
+                if receiver not in receivers:
+                    free.append(proposer)
+                    continue
+
+                # Mutual acceptability check: receiver must have proposer in preferences
+                rrank = receiver_rank.get(receiver, {})
+                if proposer not in rrank:
+                    # Receiver does not want proposer; proposer remains free to propose next
+                    free.append(proposer)
+                    continue
+
+                rank_new = rrank[proposer]
+                current = current_match[receiver]
+
+                if current is None:
+                    current_match[receiver] = proposer
+                else:
+                    rank_current = rrank.get(current, math.inf)
+                    if rank_new < rank_current:
+                        current_match[receiver] = proposer
+                        free.append(current)
+                    else:
+                        free.append(proposer)
+
+            for receiver, proposer in current_match.items():
+                if proposer is None:
+                    continue
+                r_rank = receiver_rank.get(receiver, {}).get(proposer, 999)
+                p_rank = proposer_rank.get(proposer, {}).get(receiver, 999)
+                norm = 50.0
+                r_score = max(0.0, 1.0 - r_rank / norm)
+                p_score = max(0.0, 1.0 - p_rank / norm)
+                score = round(math.sqrt(r_score * p_score), 4)
+                if score > 0:
+                    candidates.append({
+                        "user_a": receiver,
+                        "user_b": proposer,
+                        "score": score,
+                    })
+        else:
+            # Generalized reciprocal deferred-acceptance matching for open / non-binary / mixed pools
+            all_uids = list(uid_to_user.keys())
+            free = list(all_uids)
+            proposer_next = {uid: 0 for uid in all_uids}
+            current_match = {uid: None for uid in all_uids}
+
+            user_rank: dict[str, dict[str, int]] = {
+                uid: {target: i for i, target in enumerate(normalized_queues.get(uid, []))}
+                for uid in all_uids
+            }
+
+            iterations = 0
+            max_iterations = len(users) ** 2
+
+            while free and iterations < max_iterations:
+                iterations += 1
+                proposer = free.pop(0)
+                pref_list = normalized_queues.get(proposer, [])
+                idx = proposer_next[proposer]
+
+                if idx >= len(pref_list):
+                    continue
+
+                receiver = pref_list[idx]
+                proposer_next[proposer] = idx + 1
+
+                if receiver not in current_match or receiver == proposer:
+                    free.append(proposer)
+                    continue
+
+                rrank = user_rank.get(receiver, {})
+                if proposer not in rrank:
+                    free.append(proposer)
+                    continue
+
+                rank_new = rrank[proposer]
+                current = current_match[receiver]
+
+                if current is None:
+                    current_match[receiver] = proposer
+                else:
+                    rank_current = rrank.get(current, math.inf)
+                    if rank_new < rank_current:
+                        current_match[receiver] = proposer
+                        free.append(current)
+                    else:
+                        free.append(proposer)
+
+            seen_pairs: set[frozenset] = set()
+            for receiver, proposer in current_match.items():
+                if proposer is None or receiver == proposer:
+                    continue
+                pair = frozenset({receiver, proposer})
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                r_rank = user_rank.get(receiver, {}).get(proposer, 999)
+                p_rank = user_rank.get(proposer, {}).get(receiver, 999)
+                norm = 50.0
+                r_score = max(0.0, 1.0 - r_rank / norm)
+                p_score = max(0.0, 1.0 - p_rank / norm)
+                score = round(math.sqrt(r_score * p_score), 4)
+                if score > 0:
+                    candidates.append({
+                        "user_a": receiver,
+                        "user_b": proposer,
+                        "score": score,
+                    })
+
+        # Sort candidate pairs by score descending (highest mutual affinity first)
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
         # Enforce strict 1-to-1 matching (no user assigned multiple times)

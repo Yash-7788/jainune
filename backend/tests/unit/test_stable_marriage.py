@@ -61,6 +61,40 @@ class TestStableMarriage(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertGreater(proposals[0]["score"], 0)
 
+    def test_unacceptable_proposer_rejected(self):
+        """If receiver does not rank proposer in their preferences, no pairing is made."""
+        users = [
+            {"id": "p1", "gender": "man", "show_me": "women"},
+            {"id": "r1", "gender": "woman", "show_me": "men"},
+        ]
+        feed_queues = {
+            "p1": ["r1"],
+            "r1": [],  # r1 rejects p1
+        }
+        proposals = self.engine.compute(users, feed_queues)
+        self.assertEqual(len(proposals), 0)
+
+    def test_bipartite_deferred_acceptance_optimality(self):
+        """Verify bipartite Gale-Shapley handles competing proposers stably."""
+        users = [
+            {"id": "m1", "gender": "man", "show_me": "women"},
+            {"id": "m2", "gender": "man", "show_me": "women"},
+            {"id": "w1", "gender": "woman", "show_me": "men"},
+            {"id": "w2", "gender": "woman", "show_me": "men"},
+        ]
+        # Both men prefer w1, but w1 prefers m2 over m1
+        feed_queues = {
+            "m1": ["w1", "w2"],
+            "m2": ["w1", "w2"],
+            "w1": ["m2", "m1"],
+            "w2": ["m1", "m2"],
+        }
+        proposals = self.engine.compute(users, feed_queues)
+        self.assertEqual(len(proposals), 2)
+        pairs = {frozenset({p["user_a"], p["user_b"]}) for p in proposals}
+        self.assertIn(frozenset({"m2", "w1"}), pairs)
+        self.assertIn(frozenset({"m1", "w2"}), pairs)
+
 
 if __name__ == "__main__":
     unittest.main()

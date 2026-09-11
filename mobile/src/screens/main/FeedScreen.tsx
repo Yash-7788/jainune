@@ -106,7 +106,11 @@ export default function FeedScreen() {
         setCandidates((prev) => (prev.length === 0 ? [] : prev));
         if (candidates.length === 0) setUiState("empty");
       } else {
-        setCandidates((prev) => [...prev, ...data.candidates]);
+        setCandidates((prev) => {
+          const seen = new Set(prev.map((c) => c.id));
+          const uniqueNew = data.candidates.filter((c) => !seen.has(c.id));
+          return [...prev, ...uniqueNew];
+        });
         setUiState("populated");
       }
       if (isOffline.current) {

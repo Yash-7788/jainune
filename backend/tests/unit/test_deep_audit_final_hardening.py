@@ -1561,6 +1561,12 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         res_legal = await add_security_headers(mock_legal_req, mock_legal_call)
         self.assertIn("default-src 'self'", res_legal.headers.get("Content-Security-Policy", ""))
 
+        # 3c. DevOps liveness endpoint returns 200 alive
+        from app.main import liveness
+        live_resp = await liveness()
+        self.assertEqual(live_resp.status_code, 200)
+        self.assertIn(b'"status":"alive"', live_resp.body)
+
         # 4. CORS origin lock
         from app.core.config import settings
         self.assertNotIn("https://evil-hacker.com", settings.allowed_origins)

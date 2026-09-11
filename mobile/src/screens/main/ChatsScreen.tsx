@@ -97,6 +97,79 @@ export default function ChatsScreen() {
     );
   }
 
+  const renderItem = useCallback(
+    ({ item }: { item: ChatThread }) => {
+      const momentum = getMomentumLabel(item.momentum_expires_at);
+      const lastMsg = item.last_message;
+
+      return (
+        <TouchableOpacity
+          style={[styles.thread, item.unread_count > 0 && styles.threadUnread]}
+          onPress={() =>
+            navigation.navigate("Chat", {
+              matchId: item.match_id,
+              otherUser: {
+                id: item.other_user.id,
+                first_name: item.other_user.first_name,
+                photo_url: item.other_user.photo_url,
+                is_online: item.other_user.is_online,
+              },
+            })
+          }
+          activeOpacity={0.7}
+        >
+          {/* Avatar */}
+          <View style={styles.avatarWrap}>
+            {item.other_user.photo_url ? (
+              <Image source={{ uri: item.other_user.photo_url }} style={styles.avatar} />
+            ) : (
+              <View style={[styles.avatar, styles.avatarFallback]}>
+                <Text style={styles.avatarInitial}>{item.other_user.first_name?.[0]}</Text>
+              </View>
+            )}
+            {item.other_user.is_online && <View style={styles.onlineDot} />}
+          </View>
+
+          {/* Content */}
+          <View style={styles.threadContent}>
+            <View style={styles.threadTop}>
+              <Text style={[styles.threadName, item.unread_count > 0 && styles.threadNameBold]}>
+                {item.other_user.first_name}
+              </Text>
+              <View style={styles.threadTopRight}>
+                {momentum && (
+                  <View style={styles.momentumPill}>
+                    <Text style={styles.momentumText}>{momentum}</Text>
+                  </View>
+                )}
+                {lastMsg && (
+                  <Text style={styles.threadTime}>{formatTime(lastMsg.created_at)}</Text>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.threadBottom}>
+              <Text
+                style={[styles.lastMsg, item.unread_count > 0 && styles.lastMsgBold]}
+                numberOfLines={1}
+              >
+                {lastMsg?.content ?? "Tap to start chatting!"}
+              </Text>
+              {item.unread_count > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadBadgeText}>
+                    {item.unread_count > 99 ? "99+" : item.unread_count}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+        </TouchableOpacity>
+      );
+    },
+    [navigation]
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -109,6 +182,7 @@ export default function ChatsScreen() {
         maxToRenderPerBatch={10}
         windowSize={5}
         initialNumToRender={10}
+        getItemLayout={(_, index) => ({ length: 77, offset: 77 * index, index })}
         removeClippedSubviews={Platform.OS === "android"}
         refreshControl={
           <RefreshControl
@@ -127,75 +201,7 @@ export default function ChatsScreen() {
             </Text>
           </View>
         }
-        renderItem={({ item }) => {
-          const momentum = getMomentumLabel(item.momentum_expires_at);
-          const lastMsg = item.last_message;
-
-          return (
-            <TouchableOpacity
-              style={[styles.thread, item.unread_count > 0 && styles.threadUnread]}
-              onPress={() =>
-                navigation.navigate("Chat", {
-                  matchId: item.match_id,
-                  otherUser: {
-                    id: item.other_user.id,
-                    first_name: item.other_user.first_name,
-                    photo_url: item.other_user.photo_url,
-                    is_online: item.other_user.is_online,
-                  },
-                })
-              }
-              activeOpacity={0.7}
-            >
-              {/* Avatar */}
-              <View style={styles.avatarWrap}>
-                {item.other_user.photo_url ? (
-                  <Image source={{ uri: item.other_user.photo_url }} style={styles.avatar} />
-                ) : (
-                  <View style={[styles.avatar, styles.avatarFallback]}>
-                    <Text style={styles.avatarInitial}>{item.other_user.first_name?.[0]}</Text>
-                  </View>
-                )}
-                {item.other_user.is_online && <View style={styles.onlineDot} />}
-              </View>
-
-              {/* Content */}
-              <View style={styles.threadContent}>
-                <View style={styles.threadTop}>
-                  <Text style={[styles.threadName, item.unread_count > 0 && styles.threadNameBold]}>
-                    {item.other_user.first_name}
-                  </Text>
-                  <View style={styles.threadTopRight}>
-                    {momentum && (
-                      <View style={styles.momentumPill}>
-                        <Text style={styles.momentumText}>{momentum}</Text>
-                      </View>
-                    )}
-                    {lastMsg && (
-                      <Text style={styles.threadTime}>{formatTime(lastMsg.created_at)}</Text>
-                    )}
-                  </View>
-                </View>
-
-                <View style={styles.threadBottom}>
-                  <Text
-                    style={[styles.lastMsg, item.unread_count > 0 && styles.lastMsgBold]}
-                    numberOfLines={1}
-                  >
-                    {lastMsg?.content ?? "Tap to start chatting!"}
-                  </Text>
-                  {item.unread_count > 0 && (
-                    <View style={styles.unreadBadge}>
-                      <Text style={styles.unreadBadgeText}>
-                        {item.unread_count > 99 ? "99+" : item.unread_count}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            </TouchableOpacity>
-          );
-        }}
+        renderItem={renderItem}
       />
     </View>
   );

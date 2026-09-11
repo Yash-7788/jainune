@@ -34,7 +34,7 @@ interface SwipeCardProps {
   onSuperLike?: (dwellMs: number) => void;
 }
 
-export default function SwipeCard({
+function SwipeCard({
   candidate,
   isTop,
   onSwipeRight,
@@ -44,6 +44,7 @@ export default function SwipeCard({
   const position = useRef(new Animated.ValueXY()).current;
   const [photoIndex, setPhotoIndex] = useState(0);
   const [swipeDirection, setSwipeDirection] = useState<"left" | "right" | "up" | null>(null);
+  const swipeDirectionRef = useRef<"left" | "right" | "up" | null>(null);
 
   // Dwell tracking
   const cardOpenTime = useRef(Date.now());
@@ -91,6 +92,7 @@ export default function SwipeCard({
     else if (direction === "left") onSwipeLeft(total, photo, prompt);
     else if (direction === "up") onSuperLike?.(total);
     position.setValue({ x: 0, y: 0 });
+    swipeDirectionRef.current = null;
     setSwipeDirection(null);
   };
 
@@ -99,10 +101,11 @@ export default function SwipeCard({
       onStartShouldSetPanResponder: () => isTop,
       onPanResponderMove: (_, gesture) => {
         position.setValue({ x: gesture.dx, y: gesture.dy });
-        if (gesture.dx > 20) setSwipeDirection("right");
-        else if (gesture.dx < -20) setSwipeDirection("left");
-        else if (gesture.dy < -40) setSwipeDirection("up");
-        else setSwipeDirection(null);
+        const dir = gesture.dx > 20 ? "right" : gesture.dx < -20 ? "left" : gesture.dy < -40 ? "up" : null;
+        if (dir !== swipeDirectionRef.current) {
+          swipeDirectionRef.current = dir;
+          setSwipeDirection(dir);
+        }
       },
       onPanResponderRelease: (_, gesture) => {
         if (gesture.dx > SWIPE_THRESHOLD) forceSwipe("right");
@@ -114,6 +117,7 @@ export default function SwipeCard({
             useNativeDriver: true,
             friction: 5,
           }).start();
+          swipeDirectionRef.current = null;
           setSwipeDirection(null);
         }
       },
@@ -482,3 +486,5 @@ const styles = StyleSheet.create({
   },
   likeBtnText: { fontSize: 26, color: colors.white },
 });
+
+export default React.memo(SwipeCard);

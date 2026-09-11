@@ -154,9 +154,21 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
-# ── Health (Deep Connectivity Check) ─────────────────────────────────────────
+# ── Liveness Probes (Process Alive, prevents cascading restart loops) ────────
+
+@app.get("/livez", tags=["Health"], include_in_schema=False)
+@app.get("/v1/health/live", tags=["Health"], include_in_schema=False)
+async def liveness():
+    return JSONResponse(
+        status_code=200,
+        content={"status": "alive", "version": settings.app_version},
+    )
+
+
+# ── Health (Deep Connectivity Check / Readiness) ────────────────────────────
 
 @app.get("/v1/health", tags=["Health"])
+@app.get("/readyz", tags=["Health"], include_in_schema=False)
 async def health():
     db_ok = False
     redis_ok = False

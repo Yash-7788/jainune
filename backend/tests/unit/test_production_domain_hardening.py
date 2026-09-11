@@ -14,12 +14,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-if "asyncpg" not in sys.modules:
-    sys.modules["asyncpg"] = MagicMock()
-if "redis" not in sys.modules:
-    sys.modules["redis"] = MagicMock()
-if "redis.asyncio" not in sys.modules:
-    sys.modules["redis.asyncio"] = MagicMock()
+for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions"]:
+    if mod not in sys.modules:
+        sys.modules[mod] = MagicMock()
 
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
@@ -183,6 +180,79 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ranked), 2)
         self.assertEqual(ranked[0]["id"], c1["id"])  # higher score
         self.assertEqual(ranked[1]["id"], c2["id"])
+
+    async def test_core_people_finder_geodesic_distance_and_relocation(self):
+        """Candidates beyond max distance are excluded unless open to relocation."""
+        finder = CorePeopleFinder()
+        req_id = uuid.uuid4()
+        requester = {
+            "id": req_id,
+            "gender": "man",
+            "show_me": "women",
+            "dietary_strictness": "pure_jain",
+            "latitude": 19.0760,   # Mumbai
+            "longitude": 72.8777,
+            "max_distance_km": 50,
+            "open_to_relocation": False,
+        }
+        # Thane (within ~30km)
+        c_near = {
+            "id": uuid.uuid4(),
+            "gender": "woman",
+            "dietary_strictness": "pure_jain",
+            "latitude": 19.2183,
+            "longitude": 72.9781,
+            "open_to_relocation": False,
+        }
+        # Delhi (~1150km away, not open to relocation)
+        c_far_no_relo = {
+            "id": uuid.uuid4(),
+            "gender": "woman",
+            "dietary_strictness": "pure_jain",
+            "latitude": 28.6139,
+            "longitude": 77.2090,
+            "open_to_relocation": False,
+        }
+        # Bangalore (~850km away, open to relocation)
+        c_far_with_relo = {
+            "id": uuid.uuid4(),
+            "gender": "woman",
+            "dietary_strictness": "pure_jain",
+            "latitude": 12.9716,
+            "longitude": 77.5946,
+            "open_to_relocation": True,
+        }
+
+        ranked = await finder.rank_candidates(requester, [c_near, c_far_no_relo, c_far_with_relo])
+        ranked_ids = {r["id"] for r in ranked}
+        self.assertIn(c_near["id"], ranked_ids)
+        self.assertNotIn(c_far_no_relo["id"], ranked_ids)
+        self.assertIn(c_far_with_relo["id"], ranked_ids)
+
+    async def test_core_people_finder_candidate_show_me_reciprocity(self):
+        """If candidate only seeks women, a man requester is excluded."""
+        finder = CorePeopleFinder()
+        requester = {
+            "id": uuid.uuid4(),
+            "gender": "man",
+            "show_me": "women",
+            "dietary_strictness": "pure_jain",
+        }
+        c_seeking_women = {
+            "id": uuid.uuid4(),
+            "gender": "woman",
+            "show_me": "women",  # Only seeking women
+            "dietary_strictness": "pure_jain",
+        }
+        c_seeking_men = {
+            "id": uuid.uuid4(),
+            "gender": "woman",
+            "show_me": "men",
+            "dietary_strictness": "pure_jain",
+        }
+        ranked = await finder.rank_candidates(requester, [c_seeking_women, c_seeking_men])
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["id"], c_seeking_men["id"])
 
     async def test_require_admin_valid(self):
         """User with superadmin role in admin_users passes require_admin."""

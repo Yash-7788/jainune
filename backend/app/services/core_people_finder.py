@@ -686,29 +686,98 @@ class CorePeopleFinder:
         geographical, and reciprocal affinity constraints.
         """
         req_id = requester["id"]
+        req_my_gender = requester.get("gender")
         req_gender = requester.get("show_me", "everyone")
         req_diet = requester.get("dietary_strictness")
         req_sect = requester.get("community_sect")
+        req_onion = requester.get("eats_onion_garlic")
+        req_root = requester.get("eats_root_vegetables")
+        req_paryushan = requester.get("paryushan_mode")
+        req_looking_for = requester.get("looking_for")
+        req_lat = requester.get("latitude")
+        req_lon = requester.get("longitude")
+        req_max_dist = requester.get("max_distance_km", 50)
+        req_relocation = requester.get("open_to_relocation", False)
 
         ranked = []
         for cand in pool_users:
             cid = cand["id"]
             if cid == req_id:
                 continue
-            if req_gender in ("men", "man") and cand.get("gender") not in ("men", "man"):
+
+            cand_gender = cand.get("gender")
+            if req_gender in ("men", "man") and cand_gender not in ("men", "man"):
                 continue
-            if req_gender in ("women", "woman") and cand.get("gender") not in ("women", "woman"):
-                continue
-            if req_diet == "pure_jain" and cand.get("dietary_strictness") not in ("pure_jain", "vegan"):
+            if req_gender in ("women", "woman") and cand_gender not in ("women", "woman"):
                 continue
 
+            # Candidate orientation reciprocity (if specified)
+            cand_show_me = cand.get("show_me")
+            if cand_show_me and req_my_gender:
+                if cand_show_me in ("men", "man") and req_my_gender not in ("men", "man"):
+                    continue
+                if cand_show_me in ("women", "woman") and req_my_gender not in ("women", "woman"):
+                    continue
+
+            cand_diet = cand.get("dietary_strictness")
+            # Pure Jain strict dietary gating
+            if req_diet == "pure_jain" and cand_diet not in ("pure_jain", "vegan"):
+                continue
+            if cand_diet == "pure_jain" and req_diet and req_diet not in ("pure_jain", "vegan"):
+                continue
+
+            # Distance & relocation gating
+            cand_lat = cand.get("latitude")
+            cand_lon = cand.get("longitude")
+            cand_relocation = cand.get("open_to_relocation", False)
+            dist_km = None
+            if req_lat is not None and req_lon is not None and cand_lat is not None and cand_lon is not None:
+                try:
+                    phi1, phi2 = math.radians(float(req_lat)), math.radians(float(cand_lat))
+                    dphi = math.radians(float(cand_lat) - float(req_lat))
+                    dlam = math.radians(float(cand_lon) - float(req_lon))
+                    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2.0) ** 2
+                    dist_km = 6371.0 * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+                    if dist_km > req_max_dist and not (req_relocation or cand_relocation):
+                        continue
+                except Exception:
+                    dist_km = None
+
+            # Multi-factor composite compatibility score
+            cand_onion = cand.get("eats_onion_garlic")
             score = 0
-            if cand.get("dietary_strictness") == req_diet:
+            if cand_diet == req_diet:
                 score += 30
-            if cand.get("community_sect") == req_sect:
+            elif req_diet in ("pure_jain", "vegan") and cand_diet in ("pure_jain", "vegan"):
+                score += 20
+
+            cand_sect = cand.get("community_sect")
+            if cand_sect == req_sect:
                 score += 25
-            if cand.get("eats_onion_garlic") == requester.get("eats_onion_garlic"):
+            elif cand_sect == "open" or req_sect == "open":
                 score += 15
+
+            if cand_onion == req_onion:
+                score += 15
+
+            if req_root is not None and cand.get("eats_root_vegetables") == req_root:
+                score += 10
+
+            if req_paryushan and cand.get("paryushan_mode"):
+                score += 10
+
+            if req_looking_for and cand.get("looking_for") == req_looking_for:
+                score += 15
+
+            if dist_km is not None:
+                score += max(0, 20 - int(dist_km / 5))
+
+            if cand.get("is_photo_verified"):
+                score += 10
+
+            trust = cand.get("trust_score")
+            if trust and isinstance(trust, (int, float)) and trust >= 80:
+                score += 5
 
             ranked.append((score, cand))
             if len(ranked) % 250 == 0:
