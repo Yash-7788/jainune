@@ -1,4 +1,4 @@
-﻿-- Migration 0011: consent_records unique constraint + updated_at column
+-- Migration 0011: consent_records unique constraint + updated_at column
 -- Required for the step-21 consent upsert (ON CONFLICT (user_id, consent_type) DO UPDATE).
 -- Without this unique constraint the ON CONFLICT target is undefined and Postgres raises an error.
 

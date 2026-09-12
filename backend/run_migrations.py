@@ -16,7 +16,7 @@ DOWN_MIGRATIONS_DIR = MIGRATIONS_DIR / "down"
 def sanitize_migration_sql(sql_content: str) -> str:
     cleaned = []
     in_dollar_block = False
-    for line in sql_content.splitlines():
+    for line in sql_content.lstrip("\ufeff").splitlines():
         if "$$" in line and (line.count("$$") % 2 == 1):
             in_dollar_block = not in_dollar_block
             cleaned.append(line)
@@ -78,7 +78,7 @@ async def run_migrations():
                 continue
 
             print(f"  [APPLYING] {version}...")
-            with open(sql_file, "r", encoding="utf-8") as f:
+            with open(sql_file, "r", encoding="utf-8-sig") as f:
                 sql_content = f.read()
 
             # In PostgreSQL, CONCURRENTLY and VACUUM cannot run inside explicit transaction blocks
@@ -127,7 +127,7 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
                 sys.exit(1)
 
             print(f"  [ROLLING BACK] {version} via {down_file.name}...")
-            with open(down_file, "r", encoding="utf-8") as f:
+            with open(down_file, "r", encoding="utf-8-sig") as f:
                 down_sql = f.read()
 
             if "CONCURRENTLY" in down_sql.upper() or "VACUUM" in down_sql.upper():
