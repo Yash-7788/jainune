@@ -13,7 +13,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:15-3.4
+        image: postgis/postgis:16-3.4
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: testpass
@@ -57,9 +57,9 @@ jobs:
 
       - name: Install pgvector in postgres service
         run: |
-          CONTAINER=$(docker ps -q --filter "ancestor=postgis/postgis:15-3.4")
-          docker exec $CONTAINER apt-get update
-          docker exec $CONTAINER apt-get install -y postgresql-15-pgvector
+          CONTAINER=$(docker ps -q --filter "ancestor=postgis/postgis:16-3.4" | head -n 1)
+          docker exec $CONTAINER apt-get update -o Acquire::Check-Valid-Until=false
+          docker exec $CONTAINER apt-get install -y --no-install-recommends postgresql-16-pgvector
 
       - name: Run migrations validation
         env:
