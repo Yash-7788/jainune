@@ -923,5 +923,204 @@ class TestCoverageBoost(unittest.TestCase):
         is_bot, reason = verify_bot_integrity({"user-agent": "python-requests/2.28"})
         self.assertTrue(is_bot)
 
+    def test_ephemeral_reaper_s3_and_waitlist_tasks(self):
+        """Cover new reaper tasks for S3 deletion retries, location waitlist, and moderation."""
+        from app.workers.ephemeral_reaper import (
+            reap_failed_s3_deletions,
+            purge_stale_location_waitlist,
+            process_media_moderation_task,
+        )
+        mock_redis = MagicMock()
+        mock_redis.smembers = AsyncMock(return_value=[b"photos/failed1.jpg", b"photos/failed2.jpg"])
+        mock_redis.srem = AsyncMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value="DELETE 5")
+        mock_conn.close = AsyncMock()
+
+        with patch("app.core.redis.get_redis", return_value=mock_redis), \
+             patch("app.services.account_service._delete_s3_keys_sync", return_value=["photos/failed2.jpg"]):
+            reap_failed_s3_deletions()
+            mock_redis.srem.assert_called_once_with("s3:failed_deletions", "photos/failed1.jpg")
+
+        with patch("app.workers.ephemeral_reaper._get_conn", new_callable=AsyncMock, return_value=mock_conn):
+            purge_stale_location_waitlist()
+            mock_conn.execute.assert_called_once()
+
+        mock_self = MagicMock()
+        with patch("app.services.media_processor._run_moderation", new_callable=AsyncMock) as m_mod:
+            process_media_moderation_task(mock_self, str(uuid.uuid4()), "uploads/pic.jpg", "photo", str(uuid.uuid4()))
+            m_mod.assert_called_once()
+
+    def test_media_processor_branches(self):
+        """Cover media processor enqueue, container checks, and reap stale processing."""
+        from app.services.media_processor import (
+            enqueue_moderation,
+            _validate_voice_magic_bytes,
+            _voice_moderation_check,
+            reap_stale_processing_media,
+        )
+        self.assertTrue(_validate_voice_magic_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00"))
+        self.assertTrue(_validate_voice_magic_bytes(b"\xff\xfb\x90d\x00\x00\x00\x00"))
+        self.assertTrue(_validate_voice_magic_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt "))
+        self.assertTrue(_validate_voice_magic_bytes(b"OggS\x00\x02\x00\x00\x00\x00"))
+        self.assertTrue(_validate_voice_magic_bytes(b"\x00\x00\x00 ftypM4A "))
+        self.assertTrue(_validate_voice_magic_bytes(b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81"))
+        self.assertFalse(_validate_voice_magic_bytes(b"NOTAN_AUDIO_FILE_DATA"))
+
+        with patch("app.services.media_processor.boto3") as mb:
+            mock_s3 = MagicMock()
+            mb.client.return_value = mock_s3
+            mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"ID3\x03\x00\x00\x00"))}
+            with patch("app.core.config.settings.aws_access_key_id", "real_key_123"):
+                ok, err = _voice_moderation_check("uploads/test.mp3")
+                self.assertTrue(ok)
+
+                mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"CORRUPT"))}
+                ok, err = _voice_moderation_check("uploads/test.mp3")
+                self.assertFalse(ok)
+                self.assertEqual(err, "INVALID_AUDIO_FORMAT")
+
+        with patch("app.workers.ephemeral_reaper.process_media_moderation_task.delay", side_effect=Exception("broker down")), \
+             patch("app.services.media_processor._run_moderation_with_semaphore", return_value=None), \
+             patch("asyncio.create_task") as ct:
+            asyncio.run(enqueue_moderation(uuid.uuid4(), "uploads/x.jpg", "photo", uuid.uuid4()))
+            ct.assert_called_once()
+
+        mock_db = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(side_effect=[
+            [{"id": uuid.uuid4(), "s3_key": "uploads/stranded.jpg", "media_type": "photo", "user_id": uuid.uuid4()}],
+            [{"id": uuid.uuid4(), "s3_key": "uploads/stale.jpg"}],
+        ])
+        mock_db.acquire.return_value = AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock(return_value=False))
+        with patch("app.workers.ephemeral_reaper.process_media_moderation_task.delay") as p_delay, \
+             patch("app.services.media_processor._delete_from_quarantine"):
+            count = asyncio.run(reap_stale_processing_media(mock_db))
+            self.assertEqual(count, 1)
+            p_delay.assert_called_once()
+
+    def test_account_service_s3_keys_sync_and_archive_failure(self):
+        """Cover account_service._delete_s3_keys_sync and purge_user_account exception."""
+        from app.services.account_service import _delete_s3_keys_sync
+
+        self.assertEqual(_delete_s3_keys_sync([]), [])
+
+        with patch("app.services.account_service.boto3") as mb:
+            mock_s3 = MagicMock()
+            mb.client.return_value = mock_s3
+            mock_s3.delete_object.side_effect = [
+                Exception("S3 delete failed"),
+                None,
+            ]
+            failed = _delete_s3_keys_sync(["media/photo1.jpg"])
+            self.assertEqual(failed, ["media/photo1.jpg"])
+
+        uid = uuid.uuid4()
+        mock_conn = MagicMock()
+        mock_conn.fetchrow = AsyncMock(return_value={"phone_number": "123", "email": "a@b.com", "subscription_tier": "free"})
+        mock_conn.execute = AsyncMock(side_effect=Exception("disk full"))
+        mock_redis = MagicMock()
+        with self.assertRaises(RuntimeError):
+            asyncio.run(purge_user_account(uid, mock_conn, mock_redis))
+
+    def test_subscriptions_store_webhook_branches(self):
+        """Cover store notification webhook validation branches and cancel endpoint."""
+        from app.routers.subscriptions import store_notification_webhook, cancel_subscription, StoreNotificationBody
+        from fastapi import HTTPException
+
+        mock_pool = MagicMock()
+        body = StoreNotificationBody(store="apple", event_type="renewed")
+
+        with patch("app.core.config.settings.store_webhook_secret", "secret_token"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(store_notification_webhook(body, mock_pool, x_store_token="wrong_token"))
+            self.assertEqual(ctx.exception.status_code, 403)
+
+        with patch("app.core.config.settings.store_webhook_secret", "secret_token"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(store_notification_webhook(body, mock_pool, x_store_token="secret_token"))
+            self.assertEqual(ctx.exception.status_code, 400)
+
+        body_with_id = StoreNotificationBody(store="apple", event_type="renewed", event_id="evt_123")
+        with patch("app.core.config.settings.store_webhook_secret", "secret_token"):
+            res = asyncio.run(store_notification_webhook(body_with_id, mock_pool, x_store_token="secret_token"))
+            self.assertEqual(res["status"], "missing_identifier")
+
+        body_bad_uid = StoreNotificationBody(store="apple", event_type="renewed", event_id="evt_123", user_id="not-a-uuid")
+        with patch("app.core.config.settings.store_webhook_secret", "secret_token"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(store_notification_webhook(body_bad_uid, mock_pool, x_store_token="secret_token"))
+            self.assertEqual(ctx.exception.status_code, 400)
+
+        uid = uuid.uuid4()
+        body_valid = StoreNotificationBody(store="apple", event_type="renewed", event_id="evt_123", user_id=str(uid), sku="jainune_gold_1m")
+        with patch("app.core.config.settings.store_webhook_secret", "secret_token"), \
+             patch("app.services.payment_service.process_store_subscription_event", new_callable=AsyncMock) as pse:
+            pse.return_value = {"status": "active", "tier": "jainune_gold"}
+            res = asyncio.run(store_notification_webhook(body_valid, mock_pool, x_store_token="secret_token"))
+            self.assertTrue(res["received"])
+            self.assertEqual(res["result"]["tier"], "jainune_gold")
+
+        user = {"user_id": str(uid)}
+        mock_conn = MagicMock()
+        mock_conn.fetchrow = AsyncMock(return_value={"subscription_tier": "jainune_gold", "subscription_valid_until": "2026-12-31T00:00:00Z"})
+        mock_pool.acquire.return_value = AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock(return_value=False))
+        cancel_res = asyncio.run(cancel_subscription(user, mock_pool))
+        self.assertTrue(cancel_res["success"])
+
+    def test_payment_service_store_lifecycle_branches(self):
+        """Cover process_store_subscription_event lifecycle state transitions."""
+        from app.services.payment_service import process_store_subscription_event
+        uid = uuid.uuid4()
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_pool.acquire.return_value = AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock(return_value=False))
+        mock_conn.execute = AsyncMock()
+
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            None,
+            {"id": uid, "subscription_tier": "jainune_plus", "subscription_valid_until": None, "super_connect_credits": 0},
+        ])
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=None)
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            res_grace = asyncio.run(process_store_subscription_event(
+                user_id=uid, store="apple", event_type="in_grace_period", pool=mock_pool, original_transaction_id="tx_123",
+            ))
+            self.assertEqual(res_grace["status"], "in_grace_period")
+
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            None,
+            {"id": uid, "subscription_tier": "jainune_plus", "subscription_valid_until": None, "super_connect_credits": 0},
+        ])
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            res_hold = asyncio.run(process_store_subscription_event(
+                user_id=uid, store="google", event_type="account_hold", pool=mock_pool, original_transaction_id="tx_123",
+            ))
+            self.assertEqual(res_hold["status"], "account_hold")
+
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            None,
+            {"id": uid, "subscription_tier": "jainune_plus", "subscription_valid_until": None, "super_connect_credits": 10},
+        ])
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            res_rev = asyncio.run(process_store_subscription_event(
+                user_id=uid, store="apple", event_type="revoked", pool=mock_pool, original_transaction_id="tx_123",
+            ))
+            self.assertEqual(res_rev["status"], "revoked")
+
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            None,
+            {"id": uid, "subscription_tier": "free", "subscription_valid_until": None, "super_connect_credits": 0},
+        ])
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            res_renew = asyncio.run(process_store_subscription_event(
+                user_id=uid, store="apple", event_type="renewed", pool=mock_pool, original_transaction_id="tx_123", sku="jainune_gold_1m",
+            ))
+            self.assertEqual(res_renew["status"], "active")
+            self.assertEqual(res_renew["tier"], "jainune_gold")
+
+
 
 

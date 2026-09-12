@@ -16,7 +16,8 @@ from typing import Optional
 import asyncpg
 try:
     import boto3
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import ClientError as _ClientError
+    ClientError = _ClientError if isinstance(_ClientError, type) and issubclass(_ClientError, BaseException) else Exception
 except ImportError:
     boto3 = None
     ClientError = Exception
