@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import logging
+from collections import deque
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class StableMarriageEngine:
             # Deterministic, optimal bipartite Gale-Shapley (proposers = men, receivers = women)
             proposers = list(men)
             receivers = set(women)
-            free = list(proposers)
+            free = deque(proposers)
             proposer_next = {uid: 0 for uid in proposers}
             current_match: dict[str, str | None] = {uid: None for uid in receivers}
 
@@ -95,7 +96,7 @@ class StableMarriageEngine:
 
             while free and iterations < max_iterations:
                 iterations += 1
-                proposer = free.pop(0)
+                proposer = free.popleft()
                 pref_list = normalized_queues.get(proposer, [])
                 idx = proposer_next[proposer]
 
@@ -147,7 +148,7 @@ class StableMarriageEngine:
         else:
             # Generalized reciprocal deferred-acceptance matching for open / non-binary / mixed pools
             all_uids = list(uid_to_user.keys())
-            free = list(all_uids)
+            free = deque(all_uids)
             proposer_next = {uid: 0 for uid in all_uids}
             current_match = {uid: None for uid in all_uids}
 
@@ -161,7 +162,7 @@ class StableMarriageEngine:
 
             while free and iterations < max_iterations:
                 iterations += 1
-                proposer = free.pop(0)
+                proposer = free.popleft()
                 pref_list = normalized_queues.get(proposer, [])
                 idx = proposer_next[proposer]
 

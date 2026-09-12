@@ -790,15 +790,19 @@ def _unpack_grace_payload(raw_val: bytes | str) -> dict | None:
     try:
         decoded = raw_val.decode() if isinstance(raw_val, bytes) else raw_val
         wrapper = json.loads(decoded)
-        if isinstance(wrapper, dict) and "data" in wrapper and "sig" in wrapper:
-            raw_data = json.dumps(wrapper["data"], sort_keys=True)
-            expected_sig = hmac.new(
-                settings.jwt_secret_key.encode(),
-                raw_data.encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            if hmac.compare_digest(wrapper["sig"], expected_sig):
-                return wrapper["data"]
+        if isinstance(wrapper, dict):
+            if "data" in wrapper and "sig" in wrapper:
+                raw_data = json.dumps(wrapper["data"], sort_keys=True)
+                expected_sig = hmac.new(
+                    settings.jwt_secret_key.encode(),
+                    raw_data.encode(),
+                    hashlib.sha256,
+                ).hexdigest()
+                if hmac.compare_digest(wrapper["sig"], expected_sig):
+                    return wrapper["data"]
+                return None
+            if "access_token" in wrapper:
+                return wrapper
         return None
     except Exception:
         return None
@@ -855,7 +859,13 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 token_hash,
             )
 
-            if not row or row["expires_at"] < datetime.now(timezone.utc):
+            exp_val = row["expires_at"] if row else None
+            is_expired = False
+            if isinstance(exp_val, datetime):
+                exp_utc = exp_val if exp_val.tzinfo else exp_val.replace(tzinfo=timezone.utc)
+                is_expired = exp_utc < datetime.now(timezone.utc)
+
+            if not row or is_expired:
                 # Concurrency check: If winner committed while loser waited on lock
                 cached_grace = await redis.get(f"auth:grace_rt:{token_hash}")
                 if cached_grace:
@@ -972,6 +982,7 @@ async def logout_endpoint(
     await sliding_window_rate_limit(f"ratelimit:auth:logout:{user_id}", 30, 60, redis)
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+        await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
 
     # Invalidate feed cache and active session keys
     try:

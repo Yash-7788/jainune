@@ -37,6 +37,16 @@ async def _get_conn() -> asyncpg.Connection:
     return await get_worker_conn()
 
 
+async def _is_dedup(key: str, ttl: int = 120) -> bool:
+    try:
+        from app.core.redis import get_redis
+        r = get_redis()
+        res = await r.set(f"notify:dedup:{key}", "1", nx=True, ex=ttl)
+        return not res
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Task: new match
 # ---------------------------------------------------------------------------
@@ -47,6 +57,9 @@ def notify_new_match(self, match_id: str) -> None:
     """Push to both users when a mutual match is created."""
 
     async def _run():
+        if await _is_dedup(f"match:{match_id}", ttl=300):
+            log.info("notify_new_match: duplicate notification for match %s skipped", match_id)
+            return
         conn = await _get_conn()
         try:
             m_uuid = uuid.UUID(str(match_id))
@@ -154,6 +167,9 @@ def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
     """Notify a gold/platinum user that someone liked their profile."""
 
     async def _run():
+        if await _is_dedup(f"like:{liked_user_id}:{liker_name}", ttl=120):
+            log.info("notify_new_like: duplicate like notification for %s skipped", liked_user_id)
+            return
         conn = await _get_conn()
         try:
             u_uuid = uuid.UUID(str(liked_user_id))
@@ -200,6 +216,9 @@ def notify_match_expiring(self, match_id: str) -> None:
     """
 
     async def _run():
+        if await _is_dedup(f"expiring:{match_id}", ttl=86400):
+            log.info("notify_match_expiring: duplicate expiring notification for %s skipped", match_id)
+            return
         conn = await _get_conn()
         try:
             m_uuid = uuid.UUID(str(match_id))

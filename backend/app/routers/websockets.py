@@ -99,16 +99,37 @@ async def websocket_chat(
             return
 
         ticket_key = f"ws:ticket:{ticket}"
-        try:
-            uid_val = await redis.getdel(ticket_key)
-        except Exception:
-            _GETDEL_LUA = "local val = redis.call('GET', KEYS[1]); if val then redis.call('DEL', KEYS[1]) end; return val"
-            uid_val = await redis.eval(_GETDEL_LUA, 1, ticket_key)
+        uid_val = None
+        if hasattr(redis, "getdel"):
+            try:
+                res = await redis.getdel(ticket_key)
+                if isinstance(res, (bytes, str)):
+                    uid_val = res
+            except Exception:
+                pass
+
+        if not uid_val:
+            try:
+                _GETDEL_LUA = "local val = redis.call('GET', KEYS[1]); if val then redis.call('DEL', KEYS[1]) end; return val"
+                res = await redis.eval(_GETDEL_LUA, 1, ticket_key)
+                if isinstance(res, (bytes, str)):
+                    uid_val = res
+            except Exception:
+                pass
+
+        if not uid_val:
+            try:
+                res = await redis.get(ticket_key)
+                if isinstance(res, (bytes, str)):
+                    uid_val = res
+                    await redis.delete(ticket_key)
+            except Exception:
+                pass
 
         if not uid_val:
             await websocket.close(code=4001, reason="Invalid or expired ticket.")
             return
-        raw_uid = uid_val.decode() if isinstance(uid_val, bytes) else uid_val
+        raw_uid = uid_val.decode() if isinstance(uid_val, bytes) else str(uid_val)
         user_id = uuid.UUID(raw_uid)
     except Exception:
         await websocket.close(code=4001, reason="Invalid or expired credentials.")
@@ -117,11 +138,13 @@ async def websocket_chat(
     # Sliding window connection rate limit: 30 connects per 60s per user to prevent DoS
     try:
         await sliding_window_rate_limit(f"ratelimit:ws_connect:{user_id}", 30, 60, redis)
-    except HTTPException:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded.")
+    except HTTPException as exc:
+        reason = "Rate limit exceeded." if exc.status_code == 429 else "Rate limiting service unavailable."
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=reason)
         return
     except Exception:
-        pass
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limiting service unavailable.")
+        return
 
     # ── 3. Participant and account status check ──────────────────────────────
     async with db.acquire() as conn:

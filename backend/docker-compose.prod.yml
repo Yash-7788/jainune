@@ -2,6 +2,7 @@ version: "3.8"
 
 services:
   api:
+    image: ${BACKEND_IMAGE:-ghcr.io/yash-7788/jainune/backend:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -34,6 +35,7 @@ services:
         max-file: "5"
 
   worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/yash-7788/jainune/backend:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -65,6 +67,7 @@ services:
         max-file: "5"
 
   beat:
+    image: ${BACKEND_IMAGE:-ghcr.io/yash-7788/jainune/backend:latest}
     build:
       context: .
       dockerfile: Dockerfile

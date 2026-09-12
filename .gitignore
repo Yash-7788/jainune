@@ -52,3 +52,15 @@ test-results/
 *.keystore
 secrets/
 credentials/
+
+.coverage
+.coverage.*
+*.coverage
+
+.infigraph/
+*.scip
+*.cpg.bin
+*.bin
+
+.code-intelligence/
+.claude/

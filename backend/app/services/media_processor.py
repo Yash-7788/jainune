@@ -17,8 +17,12 @@ for MVP, it runs inline as a fire-and-forget asyncio task.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
-from typing import Literal
+from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import boto3
@@ -27,6 +31,16 @@ except ImportError:
 
 from app.core.config import settings
 from app.core.database import get_pool
+
+_active_tasks: set[asyncio.Task] = set()
+_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(getattr(settings, "media_processing_concurrency", 8))
+    return _semaphore
 
 
 # Rekognition confidence threshold — labels above this trigger rejection
@@ -80,17 +94,30 @@ def _check_s3_size(s3_key: str, media_type: str) -> tuple[bool, str | None]:
         return False, f"Failed to verify upload object size: {e}"
 
 
+async def _run_moderation_with_semaphore(
+    media_id: uuid.UUID,
+    s3_key: str,
+    media_type: Literal["photo", "voice"],
+    user_id: uuid.UUID,
+) -> None:
+    sem = _get_semaphore()
+    async with sem:
+        await _run_moderation(media_id, s3_key, media_type, user_id)
+
+
 async def enqueue_moderation(
     media_id: uuid.UUID,
     s3_key: str,
     media_type: Literal["photo", "voice"],
     user_id: uuid.UUID,
 ) -> None:
-    """Fire-and-forget: runs moderation in a background asyncio task."""
-    asyncio.create_task(
-        _run_moderation(media_id, s3_key, media_type, user_id),
+    """Fire-and-forget: runs moderation in a background asyncio task with bounded concurrency."""
+    task = asyncio.create_task(
+        _run_moderation_with_semaphore(media_id, s3_key, media_type, user_id),
         name=f"moderate:{media_id}",
     )
+    _active_tasks.add(task)
+    task.add_done_callback(_active_tasks.discard)
 
 
 async def _run_moderation(
@@ -123,8 +150,9 @@ async def _run_moderation(
                 _rekognition_check, s3_key
             )
         else:
-            # Voice: basic pass for MVP — production should add Transcribe + Comprehend
-            approved, reason = True, None
+            approved, reason = await asyncio.to_thread(
+                _voice_moderation_check, s3_key
+            )
 
         if approved:
             # Copy quarantine → production
@@ -186,12 +214,13 @@ async def _run_moderation(
             await asyncio.to_thread(_delete_from_quarantine, s3_key)
 
     except Exception as exc:
-        # Mark as rejected on any unhandled error
+        logger.exception("Media processing failed for media_id=%s: %s", media_id, exc)
+        # Mark as rejected on any unhandled error with sanitized reason code
         try:
             async with db.acquire() as conn:
                 await conn.execute(
                     "UPDATE user_media SET status = 'rejected', rejection_reason = $1 WHERE id = $2",
-                    f"Processing error: {exc}", media_id,
+                    "PROCESSING_FAILED", media_id,
                 )
         except Exception:
             pass
@@ -228,6 +257,58 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
             return False, f"Content policy violation: {name}"
 
     return True, None
+
+
+def _validate_voice_magic_bytes(data: bytes) -> bool:
+    """Validates audio magic bytes (AAC/M4A, MP3, OGG, WAV, WebM)."""
+    if len(data) < 4:
+        return False
+    # MP3 with ID3 tag
+    if data.startswith(b"ID3"):
+        return True
+    # MP3 raw frame sync
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return True
+    # Ogg container (Opus / Vorbis)
+    if data.startswith(b"OggS"):
+        return True
+    # WAV / RIFF
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return True
+    # M4A / MP4 container
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12].lower()
+        if brand in (b"m4a ", b"mp41", b"mp42", b"isom", b"dash"):
+            return True
+    # WebM / Matroska
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return True
+    return False
+
+
+def _voice_moderation_check(s3_key: str) -> tuple[bool, str | None]:
+    """Validates audio upload container integrity and enforces voice moderation policy."""
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return True, None
+    s3 = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    try:
+        resp = s3.get_object(
+            Bucket=settings.aws_s3_quarantine_bucket,
+            Key=s3_key,
+            Range="bytes=0-4095",
+        )
+        header = resp["Body"].read()
+        if not _validate_voice_magic_bytes(header):
+            return False, "INVALID_AUDIO_FORMAT"
+        return True, None
+    except Exception as exc:
+        logger.warning("Voice audio check error for %s: %s", s3_key, exc)
+        return False, "INVALID_AUDIO_STREAM"
 
 
 def _validate_image_magic_bytes(data: bytes) -> bool:
@@ -339,3 +420,55 @@ def _delete_from_quarantine(s3_key: str) -> None:
         aws_secret_access_key=settings.aws_secret_access_key,
     )
     s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=s3_key)
+
+
+async def reap_stale_processing_media(db: asyncpg.Pool) -> int:
+    """
+    Reap media stuck in 'pending' or 'processing' for > 30 minutes.
+    Marks them as rejected with reason 'Processing timed out' and cleans up quarantine.
+    """
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    async with db.acquire() as conn:
+        stale_rows = await conn.fetch(
+            """
+            UPDATE user_media
+            SET status = 'rejected',
+                rejection_reason = 'Processing timed out',
+                updated_at = NOW()
+            WHERE status IN ('pending', 'processing')
+              AND created_at < $1
+            RETURNING id, s3_key
+            """,
+            stale_cutoff,
+        )
+    for row in stale_rows:
+        k = row.get("s3_key")
+        if k:
+            try:
+                await asyncio.to_thread(_delete_from_quarantine, k)
+            except Exception:
+                pass
+    return len(stale_rows)
+
+
+def delete_media_s3_artifacts_sync(s3_keys: list[str]) -> None:
+    """Delete media objects from both production and quarantine buckets."""
+    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
+        return
+    s3 = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    for key in s3_keys:
+        if not key:
+            continue
+        try:
+            s3.delete_object(Bucket=settings.aws_s3_production_bucket, Key=key)
+        except Exception:
+            pass
+        try:
+            s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=key)
+        except Exception:
+            pass

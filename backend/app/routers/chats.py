@@ -394,6 +394,56 @@ async def send_message(
                 mod_type = mod_result.moderation_type
                 mod_disclaimer = mod_result.moderation_disclaimer
 
+            # Validate media attachment provenance and approval (NEW-003)
+            final_media_url = body.media_url
+            if body.message_type in ("photo", "voice"):
+                target_media_id = None
+                if body.media_id:
+                    try:
+                        target_media_id = uuid.UUID(str(body.media_id))
+                    except (ValueError, AttributeError):
+                        target_media_id = None
+
+                if target_media_id:
+                    media_row = await conn.fetchrow(
+                        """
+                        SELECT id, user_id, media_type, status, cdn_url
+                        FROM user_media
+                        WHERE id = $1 AND user_id = $2
+                        """,
+                        target_media_id, user_id,
+                    )
+                elif body.media_url:
+                    media_row = await conn.fetchrow(
+                        """
+                        SELECT id, user_id, media_type, status, cdn_url
+                        FROM user_media
+                        WHERE cdn_url = $1 AND user_id = $2
+                        """,
+                        body.media_url, user_id,
+                    )
+                else:
+                    media_row = None
+
+                if not media_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Media attachment not found or not owned by user.",
+                    )
+                if media_row["status"] != "approved":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Media is not approved (status: {media_row['status']}).",
+                    )
+                if media_row["media_type"] != body.message_type:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Media type mismatch.",
+                    )
+                final_media_url = media_row["cdn_url"] or body.media_url
+            elif body.message_type == "gif":
+                final_media_url = body.media_url
+
             row = await conn.fetchrow(
                 """
                 INSERT INTO messages (
@@ -408,7 +458,7 @@ async def send_message(
                 user_id,
                 body.message_type,
                 final_content,
-                body.media_url,
+                final_media_url,
                 is_moderated,
                 mod_type,
                 mod_disclaimer,

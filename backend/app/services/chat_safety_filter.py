@@ -226,17 +226,26 @@ _RE_EXPLICIT_SCHEME = re.compile(
 # Bare TLD domain pattern: captures word.tld, word.tld/path, sub.word.tld
 # Uses a broad TLD list covering all common + country-code TLDs
 _COMMON_TLDS = (
-    r"(?:com|org|net|edu|gov|io|co|app|dev|xyz|info|biz|me|us|uk|in|de|fr|jp|ru|"
+    r"(?:com|org|net|edu|gov|mil|io|co|app|dev|xyz|info|biz|me|us|uk|in|de|fr|jp|ru|"
     r"ca|au|br|cn|it|es|nl|pl|se|no|dk|fi|be|at|ch|sg|my|ph|id|bd|pk|lk|"
     r"live|online|site|web|store|shop|tech|ai|ml|gg|tv|cc|tk|top|club|fun|"
     r"link|click|page|blog|news|media|social|world|space|red|blue|black|"
-    r"click|download|free|win|prize|gift|claim|now|deal|offer|crypto|nft|"
-    r"chat|date|meet|love|friend|match)"
+    r"download|free|win|prize|gift|claim|now|deal|offer|crypto|nft|"
+    r"chat|date|meet|love|friend|match|icu|vip|cam|pub|pro|bar|guru|"
+    r"stream|bid|loan|work|party|trade|science|review|cricket|fit|kim|"
+    r"wang|casa|asia|cloud|digital|solutions|agency|today|email|company|"
+    r"rest|beer|surf|wiki|tokyo|london|nyc|berlin|website|press|host|vip)"
 )
 # Bare domain: word.tld or sub.word.tld/path — no scheme required
 # Requires an explicit dot before the TLD to avoid matching plain words.
 _RE_BARE_DOMAIN = re.compile(
     r"\b[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)*\." + _COMMON_TLDS + r"(?:\/[^\s<>\[\]()]*)?(?=\s|$|[,;!?\'\"])",
+    re.IGNORECASE,
+)
+
+# Generic path domain: ANY domain with any 2-to-24 char alpha TLD containing path, port, or query
+_RE_GENERIC_PATH_DOMAIN = re.compile(
+    r"\b[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)*\.[a-z]{2,24}(?::\d{1,5}|\/[^\s<>\[\]()]*|\?[^\s<>\[\]()]*)(?=\s|$|[,;!?\'\"])",
     re.IGNORECASE,
 )
 
@@ -271,6 +280,7 @@ def _detect_url_spans(text: str) -> list[tuple[int, int]]:
         _RE_EXPLICIT_SCHEME,
         _RE_WWW,
         _RE_BARE_DOMAIN,
+        _RE_GENERIC_PATH_DOMAIN,
         _RE_IP_URL,
         _RE_SHORTENER,
     ]:

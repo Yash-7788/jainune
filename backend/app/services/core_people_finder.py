@@ -64,6 +64,39 @@ def _format_distance(distance_km: float, user_a_id: str, user_b_id: str) -> str:
 # Redis feed cache helpers
 # ---------------------------------------------------------------------------
 
+_POP_FEED_SCRIPT = """
+local raw = redis.call('get', KEYS[1])
+if not raw then return nil end
+local ok, candidates = pcall(cjson.decode, raw)
+if not ok or type(candidates) ~= 'table' then
+    redis.call('del', KEYS[1])
+    return nil
+end
+local limit = tonumber(ARGV[1])
+if #candidates < limit then
+    redis.call('del', KEYS[1])
+    return nil
+end
+local batch = {}
+local remaining = {}
+for i = 1, #candidates do
+    if i <= limit then
+        table.insert(batch, candidates[i])
+    else
+        table.insert(remaining, candidates[i])
+    end
+end
+if #remaining > 0 then
+    local ttl = redis.call('ttl', KEYS[1])
+    if ttl < 0 then ttl = 3600 end
+    redis.call('set', KEYS[1], cjson.encode(remaining), 'EX', ttl)
+else
+    redis.call('del', KEYS[1])
+end
+return cjson.encode(batch)
+"""
+
+
 async def _get_cached_feed(
     user_id: uuid.UUID,
     redis: aioredis.Redis,
@@ -116,27 +149,20 @@ async def fetch_recommended_feed(
             "from_cache": bool,
         }
     """
-    # L4: Check session cache first (avoids DB hit on rapid swipes)
+    # L4: Check session cache first atomically via Lua (prevents race duplicates on concurrent prefetch)
     if not force_refresh:
-        cached = await _get_cached_feed(user_id, redis)
-        if cached:
-            if len(cached) >= limit:
-                batch = cached[:limit]
-                remaining = cached[limit:]
-                # Slide the cache forward
-                if remaining:
-                    await _cache_feed(user_id, remaining, redis)
-                else:
-                    await redis.delete(f"feed:cache:{user_id}")
+        try:
+            cached_json = await redis.eval(_POP_FEED_SCRIPT, 1, f"feed:cache:{user_id}", limit)
+            if cached_json:
+                batch = json.loads(cached_json)
                 return {
                     "candidates": batch,
                     "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
-                    "exhausted": len(remaining) == 0,
+                    "exhausted": False,
                     "from_cache": True,
                 }
-            else:
-                # Partial cache drained below limit: clear stale cache and trigger full pipeline (BUG-012)
-                await redis.delete(f"feed:cache:{user_id}")
+        except Exception as exc:
+            log.warning("Atomic feed cache pop failed: %s", exc)
 
     # L0 + L1 + L2 + L3: Full pipeline
     candidates = await _run_pipeline(user_id, user_data, db, limit * 2)
@@ -167,28 +193,71 @@ async def fetch_recommended_feed(
 
 
 async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> None:
-    """Asynchronously flush buffered user impression counts from Redis to PostgreSQL."""
+    """Asynchronously flush buffered user impression counts from Redis to PostgreSQL using atomic RENAME."""
+    lock_token = uuid.uuid4().hex
+    lock_key = "lock:flush_impressions"
     try:
-        acquired = await redis.set("lock:flush_impressions", "1", nx=True, ex=10)
+        acquired = await redis.set(lock_key, lock_token, nx=True, ex=15)
         if not acquired:
             return
-        counts = await redis.hgetall("buffer:user_impressions_48h")
-        if not counts:
+
+        temp_key = f"buffer:user_impressions_48h:flushing:{lock_token}"
+        rename_script = """
+            if redis.call('exists', KEYS[1]) == 1 then
+                redis.call('rename', KEYS[1], KEYS[2])
+                return 1
+            else
+                return 0
+            end
+        """
+        renamed = await redis.eval(rename_script, 2, "buffer:user_impressions_48h", temp_key)
+        if not renamed:
             return
-        updates = [
-            (int(v), uuid.UUID(k.decode() if isinstance(k, bytes) else k))
-            for k, v in counts.items()
-        ]
-        async with db.acquire() as conn:
-            await conn.executemany(
-                "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
-                updates,
-            )
-        # Delete only after DB commit succeeds (BUG-084)
-        if counts:
-            await redis.hdel("buffer:user_impressions_48h", *counts.keys())
-    except Exception:
-        pass
+
+        counts = await redis.hgetall(temp_key)
+        if not counts:
+            await redis.delete(temp_key)
+            return
+
+        updates = []
+        for k, v in counts.items():
+            if not v:
+                continue
+            k_str = k.decode() if isinstance(k, bytes) else str(k)
+            try:
+                updates.append((int(v), uuid.UUID(k_str)))
+            except Exception:
+                continue
+
+        if updates:
+            try:
+                async with db.acquire() as conn:
+                    await conn.executemany(
+                        "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
+                        updates,
+                    )
+                await redis.delete(temp_key)
+            except Exception as db_err:
+                log.error("Failed to flush impressions to DB, restoring buffer: %s", db_err)
+                pipe = redis.pipeline()
+                for k, v in counts.items():
+                    pipe.hincrby("buffer:user_impressions_48h", k, int(v))
+                await pipe.execute()
+                await redis.delete(temp_key)
+    except Exception as exc:
+        log.debug("Impression flush non-blocking failure: %s", exc)
+    finally:
+        try:
+            release_script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("del", KEYS[1])
+                else
+                    return 0
+                end
+            """
+            await redis.eval(release_script, 1, lock_key, lock_token)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

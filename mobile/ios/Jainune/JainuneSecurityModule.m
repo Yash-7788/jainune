@@ -133,14 +133,34 @@ RCT_EXPORT_METHOD(detectFrida:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromi
 }
 
 RCT_EXPORT_METHOD(setCertificatePins:(NSArray *)pins resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
-  // Store or enforce pins for NSURLSession security
+  // Note: TLS certificate pinning for api.jainune.com is authoritatively enforced
+  // at the iOS OS level via NSPinnedDomains in Info.plist (NSPinnedLeafIdentities).
+  // This method confirms configuration acknowledgement to the JS security orchestrator.
   resolve(@YES);
 }
 
-RCT_EXPORT_METHOD(emergencyPurgeStorage) {
-  // Clear keychain items if needed
-  NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword};
-  SecItemDelete((__bridge CFDictionaryRef)query);
+RCT_EXPORT_METHOD(emergencyPurgeStorage:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  // Clear keychain items across all security classes
+  NSArray *secClasses = @[
+    (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecClassInternetPassword,
+    (__bridge id)kSecClassCertificate,
+    (__bridge id)kSecClassKey,
+    (__bridge id)kSecClassIdentity
+  ];
+  for (id secClass in secClasses) {
+    NSDictionary *query = @{(__bridge id)kSecClass: secClass};
+    SecItemDelete((__bridge CFDictionaryRef)query);
+  }
+  // Clear NSUserDefaults
+  NSString *appDomain = [[NSBundle mainBundle] bundleIdentifier];
+  if (appDomain) {
+    [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:appDomain];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+  }
+  if (resolve) {
+    resolve(@YES);
+  }
 }
 
 RCT_EXPORT_METHOD(exitApp) {

@@ -30,5 +30,12 @@
 -keep class com.facebook.hermes.** { *; }
 -keep interface com.facebook.react.bridge.** { *; }
 
-# Protect Native Security Bridge
--keep class com.jainune.app.** { *; }
+# Protect Native Security Bridge classes and methods needing React Native reflection (SECOND-007)
+-keep class com.jainune.app.MainActivity { *; }
+-keep class com.jainune.app.MainApplication { *; }
+-keep class com.jainune.app.JainuneSecurityPackage { *; }
+-keepclassmembers class com.jainune.app.JainuneSecurityModule {
+    @com.facebook.react.bridge.ReactMethod *;
+    public <init>(...);
+    public java.lang.String getName();
+}

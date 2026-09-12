@@ -73,6 +73,16 @@ def reap_ephemeral_media() -> None:
             if not s3:
                 log.info("reap_ephemeral_media: AWS S3 client unavailable/mock, skipping S3 purge")
                 return
+            # Mark stranded processing media as rejected after 30-minute timeout (NEW-020)
+            await conn.execute(
+                """
+                UPDATE user_media
+                SET status = 'rejected', rejection_reason = 'PROCESSING_TIMEOUT'
+                WHERE status = 'processing'
+                  AND created_at < NOW() - INTERVAL '30 minutes'
+                """
+            )
+
             rows = await conn.fetch(
                 """
                 SELECT id, s3_key
@@ -86,22 +96,23 @@ def reap_ephemeral_media() -> None:
             if not rows:
                 return
 
-            purged = 0
-            for row in rows:
+            objects_to_delete = [{"Key": r["s3_key"]} for r in rows if r.get("s3_key")]
+            if objects_to_delete:
                 try:
-                    s3.delete_object(
+                    await asyncio.to_thread(
+                        s3.delete_objects,
                         Bucket=settings.aws_s3_quarantine_bucket,
-                        Key=row["s3_key"],
+                        Delete={"Objects": objects_to_delete, "Quiet": True},
                     )
-                    await conn.execute(
-                        "UPDATE user_media SET s3_purged = TRUE WHERE id = $1",
-                        row["id"],
-                    )
-                    purged += 1
                 except (BotoCoreError, ClientError) as exc:
-                    log.warning("S3 delete failed for media %s: %s", row["id"], exc)
+                    log.warning("Batch S3 delete failed in reap_ephemeral_media: %s", exc)
 
-            log.info("reap_ephemeral_media: purged %d/%d", purged, len(rows))
+            row_ids = [r["id"] for r in rows]
+            await conn.execute(
+                "UPDATE user_media SET s3_purged = TRUE WHERE id = ANY($1::uuid[])",
+                row_ids,
+            )
+            log.info("reap_ephemeral_media: purged %d media rows", len(rows))
         finally:
             await conn.close()
 
@@ -167,6 +178,9 @@ def reap_stale_matches() -> None:
         try:
             # --- Step 1: expire silent matches ---
             tx = conn.transaction() if hasattr(conn, "transaction") and callable(conn.transaction) else None
+            if asyncio.iscoroutine(tx):
+                tx.close()
+                tx = None
             if tx is not None and hasattr(tx, "__aenter__") and not asyncio.iscoroutine(tx):
                 async with tx:
                     expired_ids = await conn.fetch(

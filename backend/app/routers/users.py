@@ -613,7 +613,10 @@ async def report_user(
     except HTTPException:
         raise
     except Exception:
-        pass  # Fallback if Redis unavailable
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limiting service unavailable. Please try again later.",
+        )
 
     try:
         result = await file_report(

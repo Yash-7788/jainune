@@ -198,16 +198,43 @@ async function checkAdbAndDeveloperOptions(): Promise<boolean> {
 
 /**
  * Compares current APK signing certificate with release keystore signature.
+ * Fails closed in production if release signature configuration is absent or mismatched (SECOND-006).
  */
 async function verifyApkSignatureIntegrity(): Promise<boolean> {
-  if (EXPECTED_RELEASE_CERT_SHA256 && NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
-    const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
-    if (
-      currentFingerprint &&
-      currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()
-    ) {
-      return true; // Tampered / resigned
+  if (Platform.OS !== "android") {
+    return false;
+  }
+
+  if (!__DEV__) {
+    if (!EXPECTED_RELEASE_CERT_SHA256) {
+      // Release integrity value must not silently disable itself in production
+      return true;
     }
+    if (!NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
+      return true;
+    }
+    try {
+      const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
+      if (!currentFingerprint || currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()) {
+        return true; // Tampered / resigned
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  // Development / Expo Go
+  if (EXPECTED_RELEASE_CERT_SHA256 && NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
+    try {
+      const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
+      if (
+        currentFingerprint &&
+        currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()
+      ) {
+        return true;
+      }
+    } catch {}
   }
   return false;
 }

@@ -181,6 +181,7 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
     def test_05_ephemeral_reaper_stale_matches_uses_coalesce_and_closes_chats(self):
         """reap_stale_matches must COALESCE last_message_at with created_at and set chats.is_unmatched = TRUE."""
         mock_conn = AsyncMock()
+        mock_conn.transaction = None
         expired_match_id = uuid.uuid4()
         mock_conn.fetch.side_effect = [
             [{"id": expired_match_id}],  # Step 1: expired_ids

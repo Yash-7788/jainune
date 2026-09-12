@@ -56,53 +56,57 @@ async def _update_behavior_vector_ema(
     actor_id: uuid.UUID,
     target_id: uuid.UUID,
     action: str,
-    conn_or_db,
+    conn_or_db: Any,
 ) -> None:
     """
-    Exponential Moving Average update of actor's revealed_preference_vector.
+    Exponential Moving Average update of actor's revealed_preference_vector
+    and Thompson Sampling bandit counter increments.
 
     On LIKE  → nudge vector 10% toward target's vector  (α = 0.10)
     On PASS  → nudge vector  5% away from target's vector (repulsion)
 
     Uses pgvector arithmetic entirely in SQL for atomicity.
     """
-    if action == "pass":
-        # Mild repulsion: move 5% away from target
-        sql = """
-        UPDATE user_behavior_vectors uv
-        SET revealed_preference_vector = (
-            uv.revealed_preference_vector + (
-                uv.revealed_preference_vector - t.revealed_preference_vector
-            ) * 0.05
+    init_sql = """
+    INSERT INTO user_behavior_vectors (user_id, revealed_preference_vector)
+    VALUES ($1, array_fill(0.0, ARRAY[128])::vector)
+    ON CONFLICT (user_id) DO NOTHING
+    """
+    vec_sql = """
+    UPDATE user_behavior_vectors uv
+    SET revealed_preference_vector = (
+        uv.revealed_preference_vector + (
+            CASE WHEN $3 = 'pass'
+                 THEN (uv.revealed_preference_vector - t.revealed_preference_vector) * 0.05
+                 ELSE (t.revealed_preference_vector - uv.revealed_preference_vector) * 0.10
+            END
         )
-        FROM user_behavior_vectors t
-        WHERE uv.user_id = $1
-          AND t.user_id  = $2
-          AND t.revealed_preference_vector IS NOT NULL
-          AND uv.revealed_preference_vector IS NOT NULL
-        """
-    else:
-        # Attraction: move 10% toward target
-        sql = """
-        UPDATE user_behavior_vectors uv
-        SET revealed_preference_vector = (
-            uv.revealed_preference_vector + (
-                t.revealed_preference_vector - uv.revealed_preference_vector
-            ) * 0.10
-        )
-        FROM user_behavior_vectors t
-        WHERE uv.user_id = $1
-          AND t.user_id  = $2
-          AND t.revealed_preference_vector IS NOT NULL
-          AND uv.revealed_preference_vector IS NOT NULL
-        """
-    if hasattr(conn_or_db, "transaction"):
-        await conn_or_db.execute(sql, actor_id, target_id)
+    )
+    FROM user_behavior_vectors t
+    WHERE uv.user_id = $1
+      AND t.user_id  = $2
+      AND t.revealed_preference_vector IS NOT NULL
+      AND uv.revealed_preference_vector IS NOT NULL
+    """
+
+    async def _execute_all(c):
+        await c.execute(init_sql, actor_id)
+        await c.execute(init_sql, target_id)
+        if action == "pass":
+            await c.execute("UPDATE user_behavior_vectors SET total_passes_sent = total_passes_sent + 1 WHERE user_id = $1", actor_id)
+            await c.execute("UPDATE user_behavior_vectors SET total_passes_received = total_passes_received + 1 WHERE user_id = $1", target_id)
+        else:
+            await c.execute("UPDATE user_behavior_vectors SET total_likes_sent = total_likes_sent + 1 WHERE user_id = $1", actor_id)
+            await c.execute("UPDATE user_behavior_vectors SET total_likes_received = total_likes_received + 1 WHERE user_id = $1", target_id)
+        await c.execute(vec_sql, actor_id, target_id, action)
+
+    if hasattr(conn_or_db, "fetchrow") or hasattr(conn_or_db, "fetch"):
+        await _execute_all(conn_or_db)
     elif hasattr(conn_or_db, "acquire"):
         async with conn_or_db.acquire() as conn:
-            await conn.execute(sql, actor_id, target_id)
+            await _execute_all(conn)
     else:
-        await conn_or_db.execute(sql, actor_id, target_id)
+        await _execute_all(conn_or_db)
 
 
 # ---------------------------------------------------------------------------
@@ -160,178 +164,191 @@ async def record_interaction_action(
             detail="Cannot interact with yourself.",
         )
 
-    async with db.acquire() as conn:
-        async with conn.transaction():
-            # Lock user row to serialize concurrent interactions and credit deductions
-            await conn.execute("SELECT id FROM users WHERE id = $1 FOR UPDATE", actor_id)
+    like_quota_deducted = False
+    like_key = None
 
-            # ── Check user blocks ────────────────────────────────────────────────
-            blocked = await conn.fetchval(
-                """
-                SELECT 1 FROM user_blocks
-                WHERE (blocker_id = $1 AND blocked_id = $2)
-                   OR (blocker_id = $2 AND blocked_id = $1)
-                LIMIT 1
-                """,
-                actor_id, target_id,
-            )
-            if blocked:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot interact with a blocked user.",
+    try:
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                # Lock user row to serialize concurrent interactions and credit deductions
+                await conn.execute("SELECT id FROM users WHERE id = $1 FOR UPDATE", actor_id)
+
+                # ── Check user blocks ────────────────────────────────────────────────
+                blocked = await conn.fetchval(
+                    """
+                    SELECT 1 FROM user_blocks
+                    WHERE (blocker_id = $1 AND blocked_id = $2)
+                       OR (blocker_id = $2 AND blocked_id = $1)
+                    LIMIT 1
+                    """,
+                    actor_id, target_id,
                 )
+                if blocked:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Cannot interact with a blocked user.",
+                    )
 
-            # ── Verify target profile exists and is active ───────────────────────
-            target_row = await conn.fetchrow(
-                "SELECT id, account_status, deleted_at FROM users WHERE id = $1",
-                target_id,
-            )
-            if target_row is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Target profile not found or no longer available.",
+                # ── Verify target profile exists and is active ───────────────────────
+                target_row = await conn.fetchrow(
+                    "SELECT id, account_status, deleted_at FROM users WHERE id = $1",
+                    target_id,
                 )
-            t_data = dict(target_row)
-            if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Target profile not found or no longer available.",
+                if target_row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Target profile not found or no longer available.",
+                    )
+                t_data = dict(target_row)
+                if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Target profile not found or no longer available.",
+                    )
+
+                # ── Idempotency check ────────────────────────────────────────────────
+                existing = await conn.fetchrow(
+                    "SELECT id FROM interactions WHERE actor_id = $1 AND target_id = $2",
+                    actor_id, target_id,
                 )
+                if existing:
+                    return InteractionActionResponse(
+                        success=True,
+                        message="Interaction already recorded.",
+                    )
 
-            # ── Idempotency check ────────────────────────────────────────────────
-            existing = await conn.fetchrow(
-                "SELECT id FROM interactions WHERE actor_id = $1 AND target_id = $2",
-                actor_id, target_id,
-            )
-            if existing:
-                return InteractionActionResponse(
-                    success=True,
-                    message="Interaction already recorded.",
-                )
+                # ── Daily like limit enforcement & super-connect credit deduction ────
+                tier = await payment_service.get_effective_user_tier(actor_id, conn)
 
-            # ── Daily like limit enforcement & super-connect credit deduction ────
-            tier = await payment_service.get_effective_user_tier(actor_id, conn)
+                if body.action == "like":
+                    ist_now = get_ist_now()
+                    today_str = get_ist_today_str()
+                    like_key = f"daily_likes:{actor_id}:{today_str}"
 
-            if body.action == "like":
-                ist_now = get_ist_now()
-                today_str = get_ist_today_str()
-                like_key = f"daily_likes:{actor_id}:{today_str}"
-
-                # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
-                limit = 10 if tier == "free" else (50 if tier == "gold" else None)
-                if limit is not None:
-                    new_count = await redis.incr(like_key)
-                    tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
-                    await redis.expire(like_key, max(ttl_seconds, 60))
-                    if new_count > limit:
-                        await redis.decr(like_key)
+                    # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
+                    limit = 10 if tier == "free" else (50 if tier == "gold" else None)
+                    if limit is not None:
+                        new_count = await redis.incr(like_key)
+                        like_quota_deducted = True
+                        tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
+                        await redis.expire(like_key, max(ttl_seconds, 60))
+                        if new_count > limit:
+                            await redis.decr(like_key)
+                            like_quota_deducted = False
+                            raise HTTPException(
+                                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                                detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
+                            )
+                elif body.action == "super_connect":
+                    # Concurrency lock to prevent double-spending super connect credits
+                    await conn.execute(
+                        "SELECT super_connect_credits FROM users WHERE id = $1 FOR UPDATE",
+                        actor_id,
+                    )
+                    deducted = await conn.fetchval(
+                        """
+                        UPDATE users
+                        SET super_connect_credits = super_connect_credits - 1
+                        WHERE id = $1 AND super_connect_credits > 0
+                        RETURNING super_connect_credits
+                        """,
+                        actor_id,
+                    )
+                    if deducted is None:
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                            detail=f"Daily like limit of {limit} reached. Upgrade to Jainune+ for unlimited intentional likes.",
+                            detail="No Super Connect credits remaining. Upgrade to Jainune+.",
                         )
-            elif body.action == "super_connect":
-                # Concurrency lock to prevent double-spending super connect credits
+
+                # ── Insert interaction row ───────────────────────────────────────────
+                interaction_type_val = "pass" if body.action == "pass" else "like"
                 await conn.execute(
-                    "SELECT super_connect_credits FROM users WHERE id = $1 FOR UPDATE",
-                    actor_id,
-                )
-                deducted = await conn.fetchval(
                     """
-                    UPDATE users
-                    SET super_connect_credits = super_connect_credits - 1
-                    WHERE id = $1 AND super_connect_credits > 0
-                    RETURNING super_connect_credits
+                    INSERT INTO interactions (actor_id, target_id, action_type, interaction_type, reacted_prompt_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (actor_id, target_id) DO UPDATE
+                       SET action_type = EXCLUDED.action_type,
+                           interaction_type = EXCLUDED.interaction_type,
+                           reacted_prompt_id = EXCLUDED.reacted_prompt_id
                     """,
                     actor_id,
-                )
-                if deducted is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                        detail="No Super Connect credits remaining. Upgrade to Jainune+.",
-                    )
-
-            # ── Insert interaction row ───────────────────────────────────────────
-            interaction_type_val = "pass" if body.action == "pass" else "like"
-            await conn.execute(
-                """
-                INSERT INTO interactions (actor_id, target_id, action_type, interaction_type, reacted_prompt_id)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (actor_id, target_id) DO UPDATE
-                   SET action_type = EXCLUDED.action_type,
-                       interaction_type = EXCLUDED.interaction_type,
-                       reacted_prompt_id = EXCLUDED.reacted_prompt_id
-                """,
-                actor_id,
-                target_id,
-                body.action,
-                interaction_type_val,
-                body.prompt_id,
-            )
-
-            # ── Check for mutual match ────────────────────────────────────────────
-            match_created = False
-            chat_id = None
-            match_id_to_notify = None
-
-            if body.action in ("like", "super_connect"):
-                mutual = await conn.fetchrow(
-                    """
-                    SELECT id FROM interactions
-                    WHERE actor_id = $1 AND target_id = $2
-                      AND action_type IN ('like', 'super_connect')
-                    """,
-                    target_id, actor_id,
+                    target_id,
+                    body.action,
+                    interaction_type_val,
+                    body.prompt_id,
                 )
 
-                if mutual:
-                    # Canonical pair ordering (lower UUID first) to prevent duplicate matches
-                    pair = sorted([str(actor_id), str(target_id)])
-                    u1 = uuid.UUID(pair[0])
-                    u2 = uuid.UUID(pair[1])
+                # ── Check for mutual match ────────────────────────────────────────────
+                match_created = False
+                chat_id = None
+                match_id_to_notify = None
 
-                    # Upsert match row with dual column aliases for worker and router compatibility
-                    match_row = await conn.fetchrow(
+                if body.action in ("like", "super_connect"):
+                    mutual = await conn.fetchrow(
                         """
-                        INSERT INTO matches
-                            (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
-                        VALUES ($1, $2, $1, $2, $1, $2, $3, 'active')
-                        ON CONFLICT (user_a, user_b) DO UPDATE
-                            SET match_type = EXCLUDED.match_type
-                        RETURNING id
+                        SELECT id FROM interactions
+                        WHERE actor_id = $1 AND target_id = $2
+                          AND action_type IN ('like', 'super_connect')
                         """,
-                        u1, u2,
-                        "super_connect" if body.action == "super_connect" else "mutual_like",
+                        target_id, actor_id,
                     )
 
-                    # Create chat thread (idempotent on match_id)
-                    chat_row = await conn.fetchrow(
-                        """
-                        INSERT INTO chats
-                            (match_id, participant_1_id, participant_2_id, participant_a, participant_b)
-                        VALUES ($1, $2, $3, $2, $3)
-                        ON CONFLICT (match_id) DO UPDATE
-                           SET match_id = EXCLUDED.match_id
-                        RETURNING id
-                        """,
-                        match_row["id"], u1, u2,
-                    )
+                    if mutual:
+                        # Canonical pair ordering (lower UUID first) to prevent duplicate matches
+                        pair = sorted([str(actor_id), str(target_id)])
+                        u1 = uuid.UUID(pair[0])
+                        u2 = uuid.UUID(pair[1])
 
-                    match_created = True
-                    chat_id = chat_row["id"]
-                    match_id_to_notify = match_row["id"]
+                        # Upsert match row with dual column aliases for worker and router compatibility
+                        match_row = await conn.fetchrow(
+                            """
+                            INSERT INTO matches
+                                (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
+                            VALUES ($1, $2, $1, $2, $1, $2, $3, 'active')
+                            ON CONFLICT (user_a, user_b) DO UPDATE
+                                SET match_type = EXCLUDED.match_type
+                            RETURNING id
+                            """,
+                            u1, u2,
+                            "super_connect" if body.action == "super_connect" else "mutual_like",
+                        )
 
-                    # Update match with chat_id
-                    await conn.execute(
-                        "UPDATE matches SET chat_id = $1 WHERE id = $2",
-                        chat_id, match_row["id"],
-                    )
+                        # Create chat thread (idempotent on match_id)
+                        chat_row = await conn.fetchrow(
+                            """
+                            INSERT INTO chats
+                                (match_id, participant_1_id, participant_2_id, participant_a, participant_b)
+                            VALUES ($1, $2, $3, $2, $3)
+                            ON CONFLICT (match_id) DO UPDATE
+                               SET match_id = EXCLUDED.match_id
+                            RETURNING id
+                            """,
+                            match_row["id"], u1, u2,
+                        )
 
-            # EMA vector update (inside same connection/transaction)
+                        match_created = True
+                        chat_id = chat_row["id"]
+                        match_id_to_notify = match_row["id"]
+
+                        # Update match with chat_id
+                        await conn.execute(
+                            "UPDATE matches SET chat_id = $1 WHERE id = $2",
+                            chat_id, match_row["id"],
+                        )
+
+                # EMA vector update (inside same connection/transaction)
+                try:
+                    await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
+                except Exception as exc:
+                    log.warning("Behavior vector EMA update failed for actor=%s target=%s: %s", actor_id, target_id, exc)
+    except Exception:
+        if like_quota_deducted and like_key:
             try:
-                await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
+                await redis.decr(like_key)
             except Exception:
                 pass
+        raise
 
     # ── Async side effects (outside DB transaction) ──────────────────────────
 

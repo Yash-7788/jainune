@@ -295,11 +295,17 @@ async def get_media_status(
     if not row:
         raise HTTPException(status_code=404, detail="Media not found.")
 
+    raw_reason = row["rejection_reason"]
+    # Sanitize rejection reason to prevent leaking stack traces or internal exception details (NEW-030)
+    safe_reason = raw_reason
+    if raw_reason and ("Traceback" in raw_reason or raw_reason.startswith("Processing error:") or "{" in raw_reason):
+        safe_reason = "PROCESSING_FAILED"
+
     return MediaStatusResponse(
         media_id=row["id"],
         status=row["status"],
         cdn_url=row["cdn_url"],
-        rejection_reason=row["rejection_reason"],
+        rejection_reason=safe_reason,
     )
 
 

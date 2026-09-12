@@ -112,13 +112,14 @@ export async function sendMessage(matchId: string, content: string): Promise<Mes
 export async function sendMediaMessage(
   matchId: string,
   type: "photo" | "voice",
-  mediaUrl: string
+  mediaUrl: string,
+  mediaId?: string
 ): Promise<Message> {
   const res = await apiPost<any>(`/chats/${matchId}/messages`, {
     message_type: type,
     type,
     media_url: mediaUrl,
-    media_id: mediaUrl,
+    media_id: mediaId || mediaUrl,
   });
   if (!res.success) throw { _apiError: res.error };
   const m = res.data;

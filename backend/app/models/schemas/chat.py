@@ -20,11 +20,23 @@ class ChatThread(BaseModel):
     expires_at: Optional[datetime] = None
 
 
+CANONICAL_MESSAGE_TYPES = frozenset({
+    "text",
+    "photo",
+    "voice",
+    "gif",
+    "dilemma_invite",
+    "bounty",
+    "date_card",
+    "exit",
+})
+
+
 class ChatMessage(BaseModel):
     id: uuid.UUID
     chat_id: uuid.UUID
     sender_id: uuid.UUID
-    message_type: str  # "text" | "image" | "voice" | "gif" | "dilemma_invite"
+    message_type: str  # "text" | "photo" | "voice" | "gif" | "dilemma_invite" | "bounty" | "date_card" | "exit"
     content: Optional[str] = None
     media_url: Optional[str] = None
     is_read: bool = False
@@ -45,15 +57,18 @@ class SendMessageRequest(BaseModel):
     def validate_content(self) -> None:
         if self.type and self.message_type == "text":
             self.message_type = self.type
+        if self.message_type == "image":
+            self.message_type = "photo"
         if self.media_id and not self.media_url:
             self.media_url = self.media_id
-        if self.message_type in ("photo", "image") and self.media_url:
-            self.message_type = "photo"
+
+        if self.message_type not in CANONICAL_MESSAGE_TYPES:
+            raise ValueError(f"Invalid message_type: {self.message_type}. Allowed: {sorted(CANONICAL_MESSAGE_TYPES)}")
 
         if self.message_type == "text" and not (self.content and self.content.strip()):
             raise ValueError("content required for text messages")
-        if self.message_type in ("image", "photo", "voice", "gif") and not self.media_url:
-            raise ValueError("media_url required for media messages")
+        if self.message_type in ("photo", "voice", "gif") and not (self.media_url or self.media_id):
+            raise ValueError("media_url or media_id required for media messages")
 
 
 class ChatListResponse(BaseModel):

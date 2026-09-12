@@ -43,11 +43,11 @@ import {
   sendMessage,
   sendMediaMessage,
   markRead,
-  getWsTicket,
   reportMessage,
   blockUser,
   Message,
 } from "../../api/chatApi";
+import { useWebSocket } from "../../hooks/useWebSocket";
 import { getSubscriptionStatus } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { MAX_MESSAGE_LENGTH, validateUuid } from "../../security/inputValidation";
@@ -96,14 +96,8 @@ export default function ChatScreen() {
   // Moderation
   const [pendingContent, setPendingContent] = useState<string | null>(null);
   const [detectedType, setDetectedType] = useState<DetectedType>(null);
-  const [isSubscriber, setIsSubscriber] = useState(false);
-
-  // WebSocket connection & resilience
-  const ws = useRef<WebSocket | null>(null);
-  const pingInterval = useRef<NodeJS.Timeout | null>(null);
-  const reconnectAttempts = useRef(0);
-  const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [chatBlocked, setChatBlocked] = useState(false);
+  const [userTier, setUserTier] = useState<string>("free");
   const lastMarkReadTime = useRef(0);
 
   // Cursor pagination
@@ -188,208 +182,105 @@ export default function ChatScreen() {
     }
   }, [matchId]);
 
-  // WebSocket connection with clean teardown, exponential backoff, and max 5 attempts
-  const connectWebSocket = useCallback(async () => {
-    if (!matchId || !validateUuid(matchId)) return;
-    if (reconnectTimer.current) {
-      clearTimeout(reconnectTimer.current);
-      reconnectTimer.current = null;
-    }
-
-    if (ws.current) {
-      ws.current.onopen = null;
-      ws.current.onmessage = null;
-      ws.current.onerror = null;
-      ws.current.onclose = null;
-      try {
-        ws.current.close();
-      } catch {}
-      ws.current = null;
-    }
-
-    try {
-      const ticket = await getWsTicket();
-      const url = `${WS_BASE}/${matchId}?ticket=${ticket}`;
-      const socket = new WebSocket(url);
-
-      socket.onopen = () => {
-        reconnectAttempts.current = 0;
-        setWsConnected(true);
-        if (pingInterval.current) clearInterval(pingInterval.current);
-        pingInterval.current = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            try {
-              socket.send(JSON.stringify({ type: "ping" }));
-            } catch {}
+  const handleWsEvent = useCallback(
+    (data: {
+      type: string;
+      message?: any;
+      payload?: any;
+      message_id?: string;
+      user_id?: string;
+    }) => {
+      switch (data.type) {
+        case "message":
+        case "new_message": {
+          const p = data.payload || data.message;
+          if (p) {
+            const incoming: Message = {
+              id: String(p.id),
+              match_id: String(p.chat_id || matchId),
+              sender_id: String(p.sender_id),
+              type:
+                p.message_type === "photo" || p.type === "photo"
+                  ? "photo"
+                  : p.message_type === "voice" || p.type === "voice"
+                  ? "voice"
+                  : "text",
+              content: p.content || null,
+              media_url: p.media_url || null,
+              is_read: Boolean(p.is_read),
+              created_at: p.created_at || new Date().toISOString(),
+            };
+            setMessages((prev) => {
+              const withoutTemp = prev.filter(
+                (m) =>
+                  !(
+                    m.id.startsWith("temp_") &&
+                    m.content === incoming.content &&
+                    m.sender_id === incoming.sender_id
+                  )
+              );
+              if (withoutTemp.some((m) => m.id === incoming.id)) return withoutTemp;
+              return [incoming, ...withoutTemp];
+            });
+            triggerMarkRead();
           }
-        }, 25000);
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleWsEvent(data);
-        } catch {}
-      };
-
-      const handleDisconnect = () => {
-        if (pingInterval.current) {
-          clearInterval(pingInterval.current);
-          pingInterval.current = null;
+          break;
         }
-        if (reconnectTimer.current) {
-          clearTimeout(reconnectTimer.current);
-          reconnectTimer.current = null;
+        case "read":
+        case "read_receipt":
+        case "message_read": {
+          const targetId = data.payload?.message_id || data.message_id;
+          if (targetId) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === targetId ? { ...m, is_read: true } : m))
+            );
+          } else {
+            setMessages((prev) => prev.map((m) => ({ ...m, is_read: true })));
+          }
+          break;
         }
-        setWsConnected(false);
-        if (reconnectAttempts.current < 5) {
-          const delay = Math.min(20000, 2000 * Math.pow(1.5, reconnectAttempts.current));
-          reconnectAttempts.current += 1;
-          reconnectTimer.current = setTimeout(connectWebSocket, delay);
+        case "user_online": {
+          const uid = data.payload?.user_id || data.user_id;
+          if (uid === otherUser.id) setIsOnline(true);
+          break;
         }
-      };
-
-      socket.onerror = () => {
-        setWsConnected(false);
-      };
-      socket.onclose = (e) => {
-        if (pingInterval.current) {
-          clearInterval(pingInterval.current);
-          pingInterval.current = null;
+        case "user_offline": {
+          const uid = data.payload?.user_id || data.user_id;
+          if (uid === otherUser.id) setIsOnline(false);
+          break;
         }
-        if (e.code !== 1000) {
-          handleDisconnect();
-        } else {
-          setWsConnected(false);
-        }
-      };
-
-      ws.current = socket;
-    } catch {
-      setWsConnected(false);
-      if (reconnectAttempts.current < 5) {
-        const delay = Math.min(20000, 2000 * Math.pow(1.5, reconnectAttempts.current));
-        reconnectAttempts.current += 1;
-        reconnectTimer.current = setTimeout(connectWebSocket, delay);
+        case "chat_closed":
+        case "momentum_expired":
+          setChatBlocked(true);
+          break;
+        default:
+          break;
       }
-    }
-  }, [matchId]);
+    },
+    [matchId, otherUser.id, triggerMarkRead]
+  );
+
+  const { isConnected: wsConnected, reconnect } = useWebSocket({
+    matchId,
+    onEvent: handleWsEvent,
+    enabled: Boolean(matchId && !chatBlocked),
+  });
 
   useEffect(() => {
     loadMessages();
     triggerMarkRead();
-    connectWebSocket();
 
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
-        if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-          reconnectAttempts.current = 0;
-          connectWebSocket();
-        }
         loadMessages();
         triggerMarkRead();
-      } else if (nextState === "background" || nextState === "inactive") {
-        if (pingInterval.current) {
-          clearInterval(pingInterval.current);
-          pingInterval.current = null;
-        }
-        if (reconnectTimer.current) {
-          clearTimeout(reconnectTimer.current);
-          reconnectTimer.current = null;
-        }
-        if (ws.current) {
-          ws.current.onopen = null;
-          ws.current.onmessage = null;
-          ws.current.onerror = null;
-          ws.current.onclose = null;
-          try {
-            ws.current.close(1000, "Background");
-          } catch {}
-          ws.current = null;
-        }
-        setWsConnected(false);
       }
     });
 
     return () => {
       appStateSub.remove();
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (pingInterval.current) {
-        clearInterval(pingInterval.current);
-        pingInterval.current = null;
-      }
-      if (ws.current) {
-        ws.current.onopen = null;
-        ws.current.onmessage = null;
-        ws.current.onerror = null;
-        ws.current.onclose = null;
-        try {
-          ws.current.close();
-        } catch {}
-        ws.current = null;
-      }
     };
-  }, []);
-
-  const handleWsEvent = (data: {
-    type: string;
-    message?: any;
-    payload?: any;
-    message_id?: string;
-    user_id?: string;
-  }) => {
-    switch (data.type) {
-      case "message":
-      case "new_message": {
-        const p = data.payload || data.message;
-        if (p) {
-          const incoming: Message = {
-            id: String(p.id),
-            match_id: String(p.chat_id || matchId),
-            sender_id: String(p.sender_id),
-            type: (p.message_type === "photo" || p.type === "photo") ? "photo" : (p.message_type === "voice" || p.type === "voice") ? "voice" : "text",
-            content: p.content || null,
-            media_url: p.media_url || null,
-            is_read: Boolean(p.is_read),
-            created_at: p.created_at || new Date().toISOString(),
-          };
-          setMessages((prev) => {
-            const withoutTemp = prev.filter(
-              (m) => !(m.id.startsWith("temp_") && m.content === incoming.content && m.sender_id === incoming.sender_id)
-            );
-            if (withoutTemp.some((m) => m.id === incoming.id)) return prev;
-            return [incoming, ...withoutTemp];
-          });
-          triggerMarkRead();
-        }
-        break;
-      }
-      case "read_receipt":
-      case "message_read": {
-        const targetId = data.payload?.message_id || data.message_id;
-        if (targetId) {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === targetId ? { ...m, is_read: true } : m
-            )
-          );
-        } else {
-          setMessages((prev) => prev.map((m) => ({ ...m, is_read: true })));
-        }
-        break;
-      }
-      case "user_online": {
-        const uid = data.payload?.user_id || data.user_id;
-        if (uid === otherUser.id) setIsOnline(true);
-        break;
-      }
-      case "user_offline": {
-        const uid = data.payload?.user_id || data.user_id;
-        if (uid === otherUser.id) setIsOnline(false);
-        break;
-      }
-    }
-  };
+  }, [loadMessages, triggerMarkRead]);
 
   const sendDraft = useCallback(async (content: string) => {
     const trimmed = content.trim();
@@ -599,8 +490,7 @@ export default function ChatScreen() {
         <TouchableOpacity
           style={styles.reconnectBanner}
           onPress={() => {
-            reconnectAttempts.current = 0;
-            connectWebSocket();
+            reconnect();
           }}
         >
           <Text style={styles.reconnectText}>

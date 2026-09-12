@@ -4,7 +4,7 @@
  * 4 bottom tabs: Feed, Likes, Chats, Profile
  */
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useCallback } from "react";
 import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -231,29 +231,44 @@ export const navigationRef = createNavigationContainerRef();
 
 export default function AppNavigator() {
   const authState = useAuthStore((s) => s.state);
+  const pendingIntentRef = useRef<{ name: string; params: any } | null>(null);
+
+  const routeOrQueue = useCallback(
+    (name: string, params: any) => {
+      if (authState === "authenticated" && navigationRef.isReady()) {
+        (navigationRef as any).navigate(name, params);
+        pendingIntentRef.current = null;
+      } else {
+        // Queue intent until authenticated navigation stack mounts (SECOND-014)
+        pendingIntentRef.current = { name, params };
+      }
+    },
+    [authState]
+  );
 
   useEffect(() => {
     if (authState === "authenticated") {
       registerForPushNotificationsAsync();
+      if (navigationRef.isReady() && pendingIntentRef.current) {
+        const { name, params } = pendingIntentRef.current;
+        pendingIntentRef.current = null;
+        (navigationRef as any).navigate(name, params);
+      }
     }
   }, [authState]);
 
   useEffect(() => {
     const cleanup = setupNotificationListeners((name, params) => {
-      if (navigationRef.isReady()) {
-        (navigationRef as any).navigate(name, params);
-      }
+      routeOrQueue(name, params);
     });
 
     // Check cold-boot notification response
     checkInitialNotificationResponse((name, params) => {
-      if (navigationRef.isReady()) {
-        (navigationRef as any).navigate(name, params);
-      }
+      routeOrQueue(name, params);
     });
 
     return cleanup;
-  }, []);
+  }, [routeOrQueue]);
 
   return (
     <NavigationContainer
@@ -261,8 +276,13 @@ export default function AppNavigator() {
       linking={linking}
       onReady={() => {
         checkInitialNotificationResponse((name, params) => {
-          (navigationRef as any).navigate(name, params);
+          routeOrQueue(name, params);
         });
+        if (authState === "authenticated" && pendingIntentRef.current) {
+          const { name, params } = pendingIntentRef.current;
+          pendingIntentRef.current = null;
+          (navigationRef as any).navigate(name, params);
+        }
       }}
     >
       {authState === "loading" && <LoadingScreen />}

@@ -207,14 +207,16 @@ export async function apiPost<T = unknown>(
   body?: unknown,
   idempotencyKey?: string
 ): Promise<ApiResponse<T>> {
-  return withRetry(async () => {
+  const send = async () => {
     const config: AxiosRequestConfig = {};
     if (idempotencyKey) {
       config.headers = { "X-Idempotency-Key": idempotencyKey };
     }
     const resp = await _client.post<ApiResponse<T>>(path, body, config);
     return normalizeResponse<T>(resp.data);
-  });
+  };
+  // Non-idempotent mutations are executed once unless protected by an idempotency key (NEW-031 / SECOND-033)
+  return idempotencyKey ? withRetry(send, 3) : send();
 }
 
 export async function apiGet<T = unknown>(

@@ -111,7 +111,9 @@ def on_worker_process_init(**kwargs: Any) -> None:
         log.info("Initialized Celery worker connection pool (min=%d, max=%d)", 
                  settings.database_pool_min_size, min(settings.database_pool_max_size, 10))
     except Exception as exc:
-        log.warning("Failed to initialize worker connection pool; falling back to per-task connections: %s", exc)
+        log.error("CRITICAL: Failed to initialize worker database connection pool: %s", exc)
+        if getattr(settings, "environment", "") in ("production", "staging"):
+            raise RuntimeError(f"Celery worker pool initialization failed: {exc}") from exc
 
 
 @worker_process_shutdown.connect

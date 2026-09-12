@@ -64,30 +64,43 @@ async def _run_async() -> None:
     try:
         log.info("run_daily_compatible: start")
 
-        # --- Fetch all eligible users ---
-        users = await conn.fetch(
-            """
-            SELECT
-                id, gender, show_me, looking_for,
-                dietary_strictness, community_sect, city,
-                ST_X(location::geometry) AS longitude,
-                ST_Y(location::geometry) AS latitude,
-                max_distance_km, open_to_relocation,
-                subscription_tier, trust_score,
-                paryushan_mode, eats_root_vegetables, eats_onion_garlic
-            FROM users
-            WHERE account_status = 'active'
-              AND onboarding_completed = TRUE
-              AND location IS NOT NULL
-            """
-        )
+        # --- Fetch all eligible users via keyset pagination (NEW-013) ---
+        user_list = []
+        last_id = uuid.UUID("00000000-0000-0000-0000-000000000000")
+        BATCH_FETCH_SIZE = 1000
+        while True:
+            batch = await conn.fetch(
+                """
+                SELECT
+                    id, gender, show_me, looking_for,
+                    dietary_strictness, community_sect, city,
+                    ST_X(location::geometry) AS longitude,
+                    ST_Y(location::geometry) AS latitude,
+                    max_distance_km, open_to_relocation,
+                    subscription_tier, trust_score,
+                    paryushan_mode, eats_root_vegetables, eats_onion_garlic
+                FROM users
+                WHERE account_status = 'active'
+                  AND onboarding_completed = TRUE
+                  AND location IS NOT NULL
+                  AND id > $1
+                ORDER BY id ASC
+                LIMIT $2
+                """,
+                last_id, BATCH_FETCH_SIZE,
+            )
+            if not batch:
+                break
+            user_list.extend([dict(u) for u in batch])
+            last_id = batch[-1]["id"]
+            if len(batch) < BATCH_FETCH_SIZE:
+                break
 
-        if not users:
+        if not user_list:
             log.info("run_daily_compatible: no eligible users")
             return
 
-        log.info("run_daily_compatible: processing %d users", len(users))
-        user_list = [dict(u) for u in users]
+        log.info("run_daily_compatible: processing %d users", len(user_list))
 
         # --- Per-user candidate ranking via CorePeopleFinder ---
         finder = CorePeopleFinder()
@@ -105,6 +118,14 @@ async def _run_async() -> None:
             uid = str(user["id"])
             req_gender = user.get("show_me", "everyone")
             scoped_pool = pool_by_gender.get(req_gender, user_list)
+
+            # Bound pool candidates to top 500 by coarse geo/city match or slice to avoid O(N^2) quadratic stall (NEW-014)
+            MAX_CANDIDATE_POOL = 500
+            if len(scoped_pool) > MAX_CANDIDATE_POOL:
+                u_city = str(user.get("city") or "").strip().lower()
+                same_city = [c for c in scoped_pool if str(c.get("city") or "").strip().lower() == u_city]
+                other_city = [c for c in scoped_pool if str(c.get("city") or "").strip().lower() != u_city]
+                scoped_pool = (same_city + other_city)[:MAX_CANDIDATE_POOL]
 
             try:
                 candidates = await finder.rank_candidates(

@@ -56,6 +56,7 @@ jobs:
           key: ${{ secrets.PROD_SSH_KEY }}
           script: |
             cd /opt/jainune
+            export BACKEND_IMAGE="ghcr.io/${{ env.REPO_LOWER }}/backend:${{ github.sha }}"
             docker compose -f backend/docker-compose.prod.yml pull
             if [ "${{ inputs.migrate_db }}" = "true" ]; then
               echo "Reconciling database migrations..."

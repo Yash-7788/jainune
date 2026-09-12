@@ -145,13 +145,6 @@ async def purge_user_account(
     )
     s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
 
-    # Delete from S3 asynchronously
-    if s3_keys:
-        try:
-            await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
-        except Exception as exc:
-            log.error(f"S3 deletion failed during account purge for {user_id}: {exc}")
-
     # 2. Database cleanup within transaction
     async with conn.transaction():
         # Try nullifying user_id on financial records to prevent orphan cascades if schema allows
@@ -215,7 +208,18 @@ async def purge_user_account(
         # Finally, delete user record itself
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
-    # 3. Redis memory cleanup
+    # 3. Post-commit external S3 object deletion (prevents desync on DB rollback) (SECOND-035)
+    if s3_keys:
+        try:
+            await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+        except Exception as exc:
+            log.error(f"S3 deletion failed during account purge for {user_id}: {exc}")
+            try:
+                await redis.sadd("s3:failed_deletions", *s3_keys)
+            except Exception:
+                pass
+
+    # 4. Redis memory cleanup
     try:
         keys_to_delete = [
             f"feed:cache:{user_id}",
@@ -329,16 +333,22 @@ async def soft_delete_user_account(
             user_id,
         )
 
-        # Purge personal media files from S3 and database for DPDP/GDPR compliance
-        try:
-            media_rows = await conn.fetch("SELECT s3_key FROM user_media WHERE user_id = $1", user_id)
-            s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
-            if s3_keys:
-                await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
-        except Exception as exc:
-            log.warning("S3 deletion during soft delete for %s: %s", user_id, exc)
+        # Collect personal media files from database for DPDP/GDPR compliance
+        media_rows = await conn.fetch("SELECT s3_key FROM user_media WHERE user_id = $1", user_id)
+        s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
         await conn.execute("DELETE FROM user_media WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
+
+    # Post-commit S3 deletion decoupled from DB transaction (SECOND-035)
+    if s3_keys:
+        try:
+            await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+        except Exception as exc:
+            log.warning("S3 deletion during soft delete for %s: %s", user_id, exc)
+            try:
+                await redis.sadd("s3:failed_deletions", *s3_keys)
+            except Exception:
+                pass
 
     # Invalidate feed & sessions in Redis
     try:

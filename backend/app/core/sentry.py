@@ -38,7 +38,7 @@ def sentry_before_send(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = N
     Hook executed before sending an event to Sentry.
     Enforces zero-PII leakage and groups errors cleanly.
     """
-    # 1. Scrub HTTP Request headers & body
+    # 1. Scrub HTTP Request headers, body, cookies & query_string
     if "request" in event:
         req = event["request"]
         if "headers" in req:
@@ -47,12 +47,29 @@ def sentry_before_send(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = N
             req["data"] = scrub_pii_from_dict(req["data"])
         if "cookies" in req:
             req["cookies"] = "[SCRUBBED]"
+        if "query_string" in req and isinstance(req["query_string"], str):
+            req["query_string"] = PHONE_REGEX.sub("[PHONE_SCRUBBED]", req["query_string"])
+            for sensitive_key in SENSITIVE_KEYS:
+                req["query_string"] = re.sub(
+                    rf"({sensitive_key}=)[^&]+",
+                    r"\1[SCRUBBED]",
+                    req["query_string"],
+                    flags=re.IGNORECASE,
+                )
 
     # 2. Scrub user context if attached
     if "user" in event:
         event["user"] = scrub_pii_from_dict(event["user"])
 
-    # 3. Deterministic Error Fingerprinting for Sentry issue grouping
+    # 3. Scrub extra, contexts, and breadcrumbs (SECOND-029)
+    if "extra" in event:
+        event["extra"] = scrub_pii_from_dict(event["extra"])
+    if "contexts" in event:
+        event["contexts"] = scrub_pii_from_dict(event["contexts"])
+    if "breadcrumbs" in event:
+        event["breadcrumbs"] = scrub_pii_from_dict(event["breadcrumbs"])
+
+    # 4. Deterministic Error Fingerprinting for Sentry issue grouping
     if hint and "exc_info" in hint:
         exc_type, exc_value, _ = hint["exc_info"]
         if exc_type is not None:
@@ -90,5 +107,6 @@ def init_sentry(dsn: str, environment: str, traces_sample_rate: float = 0.1):
             send_default_pii=False,
             before_send=sentry_before_send,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to initialize Sentry SDK: %s", exc)

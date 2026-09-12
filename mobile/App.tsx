@@ -29,6 +29,7 @@ import ErrorBoundary from "./src/components/core/ErrorBoundary";
 import { runSecurityBoot } from "./src/security/securityBoot";
 import { setSessionExpiredCallback } from "./src/api/client";
 import { useAuthStore } from "./src/store/authStore";
+import { syncPendingPayment } from "./src/services/billingService";
 
 SplashScreenExpo.preventAutoHideAsync();
 
@@ -74,6 +75,9 @@ export default function App() {
 
     // Restore existing session from SecureStore
     useAuthStore.getState().initSession();
+
+    // Reconcile interrupted pending payments across app boots
+    syncPendingPayment().catch(() => {});
   }, [boot.status]);
 
   const onLayoutRootView = useCallback(async () => {

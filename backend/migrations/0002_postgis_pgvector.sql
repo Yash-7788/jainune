@@ -258,7 +258,7 @@ CREATE TABLE IF NOT EXISTS messages (
     chat_id      UUID         NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     sender_id    UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     message_type VARCHAR(24)  NOT NULL DEFAULT 'text'
-                     CHECK (message_type IN ('text', 'voice', 'bounty', 'date_card', 'exit')),
+                     CHECK (message_type IN ('text', 'photo', 'voice', 'gif', 'dilemma_invite', 'bounty', 'date_card', 'exit')),
     content      TEXT,
     media_url    VARCHAR(512),
     -- Client-generated idempotency key to prevent double-sends

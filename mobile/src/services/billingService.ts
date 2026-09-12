@@ -38,6 +38,7 @@ export interface PurchaseResult {
 }
 
 const PENDING_PAYMENT_KEY = "jainune_pending_payment";
+const PENDING_PAYMENTS_MAP_KEY = "jainune_pending_payments_map";
 
 export interface PendingPayment {
   order_id: string;
@@ -49,28 +50,64 @@ export interface PendingPayment {
 
 export async function savePendingPayment(payment: PendingPayment): Promise<void> {
   try {
+    const all = await getAllPendingPayments();
+    all[payment.order_id] = payment;
+    await SecureStore.setItemAsync(PENDING_PAYMENTS_MAP_KEY, JSON.stringify(all));
     await SecureStore.setItemAsync(PENDING_PAYMENT_KEY, JSON.stringify(payment));
   } catch {}
 }
 
+export async function getAllPendingPayments(): Promise<Record<string, PendingPayment>> {
+  try {
+    const raw = await SecureStore.getItemAsync(PENDING_PAYMENTS_MAP_KEY);
+    if (raw) return JSON.parse(raw);
+    const legacy = await SecureStore.getItemAsync(PENDING_PAYMENT_KEY);
+    if (legacy) {
+      const parsed = JSON.parse(legacy);
+      if (parsed?.order_id) return { [parsed.order_id]: parsed };
+    }
+  } catch {}
+  return {};
+}
+
 export async function getPendingPayment(): Promise<PendingPayment | null> {
   try {
-    const raw = await SecureStore.getItemAsync(PENDING_PAYMENT_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const all = await getAllPendingPayments();
+    const values = Object.values(all);
+    return values.length > 0 ? values[values.length - 1] : null;
   } catch {
     return null;
   }
 }
 
-export async function clearPendingPayment(): Promise<void> {
+export async function clearPendingPayment(orderId?: string): Promise<void> {
   try {
-    await SecureStore.deleteItemAsync(PENDING_PAYMENT_KEY);
+    if (!orderId) {
+      await SecureStore.deleteItemAsync(PENDING_PAYMENT_KEY);
+      await SecureStore.deleteItemAsync(PENDING_PAYMENTS_MAP_KEY);
+    } else {
+      const all = await getAllPendingPayments();
+      delete all[orderId];
+      if (Object.keys(all).length === 0) {
+        await SecureStore.deleteItemAsync(PENDING_PAYMENTS_MAP_KEY);
+        await SecureStore.deleteItemAsync(PENDING_PAYMENT_KEY);
+      } else {
+        await SecureStore.setItemAsync(PENDING_PAYMENTS_MAP_KEY, JSON.stringify(all));
+      }
+    }
   } catch {}
 }
 
-export async function syncPendingPayment(): Promise<PurchaseResult> {
-  const pending = await getPendingPayment();
-  if (pending) {
+export async function syncPendingPayment(targetOrderId?: string): Promise<PurchaseResult> {
+  const all = await getAllPendingPayments();
+  const pendingList = Object.values(all);
+  if (pendingList.length === 0) {
+    return { success: false };
+  }
+
+  for (const pending of pendingList) {
+    if (targetOrderId && pending.order_id !== targetOrderId) continue;
+
     if (pending.payment_id && pending.signature) {
       try {
         const verifyRes = await verifySubscriptionPayment({
@@ -78,19 +115,21 @@ export async function syncPendingPayment(): Promise<PurchaseResult> {
           razorpay_payment_id: pending.payment_id,
           razorpay_signature: pending.signature,
         });
-        await clearPendingPayment();
-        return {
-          success: true,
-          activated: verifyRes.activated,
-          expires_at: verifyRes.expires_at,
-        };
+        await clearPendingPayment(pending.order_id);
+        if (verifyRes.activated) {
+          return {
+            success: true,
+            activated: true,
+            expires_at: verifyRes.expires_at,
+          };
+        }
       } catch {}
     }
 
     try {
       const syncRes = await syncSubscriptionOrder(pending.order_id);
       if (syncRes.activated) {
-        await clearPendingPayment();
+        await clearPendingPayment(pending.order_id);
         return {
           success: true,
           activated: true,
@@ -101,7 +140,7 @@ export async function syncPendingPayment(): Promise<PurchaseResult> {
 
     // Expire stale pending payment records older than 24 hours
     if (Date.now() - (pending.timestamp || 0) > 86400000) {
-      await clearPendingPayment();
+      await clearPendingPayment(pending.order_id);
     }
   }
 
@@ -134,19 +173,22 @@ export async function purchaseSubscription(
             message: "Purchase is pending approval (Ask to Buy / Parental controls). Access will be activated once confirmed.",
           };
         }
+        // NEW-037: Do not claim activated: true before server entitlement verification
         return {
           success: true,
-          activated: true,
-          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+          activated: false,
+          pending_verification: true,
+          message: "Store transaction received. Verifying membership entitlement with Jainune servers...",
         };
       }
       // StoreKit sandbox fallback allowed strictly in __DEV__ (Expo Go)
       if (__DEV__) {
-        await createSubscriptionOrder(plan.plan_id);
+        const devOrder = await createSubscriptionOrder(plan.plan_id);
+        const syncRes = await syncSubscriptionOrder(devOrder.order_id);
         return {
           success: true,
-          activated: true,
-          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+          activated: syncRes.activated,
+          expires_at: syncRes.expires_at,
         };
       }
       throw new Error("STOREKIT_MODULE_UNAVAILABLE");

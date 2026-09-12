@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
@@ -61,6 +62,7 @@ async def create_order(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
     redis: aioredis.Redis = Depends(get_redis_client),
+    x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
 ):
     """
     Server-side Razorpay order creation.
@@ -69,12 +71,27 @@ async def create_order(
     await sliding_window_rate_limit(
         f"ratelimit:subscriptions:order:{current_user['user_id']}", 10, 60, redis
     )
+    idemp_key = None
+    if x_idempotency_key:
+        idemp_key = f"idempotency:order:{current_user['user_id']}:{x_idempotency_key}"
+        try:
+            cached = await redis.get(idemp_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     try:
         result = await payment_service.create_order(
             user_id=current_user["user_id"],
             plan_id=body.plan_id.value,
             pool=pool,
         )
+        if idemp_key:
+            try:
+                await redis.set(idemp_key, json.dumps(result), ex=3600)
+            except Exception:
+                pass
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -148,11 +165,12 @@ async def verify_payment(
     # 3. Redis distributed lock to prevent concurrent double-processing
     from app.core.redis import get_redis
     lock_key = f"lock:payment:order:{body.razorpay_order_id}"
+    lock_token = uuid.uuid4().hex
     r = None
     lock_acquired = True
     try:
-        r = get_redis()
-        lock_acquired = await r.set(lock_key, "1", nx=True, ex=15)
+        r = redis
+        lock_acquired = await r.set(lock_key, lock_token, nx=True, ex=30)
     except Exception:
         pass  # DB transaction FOR UPDATE gate is fallback
 
@@ -190,7 +208,14 @@ async def verify_payment(
     finally:
         if r and lock_acquired:
             try:
-                await r.delete(lock_key)
+                release_script = """
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("del", KEYS[1])
+                    else
+                        return 0
+                    end
+                """
+                await r.eval(release_script, 1, lock_key, lock_token)
             except Exception:
                 pass
 
@@ -432,7 +457,8 @@ async def razorpay_webhook(
         try:
             r = get_redis()
             if payment_id:
-                if await r.get(f"payment:processed:{payment_id}"):
+                processed_val = await r.get(f"payment:processed:{payment_id}")
+                if processed_val and isinstance(processed_val, (bytes, str)) and processed_val in (b"1", "1", b"true", "true"):
                     return {"received": True, "status": "already_processed"}
                 proc_lock_acquired = await r.set(proc_lock_key, "1", nx=True, ex=30)
                 if not proc_lock_acquired:
@@ -479,6 +505,9 @@ class StoreNotificationBody(BaseModel):
     user_id: Optional[str] = None
     event_type: str = Field(..., pattern=r"^(active|in_grace_period|billing_retry|account_hold|revoked|expired)$")
     original_transaction_id: Optional[str] = None
+    sku: Optional[str] = None
+    event_id: Optional[str] = None
+    timestamp: Optional[datetime] = None
 
 
 @router.post("/store-notification", status_code=status.HTTP_200_OK)
@@ -495,13 +524,15 @@ async def store_notification_webhook(
     if not expected_secret or x_store_token != expected_secret:
         raise HTTPException(status_code=403, detail="Invalid store webhook token")
 
-    if not body.user_id:
-        return {"received": True, "status": "missing_user_id"}
+    if not body.user_id and not body.original_transaction_id:
+        return {"received": True, "status": "missing_identifier"}
 
-    try:
-        uid = UUID(body.user_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid user_id format")
+    uid: Optional[UUID] = None
+    if body.user_id:
+        try:
+            uid = UUID(body.user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user_id format")
 
     res = await payment_service.process_store_subscription_event(
         user_id=uid,
@@ -509,6 +540,9 @@ async def store_notification_webhook(
         event_type=body.event_type,
         pool=pool,
         original_transaction_id=body.original_transaction_id,
+        sku=body.sku,
+        event_id=body.event_id,
+        timestamp=body.timestamp,
     )
     return {"received": True, "result": res}
 

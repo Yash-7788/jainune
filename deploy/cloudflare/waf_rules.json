@@ -10,13 +10,13 @@
     {
       "id": "challenge_low_bot_score_on_auth",
       "description": "Managed challenge on low-score automated clients hitting authentication",
-      "expression": "cf.bot_management.score lt 30 and (http.request.uri.path contains \"/v1/auth/otp/send\" or http.request.uri.path contains \"/v1/auth/google\" or http.request.uri.path contains \"/v1/auth/apple\")",
+      "expression": "cf.bot_management.score lt 30 and (http.request.uri.path contains \"/v1/auth/otp/request\" or http.request.uri.path contains \"/v1/auth/email/otp/request\" or http.request.uri.path contains \"/v1/auth/google\" or http.request.uri.path contains \"/v1/auth/apple\")",
       "action": "managed_challenge"
     },
     {
       "id": "rate_limit_auth_endpoints",
       "description": "Rate limit OTP requests per IP to prevent SMS fatigue and cost exhaustion",
-      "expression": "http.request.uri.path eq \"/v1/auth/otp/send\"",
+      "expression": "http.request.uri.path eq \"/v1/auth/otp/request\" or http.request.uri.path eq \"/v1/auth/email/otp/request\"",
       "action": "rate_limit",
       "ratelimit": {
         "characteristics": ["ip.src"],

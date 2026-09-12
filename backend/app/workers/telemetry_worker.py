@@ -70,22 +70,22 @@ async def _flush_async() -> None:
 
     try:
         events = []
+        del_ids = []
+        list_items_count = 0
 
         # 1. Drain from Redis Stream (telemetry:stream written by POST /v1/telemetry/events)
         stream_entries = await redis.xrange(STREAM_KEY, count=DRAIN_BATCH)
         if stream_entries:
-            del_ids = []
             for stream_id, entry in stream_entries:
                 del_ids.append(stream_id)
                 events.append(entry)
-            await redis.xdel(STREAM_KEY, *del_ids)
 
         # 2. Drain legacy list buffer if any items present
         remaining_budget = DRAIN_BATCH - len(events)
         if remaining_budget > 0:
             raw_events: list[str] = await redis.lrange(BUFFER_KEY, 0, remaining_budget - 1)
             if raw_events:
-                await redis.ltrim(BUFFER_KEY, len(raw_events), -1)
+                list_items_count = len(raw_events)
                 for raw in raw_events:
                     try:
                         events.append(json.loads(raw))
@@ -175,6 +175,12 @@ async def _flush_async() -> None:
                     sanitized_rows,
                 )
                 log.info("flush_telemetry_buffer: flushed %d events", len(sanitized_rows))
+
+        # Acknowledge / trim from Redis ONLY after database commit succeeds (NEW-024)
+        if del_ids:
+            await redis.xdel(STREAM_KEY, *del_ids)
+        if list_items_count > 0:
+            await redis.ltrim(BUFFER_KEY, list_items_count, -1)
 
         # 3. Drain and process vector:update:queue stream (BUG-032)
         vector_entries = await redis.xrange("vector:update:queue", count=1000)

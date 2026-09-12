@@ -13,6 +13,16 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 DOWN_MIGRATIONS_DIR = MIGRATIONS_DIR / "down"
 
 
+def sanitize_migration_sql(sql_content: str) -> str:
+    cleaned = []
+    for line in sql_content.splitlines():
+        stmt = line.strip().rstrip(";").strip().upper()
+        if stmt in ("BEGIN", "COMMIT", "START TRANSACTION", "BEGIN TRANSACTION"):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 async def run_migrations():
     print(f"Connecting to database: {DATABASE_URL.split('@')[-1]}")
     try:
@@ -53,7 +63,7 @@ async def run_migrations():
                 await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
             else:
                 async with conn.transaction():
-                    await conn.execute(sql_content)
+                    await conn.execute(sanitize_migration_sql(sql_content))
                     await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
             print(f"  [DONE] {version}")
 
@@ -101,7 +111,7 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
                 await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
             else:
                 async with conn.transaction():
-                    await conn.execute(down_sql)
+                    await conn.execute(sanitize_migration_sql(down_sql))
                     await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
 
             print(f"  [ROLLED BACK] {version}")

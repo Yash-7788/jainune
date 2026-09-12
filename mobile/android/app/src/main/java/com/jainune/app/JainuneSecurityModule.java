@@ -356,12 +356,15 @@ public class JainuneSecurityModule extends ReactContextBaseJavaModule {
         File[] prefFiles = prefsDir.listFiles();
         if (prefFiles != null) {
           for (File f : prefFiles) {
-            // Clear each SharedPreferences file
+            // Synchronously clear each SharedPreferences file to guarantee disk wipe before process death (SECOND-011)
             String prefName = f.getName().replace(".xml", "");
-            ctx.getSharedPreferences(prefName, Context.MODE_PRIVATE)
+            boolean cleared = ctx.getSharedPreferences(prefName, Context.MODE_PRIVATE)
                .edit()
                .clear()
-               .apply();
+               .commit();
+            if (!cleared) {
+              allCleared = false;
+            }
           }
         }
       }
