@@ -673,3 +673,81 @@ class TestCoverageBoost(unittest.TestCase):
                 asyncio.run(get_feed(user, db, redis, limit=15, refresh=True))
         self.assertEqual(ctx.exception.status_code, 404)
 
+    # ── Payment service pure function coverage ────────────────────────────────
+
+    def test_payment_get_active_subscription_plans(self):
+        from app.services.payment_service import get_active_subscription_plans
+        plans = get_active_subscription_plans()
+        self.assertIsInstance(plans, list)
+        self.assertGreater(len(plans), 0)
+        plan_ids = [p["plan_id"] for p in plans]
+        self.assertIn("jainune_plus_monthly", plan_ids)
+        self.assertIn("jainune_plus_quarterly", plan_ids)
+
+    def test_payment_verify_signature_empty_inputs(self):
+        from app.services.payment_service import verify_payment_signature
+        # Empty inputs return False without raising
+        self.assertFalse(verify_payment_signature("", "", ""))
+        self.assertFalse(verify_payment_signature("order_id", "pay_id", ""))
+
+    def test_payment_verify_signature_valid_hmac(self):
+        import hashlib, hmac as hmaclib
+        from app.services.payment_service import verify_payment_signature
+        from unittest.mock import patch as mpatch
+        secret = "test_razorpay_secret"
+        order_id = "order_abc123"
+        payment_id = "pay_xyz456"
+        message = f"{order_id}|{payment_id}"
+        expected_sig = hmaclib.HMAC(secret.encode(), message.encode(), digestmod=hashlib.sha256).hexdigest()
+        with mpatch("app.services.payment_service.settings") as ms:
+            ms.razorpay_key_secret = secret
+            result = verify_payment_signature(order_id, payment_id, expected_sig)
+        self.assertTrue(result)
+
+    def test_payment_verify_signature_wrong_hmac(self):
+        from app.services.payment_service import verify_payment_signature
+        from unittest.mock import patch as mpatch
+        with mpatch("app.services.payment_service.settings") as ms:
+            ms.razorpay_key_secret = "secret"
+            result = verify_payment_signature("order1", "pay1", "wrongsig")
+        self.assertFalse(result)
+
+    def test_payment_verify_webhook_signature_empty(self):
+        from app.services.payment_service import verify_webhook_signature
+        self.assertFalse(verify_webhook_signature(b"", ""))
+        self.assertFalse(verify_webhook_signature(b"body", ""))
+
+    def test_payment_verify_webhook_signature_valid(self):
+        import hashlib, hmac as hmaclib
+        from app.services.payment_service import verify_webhook_signature
+        from unittest.mock import patch as mpatch
+        secret = "webhook_secret"
+        body = b'{"event":"payment.captured"}'
+        sig = hmaclib.HMAC(secret.encode(), body, digestmod=hashlib.sha256).hexdigest()
+        with mpatch("app.services.payment_service.settings") as ms:
+            ms.razorpay_webhook_secret = secret
+            result = verify_webhook_signature(body, sig)
+        self.assertTrue(result)
+
+    def test_payment_plan_catalogue_lookup(self):
+        from app.services.payment_service import PLAN_CATALOGUE
+        self.assertIn("jainune_plus_monthly", PLAN_CATALOGUE)
+        plan = PLAN_CATALOGUE["jainune_plus_monthly"]
+        self.assertIn("amount", plan)
+        self.assertIn("currency", plan)
+        self.assertEqual(plan["type"], "subscription")
+
+    def test_payment_create_order_unknown_plan_raises(self):
+        from app.services.payment_service import create_order
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(create_order("user_id", "nonexistent_plan", None))
+        self.assertIn("Unknown plan", str(ctx.exception))
+
+    def test_subscriptions_list_plans_router(self):
+        """Cover subscriptions.py list_plans endpoint (lines 48-51)."""
+        from app.routers.subscriptions import list_plans
+        result = asyncio.run(list_plans())
+        self.assertIn("plans", result)
+        self.assertGreater(len(result["plans"]), 0)
+
+

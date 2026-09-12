@@ -25,13 +25,13 @@ from typing import Any, Optional
 
 try:
     import razorpay
-except ImportError:
-    razorpay = None
+except ImportError:  # pragma: no cover
+    razorpay = None  # pragma: no cover
 
 try:
     import asyncpg
-except ImportError:
-    asyncpg = None
+except ImportError:  # pragma: no cover
+    asyncpg = None  # pragma: no cover
 
 from app.core.config import settings
 
