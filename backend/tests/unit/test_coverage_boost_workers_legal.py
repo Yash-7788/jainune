@@ -804,5 +804,108 @@ class TestCoverageBoost(unittest.TestCase):
             asyncio.run(verify_otp("+919999999996", "000000", redis))
         self.assertEqual(ctx.exception.status_code, 401)
 
+    # ── core responses & errors direct coverage ──────────────────────────────
+
+    def test_core_responses_ok_and_err(self):
+        """Cover app.core.responses.ok and app.core.responses.err."""
+        from app.core.responses import ok, err
+        r_ok = ok({"key": "val"}, meta={"total": 1})
+        self.assertTrue(r_ok["success"])
+        self.assertEqual(r_ok["meta"]["total"], 1)
+
+        r_err = err("RESOURCE_NOT_FOUND", "Item not found", details=["id: 123"])
+        self.assertFalse(r_err["success"])
+        self.assertEqual(r_err["error"]["code"], "RESOURCE_NOT_FOUND")
+        self.assertEqual(r_err["error"]["details"], ["id: 123"])
+
+    def test_core_errors_handlers_and_helpers(self):
+        """Cover app.core.errors exception handlers and friendly resolution."""
+        from app.core.errors import (
+            resolve_friendly_error,
+            create_error_envelope,
+            http_exception_handler,
+            validation_exception_handler,
+            unhandled_exception_handler,
+        )
+        from fastapi.exceptions import RequestValidationError
+        from fastapi import HTTPException
+        from unittest.mock import MagicMock
+
+        # Fallback friendly error (line 172)
+        code, title, msg = resolve_friendly_error(999, "unknown arbitrary error")
+        self.assertEqual(code, "UNEXPECTED_ERROR")
+
+        # Envelope
+        env = create_error_envelope(400, "BAD_REQUEST", "Bad Request", "Something broke", raw_details=["extra"])
+        self.assertFalse(env["success"])
+        self.assertEqual(env["error"]["code"], "BAD_REQUEST")
+
+        # HTTP Exception handler
+        mock_req = MagicMock()
+        http_exc = HTTPException(status_code=404, detail="Item missing")
+        resp = asyncio.run(http_exception_handler(mock_req, http_exc))
+        self.assertEqual(resp.status_code, 404)
+
+        # Validation Exception handler (lines 214-216)
+        val_exc = RequestValidationError([])
+        resp_val = asyncio.run(validation_exception_handler(mock_req, val_exc))
+        self.assertEqual(resp_val.status_code, 422)
+
+        # Unhandled Exception handler (lines 219-229)
+        unh_exc = RuntimeError("Server panic")
+        resp_unh = asyncio.run(unhandled_exception_handler(mock_req, unh_exc))
+        self.assertEqual(resp_unh.status_code, 500)
+
+    def test_schemas_interaction_aliases_and_validation(self):
+        """Cover app.models.schemas.interaction lines 29, 36, 39."""
+        from app.models.schemas.interaction import InteractionActionRequest
+        import uuid
+        tid = uuid.uuid4()
+
+        # target_user_id alias + superlike normalization
+        ic = InteractionActionRequest(target_user_id=tid, action="superlike")
+        self.assertEqual(ic.target_id, tid)
+        self.assertEqual(ic.action, "super_connect")
+
+        # Invalid action raises ValueError
+        with self.assertRaises(ValueError):
+            InteractionActionRequest(target_id=tid, action="invalid_super_action")
+
+    def test_bot_defense_turnstile_and_subnet_branches(self):
+        """Cover app.core.bot_defense lines 50, 66, 70, 74-96, 120-122."""
+        from app.core.bot_defense import get_client_subnet, verify_turnstile_token, verify_bot_integrity
+        from unittest.mock import patch, MagicMock
+
+        # Subnet empty/none (line 50)
+        self.assertEqual(get_client_subnet(None), "127.0.0.0/24")
+        self.assertEqual(get_client_subnet(""), "127.0.0.0/24")
+
+        # Turnstile token validations (lines 66, 70)
+        self.assertFalse(verify_turnstile_token(None))
+        self.assertFalse(verify_turnstile_token(""))
+        self.assertFalse(verify_turnstile_token("short"))
+        self.assertFalse(verify_turnstile_token("invalid_token"))
+
+        # Turnstile success path (lines 74-90)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"success": true}'
+        mock_resp.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with patch("app.core.config.settings.turnstile_secret_key", "secret123"):
+                self.assertTrue(verify_turnstile_token("token_that_is_long_enough", remote_ip="1.2.3.4"))
+
+        # Turnstile exception path (lines 94-96)
+        with patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
+            with patch("app.core.config.settings.turnstile_secret_key", "secret123"):
+                self.assertFalse(verify_turnstile_token("token_that_is_long_enough"))
+
+        # Bot integrity headers lookup (is_bot returns False for legitimate agent)
+        is_bot, reason = verify_bot_integrity({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"})
+        self.assertFalse(is_bot)
+
+        # Bot integrity detects bot UA
+        is_bot, reason = verify_bot_integrity({"user-agent": "python-requests/2.28"})
+        self.assertTrue(is_bot)
+
 
 
