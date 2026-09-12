@@ -59,7 +59,9 @@ jobs:
         run: |
           CONTAINER=$(docker ps -q --filter "ancestor=postgis/postgis:16-3.4" | head -n 1)
           docker exec $CONTAINER apt-get update -o Acquire::Check-Valid-Until=false
-          docker exec $CONTAINER apt-get install -y --no-install-recommends postgresql-16-pgvector
+          docker exec $CONTAINER apt-get install -y --no-install-recommends postgresql-16-pgvector postgresql-16
+          docker restart $CONTAINER
+          until docker exec $CONTAINER pg_isready -U postgres; do sleep 1; done
 
       - name: Run migrations validation
         env:
