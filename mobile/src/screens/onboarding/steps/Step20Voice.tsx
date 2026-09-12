@@ -71,8 +71,8 @@ export default function Step20Screen() {
     setStatus("uploading");
     setLoading(true);
     try {
-      const { media_id, upload_url } = await getPresignedUploadUrl("voice");
-      await uploadToS3(upload_url, recordingUri, "audio/m4a");
+      const { media_id, upload_url, presigned_fields } = await getPresignedUploadUrl("voice");
+      await uploadToS3(upload_url, recordingUri, "audio/m4a", presigned_fields);
       await confirmUpload(media_id);
       await submitStep20(media_id);
       updateData({ voiceSnapshotId: media_id });

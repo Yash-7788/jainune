@@ -61,6 +61,15 @@ async def _run_async() -> None:
     conn = await _get_conn()
     redis = await _get_redis()
 
+    # Distributed lock: prevents two concurrent worker instances from corrupting feed queues
+    lock_key = "lock:daily_compatible"
+    lock_acquired = await redis.set(lock_key, "1", nx=True, ex=3600)
+    if not lock_acquired:
+        log.warning("run_daily_compatible: another instance is already running — skipping")
+        await conn.close()
+        await redis.aclose()
+        return
+
     try:
         log.info("run_daily_compatible: start")
 
@@ -202,5 +211,9 @@ async def _run_async() -> None:
 
         log.info("run_daily_compatible: complete")
     finally:
+        try:
+            await redis.delete(lock_key)
+        except Exception as exc:
+            log.debug("Lock release ignored: %s", exc)
         await conn.close()
         await redis.aclose()

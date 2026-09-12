@@ -291,8 +291,8 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
                 redis=mock_redis,
             )
             self.assertTrue(res.success)
-            self.assertTrue(mock_redis.incr.called)
-            self.assertTrue(mock_redis.expire.called)
+            self.assertTrue(mock_redis.incr.called or mock_pipe.incr.called)
+            self.assertTrue(mock_redis.expire.called or mock_pipe.expire.called)
 
 
 if __name__ == "__main__":

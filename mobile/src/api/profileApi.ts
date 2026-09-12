@@ -176,6 +176,7 @@ export interface PresignUploadResponse {
   upload_url: string;
   media_id: string;
   cdn_url: string;
+  presigned_fields?: Record<string, string> | null;
 }
 
 export async function presignUpload(
@@ -188,6 +189,7 @@ export async function presignUpload(
     media_id: string;
     presigned_url: string;
     s3_key: string;
+    presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
     media_type: mediaType,
     content_type: contentType,
@@ -199,6 +201,7 @@ export async function presignUpload(
     upload_url: res.data.presigned_url,
     media_id: res.data.media_id,
     cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
+    presigned_fields: res.data.presigned_fields,
   };
 }
 

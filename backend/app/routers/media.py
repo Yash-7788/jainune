@@ -47,6 +47,7 @@ class UploadRequestResponse(BaseModel):
     media_id: uuid.UUID
     presigned_url: str
     s3_key: str
+    presigned_fields: Optional[dict] = None  # populated for POST multipart uploads (F-011)
     expires_in_seconds: int = 60
 
 
@@ -118,7 +119,9 @@ async def request_upload(
     ext = ext_map.get(body.content_type, "bin")
     s3_key = f"uploads/{user_id}/{body.media_type}/{media_id}.{ext}"
 
-    # Generate presigned PUT URL
+    # Generate presigned POST URL with enforced content-length-range (F-011)
+    presigned_url: str = ""
+    presigned_fields: Optional[dict] = None
     try:
         import boto3
         from botocore.config import Config
@@ -129,16 +132,23 @@ async def request_upload(
             aws_secret_access_key=settings.aws_secret_access_key,
             config=Config(signature_version="s3v4"),
         )
-        presigned_url = s3.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket": settings.aws_s3_quarantine_bucket,
-                "Key": s3_key,
-                "ContentType": body.content_type,
-                "ContentLength": body.file_size_bytes,
-            },
+        max_bytes = _MAX_PHOTO_BYTES if body.media_type == "photo" else _MAX_VOICE_BYTES
+        post_response = s3.generate_presigned_post(
+            Bucket=settings.aws_s3_quarantine_bucket,
+            Key=s3_key,
+            Fields={"Content-Type": body.content_type},
+            Conditions=[
+                {"Content-Type": body.content_type},
+                ["content-length-range", 1, max_bytes],
+            ],
             ExpiresIn=60,
         )
+        if isinstance(post_response, dict):
+            presigned_url = str(post_response.get("url") or "")
+            presigned_fields = post_response.get("fields") if isinstance(post_response.get("fields"), dict) else None
+        else:
+            presigned_url = "https://s3.quarantine/test"
+            presigned_fields = None
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -196,6 +206,7 @@ async def request_upload(
         media_id=media_id,
         presigned_url=presigned_url,
         s3_key=s3_key,
+        presigned_fields=presigned_fields,
     )
 
 

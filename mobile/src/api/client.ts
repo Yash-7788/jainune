@@ -266,10 +266,27 @@ export async function apiDelete<T = unknown>(
 export async function uploadToPresignedUrl(
   presignedUrl: string,
   fileUri: string,
-  contentType: string
+  contentType: string,
+  presignedFields?: Record<string, string> | null
 ): Promise<void> {
   const response = await fetch(fileUri);
   const blob = await response.blob();
+
+  if (presignedFields && Object.keys(presignedFields).length > 0) {
+    const formData = new FormData();
+    for (const [key, val] of Object.entries(presignedFields)) {
+      formData.append(key, val);
+    }
+    formData.append("file", blob as any);
+    const uploadResponse = await fetch(presignedUrl, {
+      method: "POST",
+      body: formData,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+    }
+    return;
+  }
 
   const uploadResponse = await fetch(presignedUrl, {
     method: "PUT",

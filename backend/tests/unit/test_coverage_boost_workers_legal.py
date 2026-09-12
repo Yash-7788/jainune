@@ -137,7 +137,9 @@ class TestCoverageBoost(unittest.TestCase):
         mock_conn.fetch = AsyncMock(return_value=[])
         mock_conn.close = AsyncMock()
 
-        mock_redis = MagicMock()
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock(return_value=True)  # lock acquired
+        mock_redis.delete = AsyncMock()
         mock_redis.aclose = AsyncMock()
 
         with patch("app.workers.daily_compatible._get_conn", new_callable=AsyncMock) as gc, \
@@ -195,11 +197,13 @@ class TestCoverageBoost(unittest.TestCase):
         mock_conn.executemany = AsyncMock()
         mock_conn.close = AsyncMock()
 
-        mock_redis = MagicMock()
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock(return_value=True)  # lock acquired
+        mock_redis.delete = AsyncMock()
         mock_pipe = MagicMock()
         mock_pipe.set = MagicMock()
         mock_pipe.execute = AsyncMock()
-        mock_redis.pipeline.return_value = mock_pipe
+        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
         mock_redis.aclose = AsyncMock()
 
         with patch("app.workers.daily_compatible._get_conn", new_callable=AsyncMock) as gc, \
@@ -760,8 +764,11 @@ class TestCoverageBoost(unittest.TestCase):
         otp = "123456"
         stored = hash_otp(phone, otp).encode()
         redis = AsyncMock()
-        redis.incr = AsyncMock(return_value=1)
-        redis.expire = AsyncMock()
+        mock_pipe = AsyncMock()
+        mock_pipe.incr = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, True])
+        redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=stored)
         redis.delete = AsyncMock()
         result = asyncio.run(verify_otp(phone, otp, redis))
@@ -773,8 +780,11 @@ class TestCoverageBoost(unittest.TestCase):
         from app.core.security import verify_otp
         from fastapi import HTTPException
         redis = AsyncMock()
-        redis.incr = AsyncMock(return_value=6)
-        redis.expire = AsyncMock()
+        mock_pipe = AsyncMock()
+        mock_pipe.incr = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[6, True])
+        redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.delete = AsyncMock()
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(verify_otp("+919999999998", "000000", redis))
@@ -785,8 +795,11 @@ class TestCoverageBoost(unittest.TestCase):
         from app.core.security import verify_otp
         from fastapi import HTTPException
         redis = AsyncMock()
-        redis.incr = AsyncMock(return_value=1)
-        redis.expire = AsyncMock()
+        mock_pipe = AsyncMock()
+        mock_pipe.incr = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, True])
+        redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=None)
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(verify_otp("+919999999997", "000000", redis))
@@ -797,8 +810,11 @@ class TestCoverageBoost(unittest.TestCase):
         from app.core.security import verify_otp
         from fastapi import HTTPException
         redis = AsyncMock()
-        redis.incr = AsyncMock(return_value=1)
-        redis.expire = AsyncMock()
+        mock_pipe = AsyncMock()
+        mock_pipe.incr = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, True])
+        redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=b"wrong_hash_value_that_will_not_match")
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(verify_otp("+919999999996", "000000", redis))

@@ -117,14 +117,15 @@ async def websocket_chat(
             except Exception:
                 pass
 
-        if not uid_val:
+        if not uid_val and hasattr(redis, "get"):
             try:
                 res = await redis.get(ticket_key)
                 if isinstance(res, (bytes, str)):
                     uid_val = res
-                    await redis.delete(ticket_key)
-            except Exception:
-                pass
+                    if hasattr(redis, "delete"):
+                        await redis.delete(ticket_key)
+            except Exception as exc:
+                log.debug("Ticket get fallback failed: %s", exc)
 
         if not uid_val:
             await websocket.close(code=4001, reason="Invalid or expired ticket.")

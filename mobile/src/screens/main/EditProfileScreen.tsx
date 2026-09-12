@@ -167,7 +167,7 @@ export default function EditProfileScreen() {
         if (!uri) throw new Error("Audio recording failed");
 
         const presign = await presignUpload("audio/m4a", 1024 * 1024, "voice");
-        await uploadToPresignedUrl(presign.upload_url, uri, "audio/m4a");
+        await uploadToPresignedUrl(presign.upload_url, uri, "audio/m4a", presign.presigned_fields);
         const res = await updateVoiceSnapshot(presign.media_id);
         setVoiceSnapshotUrl(res.voice_snapshot_url || presign.cdn_url);
         Alert.alert("Voice Snapshot Updated", "Your new 7-second voice snippet is now live on your profile!");
@@ -201,7 +201,7 @@ export default function EditProfileScreen() {
       const mime = asset.type === "image" ? "image/jpeg" : "image/jpeg";
       const sizeBytes = asset.fileSize || 1024 * 1024;
       const presign = await presignUpload(mime, sizeBytes);
-      await uploadToPresignedUrl(presign.upload_url, asset.uri, mime);
+      await uploadToPresignedUrl(presign.upload_url, asset.uri, mime, presign.presigned_fields);
       await addPhoto(presign.media_id);
       setPhotos((prev) => [
         ...prev,

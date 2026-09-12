@@ -373,13 +373,13 @@ async def send_message(
             effective_tier = await get_effective_user_tier(user_id, conn)
             is_subscribed = effective_tier in ("jainune_plus", "gold", "platinum")
 
-            # Filter content if text message
+            # Filter content for ALL message types (not just text) — F-016
             final_content = body.content
             is_moderated = False
             mod_type = None
             mod_disclaimer = None
 
-            if body.message_type == "text" and body.content:
+            if body.content and body.content.strip():
                 from app.services.chat_safety_filter import filter_chat_content
                 mod_result = await filter_chat_content(
                     content=body.content,
@@ -442,7 +442,20 @@ async def send_message(
                     )
                 final_media_url = media_row["cdn_url"] or body.media_url
             elif body.message_type == "gif":
-                final_media_url = body.media_url
+                # F-015/F-021: Validate GIF URL against SSRF and CDN allowlist
+                from app.core.security import is_safe_public_url
+                from urllib.parse import urlparse as _urlparse
+                _GIF_ALLOWED_HOSTS = frozenset({"media.giphy.com", "i.giphy.com", "giphy.com", "media.tenor.com", "c.tenor.com", "tenor.com"})
+                gif_url = body.media_url or ""
+                if not gif_url or not is_safe_public_url(gif_url):
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsafe GIF URL.")
+                try:
+                    _gif_host = (_urlparse(gif_url).hostname or "").lower()
+                except Exception:
+                    _gif_host = ""
+                if _gif_host not in _GIF_ALLOWED_HOSTS:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GIF must be from an approved source (Giphy or Tenor).")
+                final_media_url = gif_url
 
             row = await conn.fetchrow(
                 """

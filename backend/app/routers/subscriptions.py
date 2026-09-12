@@ -521,7 +521,8 @@ async def store_notification_webhook(
     Handles grace periods, billing retries, account holds, and refund revocations.
     """
     expected_secret = getattr(settings, "store_webhook_secret", None) or getattr(settings, "webhook_secret", "")
-    if not expected_secret or x_store_token != expected_secret:
+    import hmac as _hmac
+    if not expected_secret or not x_store_token or not _hmac.compare_digest(x_store_token, expected_secret):
         raise HTTPException(status_code=403, detail="Invalid store webhook token")
 
     if not body.user_id and not body.original_transaction_id:

@@ -584,10 +584,12 @@ async def get_dashboard_stats(
 ):
     """Key operational metrics for the admin dashboard with 60s Redis caching (BUG-034)."""
     r = None
+    admin_role = admin.get("admin_role", "moderator")
+    cache_key = f"admin:stats:dashboard:{admin_role}"
     try:
         r = get_redis()
         if r:
-            cached = await r.get("admin:stats:dashboard")
+            cached = await r.get(cache_key)
             if cached:
                 import json
                 return json.loads(cached.decode() if isinstance(cached, bytes) else cached)
@@ -615,7 +617,7 @@ async def get_dashboard_stats(
     try:
         if r:
             import json
-            await r.set("admin:stats:dashboard", json.dumps(res, default=str), ex=60)
+            await r.set(cache_key, json.dumps(res, default=str), ex=60)
     except Exception:
         pass
 

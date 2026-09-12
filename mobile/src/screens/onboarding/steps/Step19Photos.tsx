@@ -45,8 +45,8 @@ export default function Step19Screen() {
     setUploading(true);
     setError(null);
     try {
-      const { media_id, upload_url, cdn_url } = await getPresignedUploadUrl("photo");
-      await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg");
+      const { media_id, upload_url, cdn_url, presigned_fields } = await getPresignedUploadUrl("photo");
+      await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg", presigned_fields);
       await confirmUpload(media_id);
       setPhotos((prev) => [...prev, { mediaId: media_id, localUri: asset.uri, cdnUrl: cdn_url }]);
     } catch (err) {

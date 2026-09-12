@@ -229,11 +229,28 @@ async def record_interaction_action(
                     # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
                     limit = 10 if tier == "free" else (50 if tier == "gold" else None)
                     if limit is not None:
-                        new_count = await redis.incr(like_key)
-                        like_quota_deducted = True
                         tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                        ttl_seconds = int((tomorrow_midnight - ist_now).total_seconds())
-                        await redis.expire(like_key, max(ttl_seconds, 60))
+                        ttl_seconds = max(int((tomorrow_midnight - ist_now).total_seconds()), 60)
+                        pipe = None
+                        if hasattr(redis, "pipeline"):
+                            try:
+                                pipe = redis.pipeline()
+                                if not hasattr(pipe, "incr") or asyncio.iscoroutine(pipe):
+                                    if asyncio.iscoroutine(pipe):
+                                        pipe.close()
+                                    pipe = None
+                            except Exception:
+                                pipe = None
+
+                        if pipe is not None:
+                            pipe.incr(like_key)
+                            pipe.expire(like_key, ttl_seconds)
+                            results = await pipe.execute()
+                            new_count = results[0]
+                        else:
+                            new_count = await redis.incr(like_key)
+                            await redis.expire(like_key, ttl_seconds)
+                        like_quota_deducted = True
                         if new_count > limit:
                             await redis.decr(like_key)
                             like_quota_deducted = False

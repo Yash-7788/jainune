@@ -23,6 +23,7 @@ export interface PresignData {
   media_id: string;
   upload_url: string;
   cdn_url: string;
+  presigned_fields?: Record<string, string> | null;
 }
 
 // GET /v1/onboarding/status
@@ -242,6 +243,7 @@ export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<Pr
     media_id: string;
     presigned_url: string;
     s3_key: string;
+    presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
     media_type: type,
     content_type: type === "photo" ? "image/jpeg" : "audio/m4a",
@@ -253,12 +255,18 @@ export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<Pr
     media_id: res.data.media_id,
     upload_url: res.data.presigned_url,
     cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
+    presigned_fields: res.data.presigned_fields,
   };
 }
 
-// Upload to S3 directly via presigned URL (clean binary PUT)
-export async function uploadToS3(uploadUrl: string, fileUri: string, mimeType: string): Promise<void> {
-  await uploadToPresignedUrl(uploadUrl, fileUri, mimeType);
+// Upload to S3 directly via presigned URL (clean binary PUT or multipart POST)
+export async function uploadToS3(
+  uploadUrl: string,
+  fileUri: string,
+  mimeType: string,
+  presignedFields?: Record<string, string> | null
+): Promise<void> {
+  await uploadToPresignedUrl(uploadUrl, fileUri, mimeType, presignedFields);
 }
 
 // POST /v1/media/upload/confirm

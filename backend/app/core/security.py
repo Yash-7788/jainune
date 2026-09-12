@@ -60,8 +60,11 @@ async def verify_otp(
     rate_key = f"auth:attempts:{phone_number}"
     session_key = f"auth:otp:{phone_number}"
 
-    attempts = await redis.incr(rate_key)
-    await redis.expire(rate_key, 300)
+    pipe = redis.pipeline()
+    pipe.incr(rate_key)
+    pipe.expire(rate_key, 300)
+    results = await pipe.execute()
+    attempts = results[0]
     if attempts > 5:
         await redis.delete(session_key)
         raise HTTPException(
