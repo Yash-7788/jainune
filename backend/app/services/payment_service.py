@@ -687,6 +687,7 @@ async def process_store_subscription_event(
     event_id: Optional[str] = None,
     event_timestamp: Optional[int] = None,
     validity_days: Optional[int] = None,
+    timestamp: Optional[Any] = None,  # Backward-compatible alias
 ) -> dict[str, Any]:
     """
     Handles Apple StoreKit 2 and Google Play RTDN subscription lifecycle events:
@@ -696,6 +697,12 @@ async def process_store_subscription_event(
     - renewed / active: Clear hold/grace period, restore tier & extend valid_until according to plan SKU.
     Enforces event idempotency and provider transaction ownership.
     """
+    if event_timestamp is None and timestamp is not None:
+        if isinstance(timestamp, (int, float)):
+            event_timestamp = int(timestamp)
+        elif hasattr(timestamp, "timestamp"):
+            event_timestamp = int(timestamp.timestamp())
+
     from app.core.redis import get_redis
     r = None
     try:
@@ -703,12 +710,17 @@ async def process_store_subscription_event(
     except Exception:
         pass
 
+    effective_event_id = event_id or (
+        f"{store}:{original_transaction_id}:{event_type}:{event_timestamp}"
+        if (original_transaction_id and event_timestamp)
+        else (f"{store}:{original_transaction_id}:{event_type}" if original_transaction_id else None)
+    )
+
     # 1. Event Idempotency check (NEW-007)
-    if event_id and r:
+    if effective_event_id and r:
         try:
-            if await r.get(f"store:event:processed:{event_id}"):
-                return {"status": "already_processed", "event_id": event_id}
-            await r.set(f"store:event:processed:{event_id}", "1", ex=86400 * 7)
+            if await r.get(f"store:event:processed:{effective_event_id}"):
+                return {"status": "already_processed", "event_id": effective_event_id}
         except Exception:
             pass
 
@@ -738,7 +750,7 @@ async def process_store_subscription_event(
         if original_transaction_id:
             try:
                 sub_row = await conn.fetchrow(
-                    "SELECT user_id, last_event_timestamp FROM store_subscriptions WHERE store = $1 AND original_transaction_id = $2",
+                    "SELECT user_id, status, expires_at, last_event_type, last_event_timestamp FROM store_subscriptions WHERE store = $1 AND original_transaction_id = $2",
                     store, original_transaction_id,
                 )
                 if sub_row:
@@ -752,6 +764,12 @@ async def process_store_subscription_event(
                         if event_timestamp <= sub_row["last_event_timestamp"]:
                             log.info("Ignoring stale store event %s (ts=%s <= last=%s)", event_type, event_timestamp, sub_row["last_event_timestamp"])
                             return {"status": "stale_ignored", "event_type": event_type}
+                    elif not event_timestamp and event_type in ("renewed", "active"):
+                        if sub_row.get("status") == "active" and sub_row.get("last_event_type") in ("renewed", "active"):
+                            now_check = datetime.now(timezone.utc)
+                            if sub_row.get("expires_at") and sub_row["expires_at"] > now_check:
+                                log.info("Duplicate active/renewed event ignored without new timestamp: store=%s txn=%s", store, original_transaction_id)
+                                return {"status": "already_processed", "event_type": event_type}
             except asyncpg.UndefinedTableError:
                 pass  # Pre-migration fallback
 
@@ -846,23 +864,41 @@ async def process_store_subscription_event(
                     await r.delete(f"user:{target_uid}:billing_status")
                 except Exception:
                     pass
+
+            target_tier = "jainune_plus"
+            if sku:
+                s_lower = sku.lower()
+                if "gold" in s_lower:
+                    target_tier = "jainune_gold"
+                elif "plus" in s_lower:
+                    target_tier = "jainune_plus"
+            elif user_row.get("subscription_tier") in ("jainune_plus", "jainune_gold"):
+                target_tier = user_row["subscription_tier"]
+
             current_valid = user_row["subscription_valid_until"]
             base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
             new_valid = base_time + timedelta(days=actual_validity_days)
             await conn.execute(
                 """
                 UPDATE users
-                   SET subscription_tier        = 'jainune_plus',
-                       subscription_valid_until = $1,
+                   SET subscription_tier        = $1,
+                       subscription_valid_until = $2,
                        billing_status           = 'active',
                        updated_at               = NOW()
-                 WHERE id = $2
+                 WHERE id = $3
                 """,
+                target_tier,
                 new_valid,
                 target_uid,
             )
-            log.info("Store subscription renewed: user=%s store=%s valid_until=%s (days=%d)", target_uid, store, new_valid, actual_validity_days)
-            result = {"status": "active", "tier": "jainune_plus", "valid_until": new_valid.isoformat()}
+            if r:
+                try:
+                    await r.set(f"user:{target_uid}:tier", target_tier, ex=3600)
+                    await r.set(f"user:{target_uid}:billing_status", "active", ex=3600)
+                except Exception:
+                    pass
+            log.info("Store subscription renewed: user=%s store=%s tier=%s valid_until=%s (days=%d)", target_uid, store, target_tier, new_valid, actual_validity_days)
+            result = {"status": "active", "tier": target_tier, "valid_until": new_valid.isoformat()}
 
         else:
             log.warning("Unknown store event type: %s", event_type)
@@ -894,6 +930,12 @@ async def process_store_subscription_event(
                     exp_dt, event_type, event_timestamp or int(now_utc.timestamp()),
                 )
             except asyncpg.UndefinedTableError:
+                pass
+
+        if effective_event_id and r:
+            try:
+                await r.set(f"store:event:processed:{effective_event_id}", "1", ex=86400 * 7)
+            except Exception:
                 pass
 
         return result

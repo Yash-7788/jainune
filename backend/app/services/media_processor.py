@@ -8,11 +8,9 @@ Pipeline:
   2. Submit to AWS Rekognition DetectModerationLabels
   3. If PASS → copy to production bucket, set CDN URL, mark approved
   4. If FAIL → mark rejected, store reason, delete from quarantine
-  5. For voice: run Comprehend + Transcribe toxicity check instead
+  5. For voice: container format validation and audio magic-byte integrity check
 
-The `enqueue_moderation` function is the async entry point.
-For production, this should be replaced with an SQS task dispatch;
-for MVP, it runs inline as a fire-and-forget asyncio task.
+The `enqueue_moderation` function dispatches to durable Celery worker queue with local task fallback.
 """
 from __future__ import annotations
 
@@ -111,7 +109,14 @@ async def enqueue_moderation(
     media_type: Literal["photo", "voice"],
     user_id: uuid.UUID,
 ) -> None:
-    """Fire-and-forget: runs moderation in a background asyncio task with bounded concurrency."""
+    """Dispatches moderation to durable Celery worker queue, falling back to local task."""
+    try:
+        from app.workers.ephemeral_reaper import process_media_moderation_task
+        process_media_moderation_task.delay(str(media_id), s3_key, media_type, str(user_id))
+        return
+    except Exception as exc:
+        logger.warning("Failed to dispatch moderation to Celery worker (%s), using local task fallback", exc)
+
     task = asyncio.create_task(
         _run_moderation_with_semaphore(media_id, s3_key, media_type, user_id),
         name=f"moderate:{media_id}",
@@ -155,6 +160,17 @@ async def _run_moderation(
             )
 
         if approved:
+            # Verify media_id is still the active record in 'processing' status before promoting (Finding 12)
+            async with db.acquire() as conn:
+                current_status = await conn.fetchval(
+                    "SELECT status FROM user_media WHERE id = $1",
+                    media_id,
+                )
+            if current_status != "processing":
+                logger.info("Media %s status is %s (no longer 'processing'), aborting promotion", media_id, current_status)
+                await asyncio.to_thread(_delete_from_quarantine, s3_key)
+                return
+
             # Copy quarantine → production
             prod_key = s3_key.replace("uploads/", "media/")
             if media_type == "photo":
@@ -287,7 +303,11 @@ def _validate_voice_magic_bytes(data: bytes) -> bool:
 
 
 def _voice_moderation_check(s3_key: str) -> tuple[bool, str | None]:
-    """Validates audio upload container integrity and enforces voice moderation policy."""
+    """
+    Validates audio upload container integrity and enforces format verification.
+    Inspects header magic bytes for supported formats (AAC/M4A, MP3, OGG, WAV, WebM)
+    to prevent executable polyglots and corrupt streams.
+    """
     if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
         return True, None
     s3 = boto3.client(
@@ -428,7 +448,26 @@ async def reap_stale_processing_media(db: asyncpg.Pool) -> int:
     Marks them as rejected with reason 'Processing timed out' and cleans up quarantine.
     """
     stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    retry_window = datetime.now(timezone.utc) - timedelta(minutes=5)
     async with db.acquire() as conn:
+        # Attempt to re-dispatch stranded in-flight media (> 5m, < 30m) before timing out (Finding 6)
+        stranded = await conn.fetch(
+            """
+            SELECT id, s3_key, media_type, user_id
+            FROM user_media
+            WHERE status = 'processing'
+              AND created_at < $1 AND created_at >= $2
+            LIMIT 20
+            """,
+            retry_window, stale_cutoff,
+        )
+        for row in stranded:
+            try:
+                from app.workers.ephemeral_reaper import process_media_moderation_task
+                process_media_moderation_task.delay(str(row["id"]), row["s3_key"], row["media_type"], str(row["user_id"]))
+            except Exception:
+                pass
+
         stale_rows = await conn.fetch(
             """
             UPDATE user_media

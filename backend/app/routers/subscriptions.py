@@ -237,7 +237,7 @@ async def verify_payment(
 class SyncSubscriptionBody(BaseModel):
     razorpay_order_id: Optional[str] = Field(None, pattern=r"^order_[a-zA-Z0-9_-]+$", max_length=64)
     provider: Optional[str] = Field(None, pattern=r"^(razorpay|app_store|play_billing)$")
-    store_status: Optional[str] = Field(None, pattern=r"^(active|in_grace_period|billing_retry|account_hold|revoked|expired)$")
+    store_status: Optional[str] = Field(None, pattern=r"^(active|renewed|in_grace_period|billing_retry|account_hold|revoked|expired)$")
     original_transaction_id: Optional[str] = Field(None, max_length=128)
 
 
@@ -452,20 +452,34 @@ async def razorpay_webhook(
         r = None
         order_lock_key = f"lock:payment:order:{order_id}" if order_id else None
         proc_lock_key = f"lock:payment:proc:{payment_id}" if payment_id else None
-        order_lock_acquired = True
-        proc_lock_acquired = True
+        order_lock_token = uuid.uuid4().hex
+        proc_lock_token = uuid.uuid4().hex
+        order_lock_acquired = False
+        proc_lock_acquired = False
         try:
             r = get_redis()
-            if payment_id:
+            if payment_id and r:
                 processed_val = await r.get(f"payment:processed:{payment_id}")
                 if processed_val and isinstance(processed_val, (bytes, str)) and processed_val in (b"1", "1", b"true", "true"):
                     return {"received": True, "status": "already_processed"}
-                proc_lock_acquired = await r.set(proc_lock_key, "1", nx=True, ex=30)
+                proc_lock_acquired = await r.set(proc_lock_key, proc_lock_token, nx=True, ex=30)
                 if not proc_lock_acquired:
                     return {"received": True, "status": "lock_busy"}
-            if order_lock_key:
-                order_lock_acquired = await r.set(order_lock_key, "1", nx=True, ex=30)
+            if order_lock_key and r:
+                order_lock_acquired = await r.set(order_lock_key, order_lock_token, nx=True, ex=30)
                 if not order_lock_acquired:
+                    if proc_lock_acquired:
+                        release_script = """
+                            if redis.call("get", KEYS[1]) == ARGV[1] then
+                                return redis.call("del", KEYS[1])
+                            else
+                                return 0
+                            end
+                        """
+                        try:
+                            await r.eval(release_script, 1, proc_lock_key, proc_lock_token)
+                        except Exception:
+                            pass
                     return {"received": True, "status": "lock_busy"}
         except Exception:
             pass  # Fallback to DB transaction FOR UPDATE gate
@@ -482,11 +496,18 @@ async def razorpay_webhook(
             raise HTTPException(status_code=400, detail=str(exc))
         finally:
             if r:
+                release_script = """
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("del", KEYS[1])
+                    else
+                        return 0
+                    end
+                """
                 try:
                     if proc_lock_key and proc_lock_acquired:
-                        await r.delete(proc_lock_key)
+                        await r.eval(release_script, 1, proc_lock_key, proc_lock_token)
                     if order_lock_key and order_lock_acquired:
-                        await r.delete(order_lock_key)
+                        await r.eval(release_script, 1, order_lock_key, order_lock_token)
                 except Exception:
                     pass
     elif event_name in ("payment.refunded", "refund.processed", "refund.created"):
@@ -503,7 +524,7 @@ async def razorpay_webhook(
 class StoreNotificationBody(BaseModel):
     store: str = Field(..., pattern=r"^(apple|google)$")
     user_id: Optional[str] = None
-    event_type: str = Field(..., pattern=r"^(active|in_grace_period|billing_retry|account_hold|revoked|expired)$")
+    event_type: str = Field(..., pattern=r"^(active|renewed|in_grace_period|billing_retry|account_hold|revoked|expired)$")
     original_transaction_id: Optional[str] = None
     sku: Optional[str] = None
     event_id: Optional[str] = None
@@ -525,6 +546,12 @@ async def store_notification_webhook(
     if not expected_secret or not x_store_token or not _hmac.compare_digest(x_store_token, expected_secret):
         raise HTTPException(status_code=403, detail="Invalid store webhook token")
 
+    if not body.event_id and not body.original_transaction_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store notification must include either event_id or original_transaction_id for idempotency.",
+        )
+
     if not body.user_id and not body.original_transaction_id:
         return {"received": True, "status": "missing_identifier"}
 
@@ -535,6 +562,8 @@ async def store_notification_webhook(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid user_id format")
 
+    event_ts = int(body.timestamp.timestamp()) if body.timestamp else None
+
     res = await payment_service.process_store_subscription_event(
         user_id=uid,
         store=body.store,
@@ -543,7 +572,7 @@ async def store_notification_webhook(
         original_transaction_id=body.original_transaction_id,
         sku=body.sku,
         event_id=body.event_id,
-        timestamp=body.timestamp,
+        event_timestamp=event_ts,
     )
     return {"received": True, "result": res}
 

@@ -28,10 +28,10 @@ from app.core.config import settings
 log = logging.getLogger(__name__)
 
 
-def _delete_s3_keys_sync(s3_keys: list[str]) -> None:
-    """Synchronously delete objects from both quarantine and production S3 buckets."""
+def _delete_s3_keys_sync(s3_keys: list[str]) -> list[str]:
+    """Synchronously delete objects from both quarantine and production S3 buckets. Returns list of failed keys."""
     if not s3_keys:
-        return
+        return []
 
     try:
         s3 = boto3.client(
@@ -42,18 +42,21 @@ def _delete_s3_keys_sync(s3_keys: list[str]) -> None:
         )
     except Exception as exc:
         log.warning(f"Failed to initialize S3 client for media purge: {exc}")
-        return
+        return list(s3_keys)
 
+    failed_keys: list[str] = []
     for key in s3_keys:
         if not key:
             continue
+        key_failed = False
         # Try prod bucket
         try:
             s3.delete_object(Bucket=settings.aws_s3_production_bucket, Key=key)
         except ClientError as ce:
             log.debug("Could not delete %s from prod bucket: %s", key, ce)
+            key_failed = True
         except Exception:
-            pass
+            key_failed = True
 
         # Try quarantine bucket (and also variant upload prefix if applicable)
         try:
@@ -61,8 +64,14 @@ def _delete_s3_keys_sync(s3_keys: list[str]) -> None:
             s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
         except ClientError as ce:
             log.debug("Could not delete %s from quarantine bucket: %s", quarantine_key, ce)
+            key_failed = True
         except Exception:
-            pass
+            key_failed = True
+
+        if key_failed:
+            failed_keys.append(key)
+
+    return failed_keys
 
 
 async def purge_user_account(
@@ -136,7 +145,8 @@ async def purge_user_account(
             user_id,
         )
     except Exception as exc:
-        log.warning(f"Financial audit log archiving for {user_id}: {exc}")
+        log.error(f"Financial audit log archiving failed for {user_id}: {exc}")
+        raise RuntimeError(f"Cannot purge user {user_id}: regulatory financial audit log archiving failed: {exc}") from exc
 
     # 1. Fetch all media s3 keys
     media_rows = await conn.fetch(
@@ -211,7 +221,13 @@ async def purge_user_account(
     # 3. Post-commit external S3 object deletion (prevents desync on DB rollback) (SECOND-035)
     if s3_keys:
         try:
-            await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+            failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+            if failed_keys:
+                log.warning(f"S3 partial deletion failure during account purge for {user_id}: {failed_keys}")
+                try:
+                    await redis.sadd("s3:failed_deletions", *failed_keys)
+                except Exception:
+                    pass
         except Exception as exc:
             log.error(f"S3 deletion failed during account purge for {user_id}: {exc}")
             try:
@@ -342,7 +358,13 @@ async def soft_delete_user_account(
     # Post-commit S3 deletion decoupled from DB transaction (SECOND-035)
     if s3_keys:
         try:
-            await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+            failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
+            if failed_keys:
+                log.warning("S3 partial deletion during soft delete for %s: %s", user_id, failed_keys)
+                try:
+                    await redis.sadd("s3:failed_deletions", *failed_keys)
+                except Exception:
+                    pass
         except Exception as exc:
             log.warning("S3 deletion during soft delete for %s: %s", user_id, exc)
             try:

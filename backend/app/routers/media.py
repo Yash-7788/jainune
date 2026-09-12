@@ -179,6 +179,14 @@ async def request_upload(
                     free_slots = [p for p in range(1, 7) if p not in used_pos]
                     target_position = free_slots[0] if free_slots else 1
 
+            # Prevent replacing slot while previous upload is actively undergoing moderation (Finding 12)
+            for r in existing_rows:
+                if r["position"] == target_position and r["status"] == "processing":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Previous upload for this slot is currently being processed. Please wait.",
+                    )
+
             slot_is_new = not any(r["position"] == target_position and r["status"] != "rejected" for r in existing_rows)
             if slot_is_new and active_count >= limit:
                 raise HTTPException(

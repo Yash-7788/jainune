@@ -291,6 +291,7 @@ def purge_deleted_users() -> None:
             ids = [r["id"] for r in rows]
 
             # Archive financial records for 7-year regulatory retention (RBI / DPDP Act)
+            archived_ids = []
             for uid in ids:
                 try:
                     await conn.execute(
@@ -327,27 +328,49 @@ def purge_deleted_users() -> None:
                         """,
                         uid,
                     )
+                    archived_ids.append(uid)
                 except Exception as exc:
-                    log.warning(f"Financial record archive error for user {uid}: {exc}")
+                    log.error("Financial record archive error for user %s: %s (skipping destructive purge)", uid, exc)
+
+            if not archived_ids:
+                return
 
             # Delete S3 objects first (no cascade for external storage)
             media_keys = await conn.fetch(
                 "SELECT s3_key FROM user_media WHERE user_id = ANY($1::uuid[])",
-                ids,
+                archived_ids,
             )
             from app.services.account_service import _delete_s3_keys_sync
-            await asyncio.to_thread(
+            failed_keys = await asyncio.to_thread(
                 _delete_s3_keys_sync,
                 [mk["s3_key"] for mk in media_keys if mk.get("s3_key")],
             )
+            if failed_keys:
+                try:
+                    from app.core.redis import get_redis
+                    r = get_redis()
+                    await r.sadd("s3:failed_deletions", *failed_keys)
+                except Exception:
+                    pass
 
             # Hard delete — cascades non-financial data
             result = await conn.execute(
                 "DELETE FROM users WHERE id = ANY($1::uuid[])",
-                ids,
+                archived_ids,
             )
             count = int(result.split()[-1])
             log.info("purge_deleted_users: hard-deleted %d users after 72h retention", count)
+
+            # Purge location waitlist entries older than 90 days (Finding 11)
+            try:
+                await conn.execute(
+                    """
+                    DELETE FROM location_waitlist
+                    WHERE created_at < NOW() - INTERVAL '90 days'
+                    """
+                )
+            except Exception as exc:
+                log.warning("location_waitlist purge failed: %s", exc)
         finally:
             await conn.close()
 
@@ -378,6 +401,83 @@ def reap_stale_payment_intents() -> None:
             count = int(result.split()[-1])
             if count > 0:
                 log.info("reap_stale_payment_intents: expired %d stale payment intents", count)
+        finally:
+            await conn.close()
+
+    run_worker_task(_run())
+
+
+# ---------------------------------------------------------------------------
+# Task: durable background media moderation (Finding 6)
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="app.workers.ephemeral_reaper.process_media_moderation_task", bind=True, max_retries=3)
+def process_media_moderation_task(self, media_id: str, s3_key: str, media_type: str, user_id: str) -> None:
+    """Durable Celery task for processing media upload moderation with retry semantics."""
+    import uuid
+    from app.services.media_processor import _run_moderation
+
+    async def _run():
+        await _run_moderation(uuid.UUID(media_id), s3_key, media_type, uuid.UUID(user_id))
+
+    try:
+        run_worker_task(_run())
+    except Exception as exc:
+        log.error("process_media_moderation_task failed for media %s: %s", media_id, exc)
+        raise self.retry(exc=exc, countdown=10)
+
+
+# ---------------------------------------------------------------------------
+# Task: retry failed S3 deletions (Finding 9)
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="app.workers.ephemeral_reaper.reap_failed_s3_deletions")
+def reap_failed_s3_deletions() -> None:
+    """Retries S3 object deletions persisted in Redis s3:failed_deletions set."""
+
+    async def _run():
+        try:
+            from app.core.redis import get_redis
+            r = get_redis()
+            members = await r.smembers("s3:failed_deletions")
+            if not members:
+                return
+            keys = [m.decode("utf-8") if isinstance(m, bytes) else str(m) for m in members]
+            from app.services.account_service import _delete_s3_keys_sync
+            failed = await asyncio.to_thread(_delete_s3_keys_sync, keys)
+            succeeded = [k for k in keys if k not in failed]
+            if succeeded:
+                await r.srem("s3:failed_deletions", *succeeded)
+            log.info("reap_failed_s3_deletions: purged %d keys, %d still failed", len(succeeded), len(failed))
+        except Exception as exc:
+            log.warning("reap_failed_s3_deletions error: %s", exc)
+
+    run_worker_task(_run())
+
+
+# ---------------------------------------------------------------------------
+# Task: purge stale location waitlist records (Finding 11)
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="app.workers.ephemeral_reaper.purge_stale_location_waitlist")
+def purge_stale_location_waitlist() -> None:
+    """Purges location waitlist entries older than 90 days for privacy and data retention compliance."""
+
+    async def _run():
+        conn = await _get_conn()
+        try:
+            res = await conn.execute(
+                """
+                DELETE FROM location_waitlist
+                WHERE created_at < NOW() - INTERVAL '90 days'
+                """
+            )
+            count = int(res.split()[-1])
+            if count > 0:
+                log.info("purge_stale_location_waitlist: purged %d waitlist entries > 90 days", count)
         finally:
             await conn.close()
 

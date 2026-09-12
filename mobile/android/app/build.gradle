@@ -31,7 +31,7 @@ android {
 
     signingConfigs {
         debug {
-            storeFile file("debug.keystore")
+            storeFile file("debug.keystore").exists() ? file("debug.keystore") : file("${System.properties['user.home']}/.android/debug.keystore")
             storePassword "android"
             keyAlias "androiddebugkey"
             keyPassword "android"
@@ -63,7 +63,7 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-            signingConfig (project.hasProperty("JAINUNE_RELEASE_STORE_FILE") ? signingConfigs.release : signingConfigs.debug)
+            signingConfig (project.hasProperty("JAINUNE_RELEASE_STORE_FILE") ? signingConfigs.release : (signingConfigs.debug.storeFile.exists() ? signingConfigs.debug : null))
         }
     }
 

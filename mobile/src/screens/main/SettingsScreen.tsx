@@ -29,9 +29,6 @@ import {
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 
 interface SettingState {
-  notifications_enabled: boolean;
-  marketing_emails: boolean;
-  show_online_status: boolean;
   discovery_paused: boolean;
 }
 
@@ -40,9 +37,6 @@ export default function SettingsScreen() {
   const logout = useAuthStore((s) => s.logout);
   const [legalDoc, setLegalDoc] = useState<LegalDocType | null>(null);
   const [settings, setSettings] = useState<SettingState>({
-    notifications_enabled: true,
-    marketing_emails: false,
-    show_online_status: true,
     discovery_paused: false,
   });
   const [loading, setLoading] = useState(true);
@@ -54,9 +48,6 @@ export default function SettingsScreen() {
       .then((data) => {
         if (data) {
           setSettings({
-            notifications_enabled: !!data.notifications_enabled,
-            marketing_emails: !!data.marketing_emails,
-            show_online_status: !!data.show_online_status,
             discovery_paused: !!data.discovery_paused,
           });
         }
@@ -83,21 +74,6 @@ export default function SettingsScreen() {
 
   const rows: { key: keyof SettingState; label: string; hint: string }[] = [
     {
-      key: "notifications_enabled",
-      label: "Push Notifications",
-      hint: "Match alerts, messages, Momentum warnings",
-    },
-    {
-      key: "marketing_emails",
-      label: "Marketing Emails",
-      hint: "Jainune features, offers & Sunday Drops newsletter",
-    },
-    {
-      key: "show_online_status",
-      label: "Show Online Status",
-      hint: "Others can see when you're active",
-    },
-    {
       key: "discovery_paused",
       label: "Pause Discovery",
       hint: "Your profile won't appear in anyone's feed",
@@ -114,9 +90,9 @@ export default function SettingsScreen() {
         <View style={{ width: 48 }} />
       </View>
 
-      {/* Notifications & Privacy */}
+      {/* Discovery & Privacy */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>NOTIFICATIONS & PRIVACY</Text>
+        <Text style={styles.sectionTitle}>DISCOVERY & PRIVACY</Text>
         {rows.map((row) => (
           <View key={row.key} style={styles.row}>
             <View style={styles.rowInfo}>

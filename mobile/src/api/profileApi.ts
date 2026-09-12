@@ -206,33 +206,21 @@ export async function presignUpload(
 }
 
 export async function getSettings(): Promise<{
-  notifications_enabled: boolean;
-  marketing_emails: boolean;
-  show_online_status: boolean;
   discovery_paused: boolean;
 }> {
   try {
     const profile = await getMyProfile();
     return {
-      notifications_enabled: true,
-      marketing_emails: false,
-      show_online_status: true,
       discovery_paused: (profile as any).is_paused ?? false,
     };
   } catch {
     return {
-      notifications_enabled: true,
-      marketing_emails: false,
-      show_online_status: true,
       discovery_paused: false,
     };
   }
 }
 
 export async function updateSettings(payload: {
-  notifications_enabled?: boolean;
-  marketing_emails?: boolean;
-  show_online_status?: boolean;
   discovery_paused?: boolean;
 }): Promise<void> {
   if (payload.discovery_paused !== undefined) {

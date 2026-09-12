@@ -168,6 +168,7 @@ async def save_city_waitlist(
     pool: asyncpg.Pool,
 ) -> None:
     """Records out-of-coverage user coordinates to city waitlist for launch demand tracking."""
+    coarse_lat, coarse_lon = snap_to_geohash_6(lat, lon)
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -175,8 +176,8 @@ async def save_city_waitlist(
             VALUES ($1, $2, $3, $4)
             """,
             phone_number,
-            lat,
-            lon,
+            coarse_lat,
+            coarse_lon,
             city_hint,
         )
 
