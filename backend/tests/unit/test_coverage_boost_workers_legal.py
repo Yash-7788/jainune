@@ -459,3 +459,121 @@ class TestCoverageBoost(unittest.TestCase):
         self.assertTrue(s20["success"])
         s21 = asyncio.run(step21_consent(Step21ConsentBody(core_matchmaking=True, family_contact_gotra=False, relocation_intercity=True, marketing=False), user, db, redis))
         self.assertTrue(s21["success"])
+
+    # ── Auth helper pure-function coverage ────────────────────────────────────
+
+    def test_auth_mask_phone_long(self):
+        from app.routers.auth import mask_phone
+        result = mask_phone("+919876541210")
+        self.assertIn("*", result)
+        self.assertTrue(result.startswith("+919"))
+        self.assertTrue(result.endswith("1210"))
+
+    def test_auth_mask_phone_short(self):
+        from app.routers.auth import mask_phone
+        result = mask_phone("123")
+        self.assertEqual(result, "***")
+
+    def test_auth_mask_email_normal(self):
+        from app.routers.auth import mask_email
+        result = mask_email("priya@gmail.com")
+        self.assertIn("@gmail.com", result)
+        self.assertTrue(result.startswith("p"))
+
+    def test_auth_mask_email_single_char(self):
+        from app.routers.auth import mask_email
+        result = mask_email("a@b.com")
+        self.assertIn("@b.com", result)
+
+    def test_auth_mask_email_no_at(self):
+        from app.routers.auth import mask_email
+        result = mask_email("notanemail")
+        self.assertEqual(result, "***")
+
+    def test_auth_assert_account_active_none_row(self):
+        from app.routers.auth import _assert_account_active
+        # When row is falsy, function returns early (no exception)
+        result = _assert_account_active(None)
+        self.assertIsNone(result)
+
+    def test_auth_assert_account_active_ok(self):
+        from app.routers.auth import _assert_account_active
+        row = {"account_status": "active", "deleted_at": None, "suspend_until": None}
+        # Should not raise
+        _assert_account_active(row)
+
+    def test_auth_assert_account_active_suspended(self):
+        from app.routers.auth import _assert_account_active
+        from fastapi import HTTPException
+        from datetime import datetime, timezone, timedelta
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        row = {"account_status": "active", "deleted_at": None, "suspend_until": future}
+        with self.assertRaises(HTTPException):
+            _assert_account_active(row)
+
+    def test_auth_pack_unpack_grace_payload(self):
+        from app.routers.auth import _pack_grace_payload, _unpack_grace_payload
+        data = {"access_token": "tok123", "user_id": "uid456"}
+        packed = _pack_grace_payload(data)
+        self.assertIsInstance(packed, str)
+        unpacked = _unpack_grace_payload(packed)
+        self.assertIsNotNone(unpacked)
+        self.assertEqual(unpacked["access_token"], "tok123")
+
+    def test_auth_unpack_grace_payload_invalid(self):
+        from app.routers.auth import _unpack_grace_payload
+        result = _unpack_grace_payload(b"not-valid-json{{{")
+        self.assertIsNone(result)
+
+    def test_auth_assert_account_active_deleted(self):
+        from app.routers.auth import _assert_account_active
+        from fastapi import HTTPException
+        row = {"account_status": "active", "deleted_at": "2024-01-01", "suspend_until": None}
+        with self.assertRaises(HTTPException):
+            _assert_account_active(row)
+
+    def test_auth_assert_account_active_banned(self):
+        from app.routers.auth import _assert_account_active
+        from fastapi import HTTPException
+        row = {"account_status": "banned", "deleted_at": None, "suspend_until": None}
+        with self.assertRaises(HTTPException):
+            _assert_account_active(row)
+
+    def test_auth_verify_google_token_mock_path(self):
+        """Test _verify_google_token mock branch by patching pyjwt.decode."""
+        from app.routers.auth import _verify_google_token
+        from unittest.mock import patch as mpatch
+        fake_payload = {"sub": "12345", "email": "test@gmail.com", "iss": "accounts.google.com"}
+        mock_token = "mock_google_token_anything"
+        with mpatch("app.routers.auth.settings") as ms, \
+             mpatch("app.routers.auth.pyjwt") as mock_pyjwt:
+            ms.environment = "staging"
+            mock_pyjwt.decode.return_value = fake_payload
+            result = _verify_google_token(mock_token)
+        self.assertEqual(result["sub"], "12345")
+
+    def test_auth_verify_apple_token_mock_path(self):
+        """Test _verify_apple_token mock branch by patching pyjwt.decode."""
+        from app.routers.auth import _verify_apple_token
+        from unittest.mock import patch as mpatch
+        fake_payload = {"sub": "apple_uid", "iss": "https://appleid.apple.com"}
+        mock_token = "mock_apple_token_anything"
+        with mpatch("app.routers.auth.settings") as ms, \
+             mpatch("app.routers.auth.pyjwt") as mock_pyjwt:
+            ms.environment = "staging"
+            mock_pyjwt.decode.return_value = fake_payload
+            result = _verify_apple_token(mock_token)
+        self.assertEqual(result["sub"], "apple_uid")
+
+    def test_auth_verify_google_token_invalid_raises(self):
+        """Test _verify_google_token with truly bad token raises HTTPException."""
+        from app.routers.auth import _verify_google_token
+        from fastapi import HTTPException
+        from unittest.mock import patch as mpatch, MagicMock
+        with mpatch("app.routers.auth.settings") as ms:
+            ms.environment = "production"
+            ms.google_client_id = None
+            with mpatch("app.routers.auth._google_jwk_client") as mock_client:
+                mock_client.get_signing_key_from_jwt.side_effect = Exception("bad key")
+                with self.assertRaises(HTTPException):
+                    _verify_google_token("definitely.not.valid")
