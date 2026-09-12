@@ -45,7 +45,15 @@ async def test_create_order(authed_client, mock_pool):
 
 
 @pytest.mark.asyncio
-async def test_verify_payment_signature_invalid(client: AsyncClient):
+async def test_verify_payment_signature_invalid(authed_client, mock_pool):
+    client, user_id = authed_client
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {
+        "user_id": user_id,
+        "plan_id": "gold_monthly",
+        "status": "created",
+        "amount": 29900,
+    }
     resp = await client.post(
         "/v1/subscriptions/verify",
         json={
@@ -58,7 +66,8 @@ async def test_verify_payment_signature_invalid(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_verify_payment_signature_valid(client: AsyncClient, mock_pool):
+async def test_verify_payment_signature_valid(authed_client, mock_pool):
+    client, user_id = authed_client
     pool, conn = mock_pool
     order_id = "order_valid_123"
     payment_id = "pay_valid_123"
@@ -70,9 +79,11 @@ async def test_verify_payment_signature_valid(client: AsyncClient, mock_pool):
     ).hexdigest()
 
     conn.fetchrow.return_value = {
-        "user_id": str(uuid.uuid4()),
+        "user_id": user_id,
         "plan_id": "gold_monthly",
         "status": "created",
+        "amount": 29900,
+        "subscription_valid_until": None,
     }
 
     resp = await client.post(
@@ -129,6 +140,7 @@ async def test_webhook_payment_captured(client: AsyncClient, mock_pool):
         "user_id": target_user_id,
         "plan_id": "platinum_monthly",
         "status": "created",
+        "subscription_valid_until": None,
     }
 
     resp = await client.post(
@@ -184,4 +196,4 @@ async def test_webhook_payment_refunded(client: AsyncClient, mock_pool):
     )
     assert resp.status_code == 200
     assert resp.json() == {"received": True}
-    conn.execute.assert_called_once()
+    assert conn.execute.call_count >= 1

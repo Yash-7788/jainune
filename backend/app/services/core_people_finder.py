@@ -163,6 +163,19 @@ async def fetch_recommended_feed(
                 }
         except Exception as exc:
             log.warning("Atomic feed cache pop failed: %s", exc)
+            try:
+                cached_json = await redis.get(f"feed:cache:{user_id}")
+                if cached_json:
+                    raw_batch = json.loads(cached_json)
+                    batch = raw_batch[:limit]
+                    return {
+                        "candidates": batch,
+                        "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                        "exhausted": False,
+                        "from_cache": True,
+                    }
+            except Exception:
+                pass
 
     # L0 + L1 + L2 + L3: Full pipeline
     candidates = await _run_pipeline(user_id, user_data, db, limit * 2)

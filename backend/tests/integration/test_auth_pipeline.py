@@ -21,12 +21,15 @@ from app.core.security import hash_otp
 @pytest.mark.asyncio
 async def test_request_otp_success(client: AsyncClient, fake_redis):
     phone = "+919876543210"
-    with patch("app.routers.auth._send_otp_msg91", new_callable=AsyncMock) as mock_sms:
+    with (
+        patch("app.routers.auth.dispatch_phone_otp", new_callable=AsyncMock) as mock_sms,
+        patch("app.routers.auth.verify_bot_integrity", return_value=(False, "")),
+    ):
         resp = await client.post("/v1/auth/otp/request", json={"phone_number": phone})
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["data"]["phone_number"] == phone
+        assert data["data"]["phone_number"] == "+919*****3210"
         assert data["data"]["retry_after_seconds"] == 60
         mock_sms.assert_called_once()
 
@@ -38,7 +41,10 @@ async def test_request_otp_success(client: AsyncClient, fake_redis):
 @pytest.mark.asyncio
 async def test_request_otp_rate_limiting(client: AsyncClient):
     phone = "+919999999999"
-    with patch("app.routers.auth._send_otp_msg91", new_callable=AsyncMock):
+    with (
+        patch("app.routers.auth.dispatch_phone_otp", new_callable=AsyncMock),
+        patch("app.routers.auth.verify_bot_integrity", return_value=(False, "")),
+    ):
         # 3 allowed per hour
         for _ in range(3):
             resp = await client.post("/v1/auth/otp/request", json={"phone_number": phone})

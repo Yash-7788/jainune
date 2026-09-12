@@ -11,14 +11,41 @@ JWT signing for tests uses an in-memory RSA key pair generated once per session.
 
 from __future__ import annotations
 
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+if "celery" not in sys.modules:
+    celery_mock = MagicMock()
+    class MockCelery:
+        def __init__(self, *args, **kwargs):
+            self.conf = MagicMock()
+        def task(self, *args, **kwargs):
+            def decorator(fn):
+                fn.delay = MagicMock()
+                fn.apply_async = MagicMock()
+                return fn
+            if len(args) == 1 and callable(args[0]):
+                return decorator(args[0])
+            return decorator
+    celery_mock.Celery = MockCelery
+    sys.modules["celery"] = celery_mock
+    sys.modules["celery.schedules"] = MagicMock()
+
+if "boto3" not in sys.modules:
+    sys.modules["boto3"] = MagicMock()
+    sys.modules["botocore"] = MagicMock()
+    sys.modules["botocore.exceptions"] = MagicMock()
+
 import jwt
 import pytest
 import pytest_asyncio
+import redis
+import redis.asyncio
+import fakeredis
+import fakeredis.aioredis as fakeredis_async
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
@@ -110,8 +137,16 @@ def mock_pool():
     """AsyncMock pool — conn.fetchrow / fetchval / execute all return None by default."""
     pool = MagicMock()
     conn = AsyncMock()
+    del conn.acquire
+    conn.fetchrow.return_value = None
+    conn.fetchval.return_value = None
+    conn.fetch.return_value = []
     pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
     return pool, conn
 
 
@@ -139,10 +174,12 @@ def app(mock_pool, fake_redis):
     """
     pool, _conn = mock_pool
 
-    # Patch pool and redis accessors
+    import app.core.database as db_mod
+    import app.core.redis as redis_mod
+    db_mod._pool = pool
+    redis_mod._redis = fake_redis
+
     with (
-        patch("app.core.database.get_pool", return_value=pool),
-        patch("app.core.redis.get_redis", return_value=fake_redis),
         patch("app.core.database.create_pool", new_callable=AsyncMock),
         patch("app.core.database.close_pool", new_callable=AsyncMock),
         patch("app.core.redis.create_redis", new_callable=AsyncMock),
@@ -150,6 +187,9 @@ def app(mock_pool, fake_redis):
     ):
         from app.main import app as fastapi_app
         yield fastapi_app
+        fastapi_app.dependency_overrides.clear()
+        db_mod._pool = None
+        redis_mod._redis = None
 
 
 @pytest_asyncio.fixture
@@ -171,14 +211,23 @@ def authed_client(client, app):
     Client where get_current_user is overridden to return a fixed test user.
     Use for router tests that don't care about auth mechanics.
     """
-    from app.core.security import get_current_user
+    from app.core.security import get_current_user as sec_get_current_user
+    from app.dependencies import get_current_user as dep_get_current_user
 
     test_user_id = str(uuid.uuid4())
+    uid_obj = uuid.UUID(test_user_id)
+
+    class AuthUser(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError:
+                raise AttributeError(key)
 
     async def _fake_user():
-        return {
-            "user_id": test_user_id,
-            "id": test_user_id,
+        return AuthUser({
+            "user_id": uid_obj,
+            "id": uid_obj,
             "first_name": "Test",
             "phone_number": "+919876543210",
             "account_status": "active",
@@ -195,9 +244,10 @@ def authed_client(client, app):
             "max_distance_km": 30,
             "open_to_relocation": False,
             "paryushan_mode": True,
-        }
+        })
 
-    app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[sec_get_current_user] = _fake_user
+    app.dependency_overrides[dep_get_current_user] = _fake_user
     yield client, test_user_id
     app.dependency_overrides.clear()
 

@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
