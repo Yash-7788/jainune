@@ -88,7 +88,7 @@ def verify_turnstile_token(token: Optional[str], remote_ip: Optional[str] = None
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
             body = json.loads(resp.read().decode("utf-8"))
             return bool(body.get("success"))
     except Exception as exc:

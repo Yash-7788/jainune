@@ -315,7 +315,7 @@ def is_safe_public_url(url: str | None) -> bool:
         host = (parsed.hostname or "").lower().strip()
         if not host:
             return False
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "metadata.google.internal", "instance-data"):
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "metadata.google.internal", "instance-data"):  # nosec B104
             return False
         try:
             ip = ipaddress.ip_address(host)

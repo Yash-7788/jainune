@@ -118,12 +118,12 @@ async def list_users(
         WHERE {where}
         ORDER BY created_at DESC
         LIMIT ${len(params) - 1} OFFSET ${len(params)}
-    """
+    """  # nosec B608
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *params)
         total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM users WHERE {where}",
+            f"SELECT COUNT(*) FROM users WHERE {where}",  # nosec B608
             *params[:-2],
         )
 

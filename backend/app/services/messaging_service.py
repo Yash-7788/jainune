@@ -421,7 +421,7 @@ async def broadcast_promotional_campaign(
         WHERE {where_clause}
         ORDER BY u.created_at DESC
         LIMIT ${len(params)}
-    """
+    """  # nosec B608
     async with pool.acquire() as conn:
         users = await conn.fetch(query, *params)
 

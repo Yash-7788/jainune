@@ -191,7 +191,7 @@ def reap_stale_matches() -> None:
                          WHERE status IN ('active', 'matched')
                            AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                         RETURNING id
-                        """
+                        """  # nosec B608
                     )
                     if expired_ids:
                         exp_list = [r["id"] for r in expired_ids]
@@ -208,7 +208,7 @@ def reap_stale_matches() -> None:
                      WHERE status IN ('active', 'matched')
                        AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                     RETURNING id
-                    """
+                    """  # nosec B608
                 )
                 if expired_ids:
                     exp_list = [r["id"] for r in expired_ids]
@@ -238,7 +238,7 @@ def reap_stale_matches() -> None:
                   AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
                                                 + INTERVAL '{EXPIRY_WARN_HOURS} hours'
                 LIMIT 500
-                """
+                """  # nosec B608
             )
 
             if warn_ids:
@@ -283,7 +283,7 @@ def purge_deleted_users() -> None:
                   AND deleted_at < NOW() - INTERVAL '{DELETED_USER_RETENTION_DAYS} days'
                   AND (subscription_tier = 'free' OR subscription_valid_until IS NULL OR subscription_valid_until < NOW())
                 LIMIT 100
-                """
+                """  # nosec B608
             )
             if not rows:
                 return

@@ -96,7 +96,7 @@ export default function ChatScreen() {
   // Moderation
   const [pendingContent, setPendingContent] = useState<string | null>(null);
   const [detectedType, setDetectedType] = useState<DetectedType>(null);
-  const [chatBlocked, setChatBlocked] = useState(false);
+  const [isSubscriber, setIsSubscriber] = useState(false);
   const [userTier, setUserTier] = useState<string>("free");
   const lastMarkReadTime = useRef(0);
 
@@ -261,8 +261,8 @@ export default function ChatScreen() {
   );
 
   const { isConnected: wsConnected, reconnect } = useWebSocket({
-    matchId,
-    onEvent: handleWsEvent,
+    chatId: matchId,
+    onMessage: handleWsEvent,
     enabled: Boolean(matchId && !chatBlocked),
   });
 

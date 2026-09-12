@@ -21,6 +21,7 @@ export interface UseWebSocketOptions {
   onTyping?: (senderId: string) => void;
   onReadReceipt?: (senderId: string, messageId?: string) => void;
   onPermanentFailure?: () => void;
+  enabled?: boolean;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -31,6 +32,7 @@ export function useWebSocket({
   onTyping,
   onReadReceipt,
   onPermanentFailure,
+  enabled = true,
 }: UseWebSocketOptions) {
   const [status, setStatus] = useState<WebSocketStatus>("disconnected");
   const ws = useRef<WebSocket | null>(null);
@@ -70,7 +72,7 @@ export function useWebSocket({
   }, []);
 
   const connect = useCallback(async () => {
-    if (!chatId || !isMounted.current) return;
+    if (!chatId || !isMounted.current || !enabled) return;
     cleanup();
     setStatus("connecting");
 
@@ -159,7 +161,12 @@ export function useWebSocket({
   useEffect(() => {
     isMounted.current = true;
     reconnectAttempts.current = 0;
-    connect();
+    if (enabled) {
+      connect();
+    } else {
+      cleanup();
+      setStatus("disconnected");
+    }
 
     // Reconnect when app returns from background; teardown on background/inactive
     const subscription = AppState.addEventListener(

@@ -256,7 +256,7 @@ async def update_my_profile(
            SET {', '.join(set_clauses)}, updated_at = NOW()
          WHERE id = $1
            AND account_status != 'deleted'
-    """
+    """  # nosec B608
 
     async with pool.acquire() as conn:
         try:

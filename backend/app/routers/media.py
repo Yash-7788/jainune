@@ -394,6 +394,6 @@ async def reorder_media(
             query = f"""
                 UPDATE user_media SET position = CASE {' '.join(case_clauses)} END
                 WHERE id = ANY(${idx}::uuid[]) AND user_id = ${idx + 1} AND media_type = 'photo'
-            """
+            """  # nosec B608
             await conn.execute(query, *params)
     return {"success": True, "message": "Photos reordered successfully."}

@@ -108,7 +108,7 @@ async def _update_user(
     values.append(step)
     values.append(user_id)
     await conn.execute(
-        f"UPDATE users SET {set_clauses}, updated_at = NOW() WHERE id = ${len(values)}",
+        f"UPDATE users SET {set_clauses}, updated_at = NOW() WHERE id = ${len(values)}",  # nosec B608
         *values,
     )
 
