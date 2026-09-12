@@ -39,11 +39,6 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
-      - name: Prebuild Android project
-        run: |
-          cd mobile
-          npx expo prebuild --platform android --no-install
-
       - name: Build Android AAB
         run: |
           cd mobile/android
@@ -76,9 +71,17 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
-      - name: Validate iOS Native Configuration
+      - name: Prebuild iOS project
+        run: |
+          cd mobile
+          npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods
         run: |
           cd mobile/ios
-          test -f Jainune/Info.plist && echo "Info.plist present"
-          test -f Jainune/Jainune.entitlements && echo "Jainune.entitlements present"
+          pod install
 
+      - name: Build iOS Workspace (Compilation Check)
+        run: |
+          cd mobile/ios
+          xcodebuild -workspace Jainune.xcworkspace -scheme Jainune -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO clean build

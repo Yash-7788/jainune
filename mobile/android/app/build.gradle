@@ -63,7 +63,7 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-            signingConfig signingConfigs.release
+            signingConfig (project.hasProperty("JAINUNE_RELEASE_STORE_FILE") ? signingConfigs.release : signingConfigs.debug)
         }
     }
 
