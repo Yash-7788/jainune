@@ -83,7 +83,10 @@ async def run_migrations():
 
             # In PostgreSQL, CONCURRENTLY and VACUUM cannot run inside explicit transaction blocks
             if "CONCURRENTLY" in sql_content.upper() or "VACUUM" in sql_content.upper():
-                await conn.execute(sql_content)
+                for stmt in sql_content.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        await conn.execute(stmt)
                 await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
             else:
                 async with conn.transaction():
@@ -131,7 +134,10 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
                 down_sql = f.read()
 
             if "CONCURRENTLY" in down_sql.upper() or "VACUUM" in down_sql.upper():
-                await conn.execute(down_sql)
+                for stmt in down_sql.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        await conn.execute(stmt)
                 await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
             else:
                 async with conn.transaction():
