@@ -77,26 +77,6 @@ export default function ChatsScreen() {
     }, [load])
   );
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={colors.saffron} />
-      </View>
-    );
-  }
-
-  if (error) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.emptyTitle}>Our Servers Need a Chai Break ☕</Text>
-        <Text style={styles.emptyDesc}>{error.message}</Text>
-        <TouchableOpacity style={styles.retryBtn} onPress={() => load()}>
-          <Text style={styles.retryBtnText}>Retry</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
   const renderItem = useCallback(
     ({ item }: { item: ChatThread }) => {
       const momentum = getMomentumLabel(item.momentum_expires_at);
@@ -169,6 +149,26 @@ export default function ChatsScreen() {
     },
     [navigation]
   );
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.saffron} />
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.emptyTitle}>Our Servers Need a Chai Break ☕</Text>
+        <Text style={styles.emptyDesc}>{error.message}</Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={() => load()}>
+          <Text style={styles.retryBtnText}>Retry</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>

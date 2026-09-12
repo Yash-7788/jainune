@@ -257,7 +257,7 @@ export async function purchaseSubscription(
         razorpay_signature: paymentResult.razorpay_signature,
       });
 
-      await clearPendingPayment();
+      await clearPendingPayment(paymentResult.razorpay_order_id);
 
       return {
         success: true,

@@ -5,7 +5,7 @@
  */
 
 import React, { useEffect, useRef, useCallback } from "react";
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import { View, ActivityIndicator, StyleSheet, Linking as RNLinking } from "react-native";
 import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
@@ -256,6 +256,54 @@ export default function AppNavigator() {
       }
     }
   }, [authState]);
+
+  const handleDeepLinkUrl = useCallback(
+    (url: string) => {
+      try {
+        const parsed = Linking.parse(url);
+        const path = (parsed.path ?? "").replace(/^\/+/, "");
+        if (!path) return;
+        if (path.startsWith("chat/")) {
+          const matchId = path.split("/")[1];
+          if (matchId) {
+            routeOrQueue("Chat", { matchId, otherUser: { id: "", first_name: "Match" } });
+          }
+        } else if (path === "subscriptions") {
+          routeOrQueue("Subscriptions", undefined);
+        } else if (path === "settings") {
+          routeOrQueue("Settings", undefined);
+        } else if (path === "profile/edit") {
+          routeOrQueue("EditProfile", undefined);
+        } else if (path === "likes") {
+          routeOrQueue("MainTabs", { screen: "Likes" });
+        } else if (path === "chats") {
+          routeOrQueue("MainTabs", { screen: "Chats" });
+        } else if (path === "profile") {
+          routeOrQueue("MainTabs", { screen: "Profile" });
+        } else if (path === "feed") {
+          routeOrQueue("MainTabs", { screen: "Feed" });
+        }
+      } catch {}
+    },
+    [routeOrQueue]
+  );
+
+  useEffect(() => {
+    // Intercept cold-boot deep link
+    RNLinking.getInitialURL()
+      .then((url: string | null) => {
+        if (url) handleDeepLinkUrl(url);
+      })
+      .catch(() => {});
+
+    const sub = RNLinking.addEventListener("url", (event: { url: string }) => {
+      if (event.url) handleDeepLinkUrl(event.url);
+    });
+
+    return () => {
+      sub.remove();
+    };
+  }, [handleDeepLinkUrl]);
 
   useEffect(() => {
     const cleanup = setupNotificationListeners((name, params) => {

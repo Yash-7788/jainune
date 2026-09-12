@@ -39,6 +39,11 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
+      - name: Prebuild Android project
+        run: |
+          cd mobile
+          npx expo prebuild --platform android --no-install
+
       - name: Build Android AAB
         run: |
           cd mobile/android

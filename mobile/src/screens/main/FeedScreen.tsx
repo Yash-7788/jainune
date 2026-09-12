@@ -258,9 +258,17 @@ export default function FeedScreen() {
   );
 
   const openChat = (chatId: string) => {
+    const candidate = matchCandidate;
     setMatch(null);
     setMatchCandidate(null);
-    navigation.navigate("Chat", { matchId: chatId, otherUser: matchCandidate });
+    navigation.navigate("Chat", {
+      matchId: chatId,
+      otherUser: {
+        id: candidate?.id ?? "",
+        first_name: candidate?.first_name ?? "Match",
+        photo_url: candidate?.photos?.[0]?.url ?? null,
+      },
+    });
   };
 
   // ── UI States ────────────────────────────────────────────────────────────────

@@ -205,14 +205,8 @@ async function verifyApkSignatureIntegrity(): Promise<boolean> {
     return false;
   }
 
-  if (!__DEV__) {
-    if (!EXPECTED_RELEASE_CERT_SHA256) {
-      // Release integrity value must not silently disable itself in production
-      return true;
-    }
-    if (!NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
-      return true;
-    }
+  // When configured via EXPO_PUBLIC_RELEASE_CERT_SHA256, verify APK has not been resigned
+  if (EXPECTED_RELEASE_CERT_SHA256 && NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
     try {
       const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
       if (!currentFingerprint || currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()) {
@@ -220,22 +214,10 @@ async function verifyApkSignatureIntegrity(): Promise<boolean> {
       }
       return false;
     } catch {
-      return true;
+      return !__DEV__;
     }
   }
 
-  // Development / Expo Go
-  if (EXPECTED_RELEASE_CERT_SHA256 && NativeModules.JainuneSecurityModule?.getAppCertificateFingerprint) {
-    try {
-      const currentFingerprint = await NativeModules.JainuneSecurityModule.getAppCertificateFingerprint();
-      if (
-        currentFingerprint &&
-        currentFingerprint.toLowerCase() !== EXPECTED_RELEASE_CERT_SHA256.toLowerCase()
-      ) {
-        return true;
-      }
-    } catch {}
-  }
   return false;
 }
 
