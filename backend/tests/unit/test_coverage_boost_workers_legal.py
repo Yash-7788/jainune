@@ -289,3 +289,173 @@ class TestCoverageBoost(unittest.TestCase):
 
             purge_res = asyncio.run(purge_user_account(uid, mock_conn, mock_redis))
             self.assertEqual(purge_res["status"], "purged")
+
+    def test_stable_marriage_non_bipartite_pool(self):
+        """Test Gale-Shapley engine with open/nonbinary pool covering generalized reciprocal deferred acceptance."""
+        from app.services.stable_marriage import StableMarriageEngine
+        engine = StableMarriageEngine()
+        u1 = str(uuid.uuid4())
+        u2 = str(uuid.uuid4())
+        u3 = str(uuid.uuid4())
+        users = [
+            {"id": u1, "gender": "nonbinary", "show_me": "everyone"},
+            {"id": u2, "gender": "man", "show_me": "everyone"},
+            {"id": u3, "gender": "woman", "show_me": "everyone"},
+        ]
+        queues = {
+            u1: [u2, u3],
+            u2: [u1, u3],
+            u3: [u1, u2],
+        }
+        res = engine.compute(users, queues)
+        self.assertIsInstance(res, list)
+
+    def test_users_router_endpoints_direct(self):
+        """Test users router endpoints directly via unit test."""
+        from app.routers.users import pause_account, unpause_account, list_blocked_users
+        uid = uuid.uuid4()
+        user = {"user_id": uid, "id": uid}
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_conn.fetch = AsyncMock(return_value=[{"blocked_id": uuid.uuid4(), "created_at": "2026-01-01"}])
+
+        class MockDB:
+            def acquire(self):
+                class CM:
+                    async def __aenter__(self): return mock_conn
+                    async def __aexit__(self, *args): pass
+                return CM()
+
+        pool = MockDB()
+        res_pause = asyncio.run(pause_account(user, pool))
+        self.assertTrue(res_pause["is_paused"])
+
+        res_unpause = asyncio.run(unpause_account(user, pool))
+        self.assertFalse(res_unpause["is_paused"])
+
+        res_blocks = asyncio.run(list_blocked_users(user, pool))
+        self.assertEqual(len(res_blocks["blocked_users"]), 1)
+
+    def test_chats_router_endpoints_direct(self):
+        """Test chats router endpoints directly via unit test."""
+        from app.routers.chats import mark_read, unmatch_chat
+        uid = uuid.uuid4()
+        other_id = uuid.uuid4()
+        chat_id = uuid.uuid4()
+        user = {"id": uid, "user_id": uid}
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_conn.fetchrow = AsyncMock(return_value={
+            "id": chat_id,
+            "participant_1_id": uid,
+            "participant_2_id": other_id,
+            "is_unmatched": False,
+            "is_expired": False,
+            "expires_at": None,
+            "match_id": uuid.uuid4(),
+        })
+        mock_conn.transaction.return_value = DummyAsyncTx()
+
+        class MockDB:
+            def acquire(self):
+                class CM:
+                    async def __aenter__(self): return mock_conn
+                    async def __aexit__(self, *args): pass
+                return CM()
+
+        pool = MockDB()
+        mock_redis = MagicMock()
+        mock_redis.delete = AsyncMock()
+        mock_redis.publish = AsyncMock()
+        mock_redis.pipeline.return_value = MagicMock(execute=AsyncMock())
+
+        res_read = asyncio.run(mark_read(chat_id, user, pool, redis=mock_redis))
+        self.assertEqual(res_read.status_code, 204)
+
+        res_unmatch = asyncio.run(unmatch_chat(chat_id, user, pool, redis=mock_redis))
+        self.assertTrue(res_unmatch["success"])
+
+    def test_onboarding_direct_steps(self):
+        """Direct unit execution of all onboarding steps 2-21 for 100% reliable coverage."""
+        from app.models.schemas.user import (
+            Step02BasicInfoBody, Step03GenderBody, Step04ShowMeBody, Step05LookingForBody,
+            Step06DietaryStrictnessBody, Step07DietaryDetailsBody, Step08CommunitySectBody,
+            Step09ParyushanBody, Step10CityBody, Step12DistanceBody, Step13RelocationBody,
+            Step14HeightBody, Step15CareerBody, Step16EducationBody, Step17BioBody,
+            Step18PromptsBody, Step19PhotosBody, Step20VoiceSnapshotBody, Step21ConsentBody
+        )
+        from app.routers.onboarding import (
+            step2_basic_info, step3_gender, step4_show_me, step5_looking_for,
+            step6_dietary_strictness, step7_dietary_details, step8_community_sect,
+            step9_paryushan, step10_city, step12_distance, step13_relocation,
+            step14_height, step15_career, step16_education, step17_bio,
+            step18_prompts, step19_photos, step20_voice_snapshot, step21_consent
+        )
+        uid = uuid.uuid4()
+        mid = uuid.uuid4()
+        class MockUser:
+            def __init__(self, u): self.id = u
+            def get(self, k, d=None): return self.id if k in ("user_id", "id") else d
+            def __getitem__(self, k): return self.id
+
+        user = MockUser(uid)
+        mock_conn = MagicMock()
+        del mock_conn.acquire
+        mock_conn.fetchrow = AsyncMock(return_value={"onboarding_completed": False, "location": True, "id": mid})
+        mock_conn.fetch = AsyncMock(return_value=[{"id": mid, "prompt_key": "q1", "response_text": "a", "position": 1}])
+        mock_conn.fetchval = AsyncMock(return_value=True)
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_conn.transaction.return_value = DummyAsyncTx()
+
+        class MockDB:
+            def acquire(self):
+                class CM:
+                    async def __aenter__(self): return mock_conn
+                    async def __aexit__(self, *args): pass
+                return CM()
+
+        db = MockDB()
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=None)
+        redis.set = AsyncMock(return_value=True)
+        redis.delete = AsyncMock(return_value=True)
+        redis.pipeline.return_value = MagicMock(execute=AsyncMock())
+
+        s2 = asyncio.run(step2_basic_info(Step02BasicInfoBody(first_name="Aarav", date_of_birth="1998-05-15"), user, db, redis))
+        self.assertTrue(s2["success"])
+        s3 = asyncio.run(step3_gender(Step03GenderBody(gender="man"), user, db, redis))
+        self.assertTrue(s3["success"])
+        s4 = asyncio.run(step4_show_me(Step04ShowMeBody(show_me="women"), user, db, redis))
+        self.assertTrue(s4["success"])
+        s5 = asyncio.run(step5_looking_for(Step05LookingForBody(looking_for="marriage"), user, db, redis))
+        self.assertTrue(s5["success"])
+        s6 = asyncio.run(step6_dietary_strictness(Step06DietaryStrictnessBody(dietary_strictness="pure_jain"), user, db, redis))
+        self.assertTrue(s6["success"])
+        s7 = asyncio.run(step7_dietary_details(Step07DietaryDetailsBody(eats_root_vegetables=False, eats_onion_garlic=False), user, db, redis))
+        self.assertTrue(s7["success"])
+        s8 = asyncio.run(step8_community_sect(Step08CommunitySectBody(community_sect="shwetambar_murtipujak"), user, db, redis))
+        self.assertTrue(s8["success"])
+        s9 = asyncio.run(step9_paryushan(Step09ParyushanBody(paryushan_mode=True), user, db, redis))
+        self.assertTrue(s9["success"])
+        s10 = asyncio.run(step10_city(Step10CityBody(city="Mumbai", state="Maharashtra"), user, db, redis))
+        self.assertTrue(s10["success"])
+        s12 = asyncio.run(step12_distance(Step12DistanceBody(max_distance_km=50), user, db, redis))
+        self.assertTrue(s12["success"])
+        s13 = asyncio.run(step13_relocation(Step13RelocationBody(open_to_relocation=True), user, db, redis))
+        self.assertTrue(s13["success"])
+        s14 = asyncio.run(step14_height(Step14HeightBody(height_cm=175), user, db, redis))
+        self.assertTrue(s14["success"])
+        s15 = asyncio.run(step15_career(Step15CareerBody(job_title="Engineer", company="Tech"), user, db, redis))
+        self.assertTrue(s15["success"])
+        s16 = asyncio.run(step16_education(Step16EducationBody(education="B.Tech"), user, db, redis))
+        self.assertTrue(s16["success"])
+        s17 = asyncio.run(step17_bio(Step17BioBody(bio="Devout Jain looking for companion"), user, db, redis))
+        self.assertTrue(s17["success"])
+        s18 = asyncio.run(step18_prompts(Step18PromptsBody(prompts=[{"prompt_key": "q1", "response_text": "Ahimsa always", "position": 1}]), user, db, redis))
+        self.assertTrue(s18["success"])
+        s19 = asyncio.run(step19_photos(Step19PhotosBody(media_ids=[mid]), user, db, redis))
+        self.assertTrue(s19["success"])
+        s20 = asyncio.run(step20_voice_snapshot(Step20VoiceSnapshotBody(media_id=mid), user, db, redis))
+        self.assertTrue(s20["success"])
+        s21 = asyncio.run(step21_consent(Step21ConsentBody(core_matchmaking=True, family_contact_gotra=False, relocation_intercity=True, marketing=False), user, db, redis))
+        self.assertTrue(s21["success"])
