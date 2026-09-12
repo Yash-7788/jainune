@@ -577,3 +577,99 @@ class TestCoverageBoost(unittest.TestCase):
                 mock_client.get_signing_key_from_jwt.side_effect = Exception("bad key")
                 with self.assertRaises(HTTPException):
                     _verify_google_token("definitely.not.valid")
+
+    # ── Feed router direct coverage ───────────────────────────────────────────
+
+    def test_feed_get_daily_compatible_with_candidate(self):
+        """Cover get_daily_compatible lines 118-139 — candidate present."""
+        from app.routers.feed import get_daily_compatible
+        uid = uuid.uuid4()
+        user = {"id": str(uid), "onboarding_completed": True}
+        db = MagicMock()
+        redis = AsyncMock()
+        candidate = {
+            "id": str(uuid.uuid4()),
+            "pairing_algorithm": "brre_v2",
+            "_behavioral_affinity": 0.9,
+            "_cultural_score": 0.8,
+        }
+        with patch("app.routers.feed.sliding_window_rate_limit", new=AsyncMock()), \
+             patch("app.routers.feed.fetch_daily_compatible", new=AsyncMock(return_value=candidate)):
+            result = asyncio.run(get_daily_compatible(user, db, redis))
+        self.assertIsNotNone(result.locked_until)
+        self.assertEqual(result.pairing_algorithm, "brre_v2")
+        # Internal fields stripped
+        self.assertNotIn("_behavioral_affinity", result.candidate or {})
+
+    def test_feed_get_daily_compatible_no_candidate(self):
+        """Cover get_daily_compatible — no candidate (None)."""
+        from app.routers.feed import get_daily_compatible
+        uid = uuid.uuid4()
+        user = {"id": str(uid)}
+        db = MagicMock()
+        redis = AsyncMock()
+        with patch("app.routers.feed.sliding_window_rate_limit", new=AsyncMock()), \
+             patch("app.routers.feed.fetch_daily_compatible", new=AsyncMock(return_value=None)):
+            result = asyncio.run(get_daily_compatible(user, db, redis))
+        self.assertIsNone(result.candidate)
+        self.assertEqual(result.pairing_algorithm, "none")
+
+    def test_feed_get_feed_cache_hit_path(self):
+        """Cover get_feed cache-hit branch (refresh=False, cache populated) lines 45-60."""
+        from app.routers.feed import get_feed
+        uid = uuid.uuid4()
+        user = {"id": str(uid), "location": None}
+        db = MagicMock()
+        redis = AsyncMock()
+        cached_profiles = [{"id": str(uuid.uuid4())} for _ in range(20)]
+        feed_result = {
+            "candidates": [{"id": str(uuid.uuid4()), "_behavioral_affinity": 0.5, "_cultural_score": 0.3}],
+            "total": 1,
+            "has_more": False,
+            "batch_id": str(uuid.uuid4()),
+            "exhausted": False,
+        }
+        with patch("app.routers.feed.sliding_window_rate_limit", new=AsyncMock()), \
+             patch("app.services.core_people_finder._get_cached_feed", new=AsyncMock(return_value=cached_profiles)), \
+             patch("app.routers.feed.fetch_recommended_feed", new=AsyncMock(return_value=feed_result)):
+            result = asyncio.run(get_feed(user, db, redis, limit=15, refresh=False))
+        self.assertIsInstance(result.candidates, list)
+
+    def test_feed_get_feed_refresh_path(self):
+        """Cover get_feed force-refresh path lines 63-98 (DB acquire branch)."""
+        from app.routers.feed import get_feed
+        uid = uuid.uuid4()
+        user = {"id": str(uid), "location": None}
+        db = MagicMock()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(return_value={"location": None, "revealed_preference_vector": None})
+        db.acquire = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=conn), __aexit__=AsyncMock(return_value=False)))
+        redis = AsyncMock()
+        feed_result = {
+            "candidates": [{"id": str(uuid.uuid4()), "_behavioral_affinity": 0.5, "_cultural_score": 0.3}],
+            "total": 1,
+            "has_more": False,
+            "batch_id": str(uuid.uuid4()),
+            "exhausted": False,
+        }
+        with patch("app.routers.feed.sliding_window_rate_limit", new=AsyncMock()), \
+             patch("app.routers.feed.fetch_recommended_feed", new=AsyncMock(return_value=feed_result)):
+            result = asyncio.run(get_feed(user, db, redis, limit=15, refresh=True))
+        self.assertIsInstance(result.candidates, list)
+
+    def test_feed_get_feed_refresh_user_not_found(self):
+        """Cover get_feed 404 branch when DB returns None (lines 74-78)."""
+        from app.routers.feed import get_feed
+        from fastapi import HTTPException
+        uid = uuid.uuid4()
+        user = {"id": str(uid)}
+        db = MagicMock()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(return_value=None)
+        db.acquire = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=conn), __aexit__=AsyncMock(return_value=False)))
+        redis = AsyncMock()
+        with patch("app.routers.feed.sliding_window_rate_limit", new=AsyncMock()):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(get_feed(user, db, redis, limit=15, refresh=True))
+        self.assertEqual(ctx.exception.status_code, 404)
+
