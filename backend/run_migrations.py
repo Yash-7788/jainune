@@ -15,10 +15,16 @@ DOWN_MIGRATIONS_DIR = MIGRATIONS_DIR / "down"
 
 def sanitize_migration_sql(sql_content: str) -> str:
     cleaned = []
+    in_dollar_block = False
     for line in sql_content.splitlines():
-        stmt = line.strip().rstrip(";").strip().upper()
-        if stmt in ("BEGIN", "COMMIT", "START TRANSACTION", "BEGIN TRANSACTION"):
+        if "$$" in line and (line.count("$$") % 2 == 1):
+            in_dollar_block = not in_dollar_block
+            cleaned.append(line)
             continue
+        if not in_dollar_block:
+            stmt = line.strip().rstrip(";").strip().upper()
+            if stmt in ("BEGIN", "COMMIT", "START TRANSACTION", "BEGIN TRANSACTION"):
+                continue
         cleaned.append(line)
     return "\n".join(cleaned)
 
@@ -37,6 +43,20 @@ async def run_migrations():
             CREATE EXTENSION IF NOT EXISTS "pgcrypto";
             CREATE EXTENSION IF NOT EXISTS "postgis";
             CREATE EXTENSION IF NOT EXISTS "vector";
+            CREATE SCHEMA IF NOT EXISTS auth;
+            CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid AS $$
+                SELECT NULL::uuid;
+            $$ LANGUAGE sql STABLE;
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
+                    CREATE ROLE authenticator;
+                END IF;
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN
+                    CREATE ROLE anon;
+                END IF;
+            END
+            $$;
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version VARCHAR(128) PRIMARY KEY,
                 applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
