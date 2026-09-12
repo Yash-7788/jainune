@@ -114,7 +114,13 @@ class Settings(BaseSettings):
             import os
             if not self.fcm_service_account_path or not os.path.isfile(self.fcm_service_account_path):
                 errors.append(f"fcm_service_account_path '{self.fcm_service_account_path}' not found")
-            if self.store_webhook_secret and (self.store_webhook_secret.startswith("test_") or "mock" in self.store_webhook_secret):
+            if not self.jwt_secret_key or self.jwt_secret_key == "default_jwt_hmac_secret_32_bytes_len" or len(self.jwt_secret_key) < 32:
+                errors.append("jwt_secret_key must be set to a cryptographically random secret (>=32 chars) without default values; used for refresh-token grace HMAC")
+            if not self.razorpay_webhook_secret or self.razorpay_webhook_secret in ("test_rzp_webhook_secret", "") or self.razorpay_webhook_secret.startswith("test_"):
+                errors.append("razorpay_webhook_secret must be set to a production Razorpay webhook signing secret (cannot use test/default value in production)")
+            if not self.store_webhook_secret:
+                errors.append("store_webhook_secret must be set in production; without it all App Store / Google Play subscription lifecycle events are silently rejected (403)")
+            elif self.store_webhook_secret.startswith("test_") or "mock" in self.store_webhook_secret:
                 errors.append("store_webhook_secret cannot use test/mock credentials in production")
 
             if errors:

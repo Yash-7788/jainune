@@ -326,15 +326,25 @@ public class JainuneSecurityModule extends ReactContextBaseJavaModule {
   // ── Certificate Pinning ──────────────────────────────────────────────────────
 
   /**
-   * Configures SSL/TLS Subject Public Key Info (SPKI) pins at native network layer.
+   * NOTE (F-10): Certificate pinning is enforced at the OS level via
+   * res/xml/network_security_config.xml (SPKI pins for api.jainune.com with
+   * backup pins). This OS-level enforcement defeats Frida SSL unpinning.
+   *
+   * This bridge method does NOT configure additional runtime pins — the
+   * standard Android OkHttp/HttpsURLConnection stack reads pinning config from
+   * the XML manifest, not from a runtime call. Implementing runtime pin updates
+   * would require integrating TrustKit or a custom SSLSocketFactory.
+   *
+   * Result: this method is intentionally a no-op acknowledgment that OS-level
+   * pinning is active. Do not call this as proof that runtime pin reconfiguration
+   * has occurred — it has not.
    */
   @ReactMethod
   public void setCertificatePins(ReadableArray pins, Promise promise) {
-    try {
-      if (promise != null) promise.resolve(true);
-    } catch (Exception e) {
-      if (promise != null) promise.reject("PIN_ERROR", e.getMessage());
-    }
+    // OS-level SPKI pinning is active via network_security_config.xml.
+    // Runtime pin reconfiguration via this bridge is not implemented.
+    // See manifest res/xml/network_security_config.xml for pin definitions.
+    if (promise != null) promise.resolve(true);
   }
 
   // ── Emergency Storage Purge ──────────────────────────────────────────────────

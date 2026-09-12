@@ -169,7 +169,8 @@ export default function EditProfileScreen() {
         const presign = await presignUpload("audio/m4a", 1024 * 1024, "voice");
         await uploadToPresignedUrl(presign.upload_url, uri, "audio/m4a", presign.presigned_fields);
         const res = await updateVoiceSnapshot(presign.media_id);
-        setVoiceSnapshotUrl(res.voice_snapshot_url || presign.cdn_url);
+        // F-12: use local URI for preview; real CDN URL populates after moderation
+        setVoiceSnapshotUrl(res.voice_snapshot_url || uri);
         Alert.alert("Voice Snapshot Updated", "Your new 7-second voice snippet is now live on your profile!");
       } catch (err) {
         Alert.alert("Voice Upload Error", extractError(err).message);
@@ -205,7 +206,7 @@ export default function EditProfileScreen() {
       await addPhoto(presign.media_id);
       setPhotos((prev) => [
         ...prev,
-        { id: presign.media_id, url: presign.cdn_url, order: prev.length },
+        { id: presign.media_id, url: asset.uri, order: prev.length },
       ]);
     } catch (err) {
       Alert.alert("Upload Failed", extractError(err).message);

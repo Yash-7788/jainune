@@ -257,7 +257,7 @@ async def confirm_upload(
     Sets media status to 'processing' and enqueues AWS Rekognition moderation.
     CDN URL is populated once moderation passes.
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:media:confirm:{user_id}", 30, 60, redis)
 
     # Atomic: only transition pending → processing; ignore if already in another state

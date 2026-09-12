@@ -74,7 +74,7 @@ async def list_chats(
     Returns all active chat threads for the current user, ordered by most
     recent message. Includes other participant's name, photo, and last message.
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:chats:list:{user_id}", 60, 60, redis)
 
@@ -202,7 +202,7 @@ async def get_messages(
     cursor: Optional[str] = Query(default=None, description="Cursor alias for pagination"),
     redis: RedisDep = None,
 ) -> ChatHistoryResponse:
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:chats:get:{user_id}", 60, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
@@ -305,7 +305,7 @@ async def send_message(
     `chat:{chat_id}` so the WebSocket handler fans it out to both participants.
     Applies Roblox-style chat safety filters and moderation.
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:chats:msg:{user_id}", 60, 60, redis)
 
     async with db.acquire() as conn:
@@ -556,7 +556,7 @@ async def mark_read(
     db: DBDep,
     redis: RedisDep = None,
 ) -> Response:
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:chats:read:{user_id}", 60, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
@@ -592,7 +592,7 @@ async def unmatch_chat(
     2. Purges both users' feed session caches in Redis.
     3. Blocks future messaging attempts with 403 Forbidden.
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:chats:unmatch:{user_id}", 15, 60, redis)
     chat = await _assert_participant(chat_id, user_id, db)
     actual_chat_id = chat["id"]

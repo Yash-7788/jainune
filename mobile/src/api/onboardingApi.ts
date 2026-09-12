@@ -248,7 +248,7 @@ export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<Pr
     media_type: type,
     content_type: type === "photo" ? "image/jpeg" : "audio/m4a",
     file_size_bytes: type === "photo" ? 2 * 1024 * 1024 : 1024 * 1024,
-    position: 0,
+    position: 1,
   });
   if (!res.success) throw { _apiError: res.error };
   return {

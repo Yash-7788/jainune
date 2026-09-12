@@ -134,7 +134,7 @@ async def record_interaction_action(
     - `super_connect` costs 1 Jainune+ credit (enforced server-side)
     - On match: both feed caches are invalidated, match + chat rows created atomically
     """
-    actor_id = uuid.UUID(str(current_user["id"]))
+    actor_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     target_id = body.target_id
 
     # Anti-bot rate limit: max 60 actions per minute per user (SECURITY.md 8.1)
@@ -382,7 +382,7 @@ async def record_interaction_action(
     elif body.action in ("like", "super_connect"):
         try:
             from app.workers.notification_worker import notify_new_like
-            notify_new_like.delay(str(target_id), current_user.get("first_name", "Someone"))
+            notify_new_like.delay(str(target_id), current_user.get("first_name", "Someone"), str(actor_id))
         except Exception:
             pass
 
@@ -410,7 +410,7 @@ async def get_my_matches(
     redis: RedisDep = None,
 ) -> dict:
     """Fetch all active mutual matches for the authenticated user."""
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:interactions:matches:{user_id}", 30, 60, redis)
 
@@ -489,7 +489,7 @@ async def get_users_who_liked_me(
     redis: RedisDep = None,
 ) -> dict:
     """Fetch incoming likes from other users (server-side redacted for free tier)."""
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:interactions:liked_me:{user_id}", 30, 60, redis)
 

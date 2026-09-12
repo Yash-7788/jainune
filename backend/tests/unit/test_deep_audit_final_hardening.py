@@ -1067,7 +1067,8 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(res_revoked["status"], "revoked")
             self.assertTrue(any("SET subscription_tier        = 'free'" in s for s in executed_sqls))
-            self.assertTrue(any("super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - 5)" in s for s in executed_sqls))
+            # N-02 fix: credit claw-back is now parameterized ($3) not hardcoded (-5)
+            self.assertTrue(any("super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - $3)" in s for s in executed_sqls))
 
     async def test_31_apns_bad_device_token_pruning(self):
         """APNs BadDeviceToken / DeviceTokenNotForTopic error triggers token nullification."""
@@ -1754,6 +1755,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             database_url="postgresql://app_prod:prod_pw_9921@db-cluster.internal.jainune.com:5432/jainune_production",
             razorpay_key_id="rzp_live_k8a92j1h829",
             razorpay_key_secret="live_rzp_secret_key_89218291",
+            razorpay_webhook_secret="live_rzp_webhook_secret_prod_99182918",  # F-02/R-02
             aws_access_key_id="AKIA_PROD_LIVE_KEY_992",
             aws_secret_access_key="prod_live_aws_secret_value_39182918",
             msg91_auth_key="msg91_live_auth_token_88291",
@@ -1765,6 +1767,8 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             apple_bundle_id="com.jainune.app",
             smtp_host="smtp.sendgrid.net",
             fcm_service_account_path=__file__,
+            jwt_secret_key="prod_jwt_hmac_secret_key_very_secure_min_32_bytes!",  # F-02
+            store_webhook_secret="prod_store_webhook_secret_apple_google_99182",  # F-06
         )
         self.assertEqual(prod_settings.environment, "production")
 

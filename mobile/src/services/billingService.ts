@@ -98,53 +98,63 @@ export async function clearPendingPayment(orderId?: string): Promise<void> {
   } catch {}
 }
 
+let isSyncingPending = false;
+
 export async function syncPendingPayment(targetOrderId?: string): Promise<PurchaseResult> {
-  const all = await getAllPendingPayments();
-  const pendingList = Object.values(all);
-  if (pendingList.length === 0) {
+  if (isSyncingPending) {
     return { success: false };
   }
+  isSyncingPending = true;
+  try {
+    const all = await getAllPendingPayments();
+    const pendingList = Object.values(all);
+    if (pendingList.length === 0) {
+      return { success: false };
+    }
 
-  for (const pending of pendingList) {
-    if (targetOrderId && pending.order_id !== targetOrderId) continue;
+    for (const pending of pendingList) {
+      if (targetOrderId && pending.order_id !== targetOrderId) continue;
 
-    if (pending.payment_id && pending.signature) {
+      if (pending.payment_id && pending.signature) {
+        try {
+          const verifyRes = await verifySubscriptionPayment({
+            razorpay_order_id: pending.order_id,
+            razorpay_payment_id: pending.payment_id,
+            razorpay_signature: pending.signature,
+          });
+          await clearPendingPayment(pending.order_id);
+          if (verifyRes.activated) {
+            return {
+              success: true,
+              activated: true,
+              expires_at: verifyRes.expires_at,
+            };
+          }
+        } catch {}
+      }
+
       try {
-        const verifyRes = await verifySubscriptionPayment({
-          razorpay_order_id: pending.order_id,
-          razorpay_payment_id: pending.payment_id,
-          razorpay_signature: pending.signature,
-        });
-        await clearPendingPayment(pending.order_id);
-        if (verifyRes.activated) {
+        const syncRes = await syncSubscriptionOrder(pending.order_id);
+        if (syncRes.activated) {
+          await clearPendingPayment(pending.order_id);
           return {
             success: true,
             activated: true,
-            expires_at: verifyRes.expires_at,
+            expires_at: syncRes.expires_at,
           };
         }
       } catch {}
-    }
 
-    try {
-      const syncRes = await syncSubscriptionOrder(pending.order_id);
-      if (syncRes.activated) {
+      // Expire stale pending payment records older than 24 hours
+      if (Date.now() - (pending.timestamp || 0) > 86400000) {
         await clearPendingPayment(pending.order_id);
-        return {
-          success: true,
-          activated: true,
-          expires_at: syncRes.expires_at,
-        };
       }
-    } catch {}
-
-    // Expire stale pending payment records older than 24 hours
-    if (Date.now() - (pending.timestamp || 0) > 86400000) {
-      await clearPendingPayment(pending.order_id);
     }
-  }
 
-  return { success: false };
+    return { success: false };
+  } finally {
+    isSyncingPending = false;
+  }
 }
 
 export const ACTIVE_BILLING_PROVIDER: BillingProvider =
@@ -294,7 +304,16 @@ export async function purchaseArcadeRolls(
     try {
       const NativeIap = (global as any).RNIap || null;
       if (NativeIap && typeof NativeIap.requestPurchase === "function") {
+        // N-11: Record pending consumable purchase before invoking StoreKit
+        const pendingOrderId = `arcade_${productId}_${Date.now()}`;
+        await savePendingPayment({
+          order_id: pendingOrderId,
+          payment_id: productId,
+          signature: "storekit_arcade_pending",
+          timestamp: Date.now(),
+        });
         await NativeIap.requestPurchase({ sku: productId });
+        await clearPendingPayment(pendingOrderId);
         return { success: true };
       }
       if (__DEV__) {

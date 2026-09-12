@@ -36,7 +36,7 @@ async def get_feed(
     - Falls back to PostGIS + pgvector SQL pipeline on cache miss (~25ms)
     - Increments `impressions_last_48h` for shown profiles (Dignity Engine)
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
 
     # Rate limit: 20 feed requests per minute per user (SECURITY.md 10.1)
     await sliding_window_rate_limit(f"ratelimit:feed:{user_id}", 20, 60, redis)
@@ -115,7 +115,7 @@ async def get_daily_compatible(
     - Falls back to top BRRE reciprocal result when nightly job hasn't run
     - Lock resets at midnight IST; users cannot skip their Daily Compatible
     """
-    user_id = uuid.UUID(str(current_user["id"]))
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:feed:daily:{user_id}", 30, 60, redis)
     candidate = await fetch_daily_compatible(user_id=user_id, db=db, redis=redis)
 

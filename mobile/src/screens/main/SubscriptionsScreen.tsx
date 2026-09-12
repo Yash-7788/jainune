@@ -16,7 +16,7 @@
  * - FLAG_SECURE blocks screenshots of payment UI.
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -73,6 +73,7 @@ export default function SubscriptionsScreen() {
   );
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(false);
+  const payingRef = useRef(false);
   const [cancelling, setCancelling] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
@@ -84,8 +85,9 @@ export default function SubscriptionsScreen() {
     }).catch(() => {});
 
     // Sync pending payment when returning from external UPI app (GPay / PhonePe / Paytm)
+    // N-03: Guard against running while handleSubscribe is already in-flight to prevent race condition
     const appStateSub = AppState.addEventListener("change", (nextState: AppStateStatus) => {
-      if (nextState === "active") {
+      if (nextState === "active" && !payingRef.current) {
         syncPendingPayment().then((res) => {
           if (res.activated) fetchStatus();
         }).catch(() => {});
@@ -172,6 +174,7 @@ export default function SubscriptionsScreen() {
   };
 
   const handleSubscribe = async () => {
+    payingRef.current = true;
     setPaying(true);
     try {
       const result = await purchaseSubscription(selectedPlan);
@@ -206,6 +209,7 @@ export default function SubscriptionsScreen() {
         `${friendly.message}\n\nNote: If funds were debited from your account, your subscription will activate automatically once network connection is restored, or be automatically refunded to your bank within 5-7 business days.`
       );
     } finally {
+      payingRef.current = false;
       setPaying(false);
     }
   };

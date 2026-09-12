@@ -189,7 +189,7 @@ async def sliding_window_rate_limit(
 
     member = f"{now_ms}:{secrets.token_hex(4)}"
     try:
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         if hasattr(pipe, "__await__"):
             pipe = await pipe
 

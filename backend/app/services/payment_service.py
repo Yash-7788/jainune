@@ -784,41 +784,166 @@ async def process_store_subscription_event(
             raise ValueError(f"User {target_uid} not found")
 
         # 4. Handle Lifecycle State Transitions
+        # N-08: Wrap users UPDATE + store_subscriptions upsert in a single transaction so
+        # the two writes are always consistent. Redis ops intentionally stay outside.
         now_utc = datetime.now(timezone.utc)
         sub_status = "active"
 
+        async with conn.transaction():
+            if event_type in ("in_grace_period", "billing_retry"):
+                sub_status = "in_grace_period"
+                await conn.execute(
+                    "UPDATE users SET billing_status = 'in_grace_period', updated_at = NOW() WHERE id = $1",
+                    target_uid,
+                )
+                result = {"status": "in_grace_period", "tier": user_row["subscription_tier"]}
+
+            elif event_type == "account_hold":
+                sub_status = "account_hold"
+                # Authoritative DB update (NEW-008)
+                await conn.execute(
+                    "UPDATE users SET billing_status = 'account_hold', updated_at = NOW() WHERE id = $1",
+                    target_uid,
+                )
+                result = {"status": "account_hold", "tier": "free"}
+
+            elif event_type in ("revoked", "expired"):
+                # Explicit expired state transition (NEW-005)
+                sub_status = event_type
+
+                if event_type == "revoked":
+                    # Determine how many credits to claw back based on the plan SKU.
+                    # Each plan grants a specific number of super_connect_credits at purchase;
+                    # revocation must deduct exactly that many (not a hardcoded 5).
+                    sku_credits_map = {
+                        plan_id: plan.get("super_connect_credits", 0)
+                        for plan_id, plan in PLAN_CATALOGUE.items()
+                        if plan.get("super_connect_credits", 0) > 0
+                    }
+                    # Also map store SKU aliases to credit amounts
+                    sku_credits_map.update({
+                        "jainune_plus_1m": 5,
+                        "jainune_plus_3m": 15,
+                        "jainune_plus_6m": 30,
+                        "jainune_plus_12m": 60,
+                        "jainune_gold_1m": 5,
+                        "jainune_gold_3m": 15,
+                        "jainune_gold_12m": 60,
+                        "monthly": 5,
+                        "quarterly": 15,
+                        "annual": 60,
+                        "yearly": 60,
+                    })
+                    credits_to_claw_back = sku_credits_map.get(sku, 5) if sku else 5
+                    await conn.execute(
+                        """
+                        UPDATE users
+                           SET subscription_tier        = 'free',
+                               subscription_valid_until = NULL,
+                               billing_status           = $2,
+                               super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - $3),
+                               updated_at               = NOW()
+                         WHERE id = $1
+                        """,
+                        target_uid,
+                        event_type,
+                        credits_to_claw_back,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                           SET subscription_tier        = 'free',
+                               subscription_valid_until = NULL,
+                               billing_status           = $2,
+                               updated_at               = NOW()
+                         WHERE id = $1
+                        """,
+                        target_uid,
+                        event_type,
+                    )
+                log.info("Store subscription %s: user=%s store=%s", event_type, target_uid, store)
+                result = {"status": event_type, "tier": "free"}
+
+            elif event_type in ("renewed", "active"):
+                sub_status = "active"
+                target_tier = "jainune_plus"
+                if sku:
+                    s_lower = sku.lower()
+                    if "gold" in s_lower:
+                        target_tier = "jainune_gold"
+                    elif "plus" in s_lower:
+                        target_tier = "jainune_plus"
+                elif user_row.get("subscription_tier") in ("jainune_plus", "jainune_gold"):
+                    target_tier = user_row["subscription_tier"]
+
+                current_valid = user_row["subscription_valid_until"]
+                base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
+                new_valid = base_time + timedelta(days=actual_validity_days)
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier        = $1,
+                           subscription_valid_until = $2,
+                           billing_status           = 'active',
+                           updated_at               = NOW()
+                     WHERE id = $3
+                    """,
+                    target_tier,
+                    new_valid,
+                    target_uid,
+                )
+                log.info("Store subscription renewed: user=%s store=%s tier=%s valid_until=%s (days=%d)", target_uid, store, target_tier, new_valid, actual_validity_days)
+                result = {"status": "active", "tier": target_tier, "valid_until": new_valid.isoformat()}
+
+            else:
+                log.warning("Unknown store event type: %s", event_type)
+                result = {"status": "ignored", "event_type": event_type}
+
+            # 5. Persist provider transaction state record (same transaction)
+            if original_transaction_id:
+                try:
+                    expires_at = result.get("valid_until")
+                    exp_dt = datetime.fromisoformat(expires_at) if expires_at else None
+                    await conn.execute(
+                        """
+                        INSERT INTO store_subscriptions (
+                            user_id, store, original_transaction_id, sku, status,
+                            expires_at, last_event_type, last_event_timestamp, updated_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                        ON CONFLICT (store, original_transaction_id)
+                        DO UPDATE SET
+                            user_id = EXCLUDED.user_id,
+                            sku = COALESCE(EXCLUDED.sku, store_subscriptions.sku),
+                            status = EXCLUDED.status,
+                            expires_at = EXCLUDED.expires_at,
+                            last_event_type = EXCLUDED.last_event_type,
+                            last_event_timestamp = GREATEST(COALESCE(store_subscriptions.last_event_timestamp, 0), COALESCE(EXCLUDED.last_event_timestamp, 0)),
+                            updated_at = NOW()
+                        """,
+                        target_uid, store, original_transaction_id, sku, sub_status,
+                        exp_dt, event_type, event_timestamp or int(now_utc.timestamp()),
+                    )
+                except asyncpg.UndefinedTableError:
+                    pass
+
+        # Redis cache invalidation outside the transaction (tolerable staleness)
         if event_type in ("in_grace_period", "billing_retry"):
-            sub_status = "in_grace_period"
             if r:
                 try:
                     await r.set(f"user:{target_uid}:billing_status", "in_grace_period", ex=86400 * 16)
                 except Exception:
                     pass
-            await conn.execute(
-                "UPDATE users SET billing_status = 'in_grace_period', updated_at = NOW() WHERE id = $1",
-                target_uid,
-            )
             log.info("Store subscription grace period active: user=%s store=%s", target_uid, store)
-            result = {"status": "in_grace_period", "tier": user_row["subscription_tier"]}
-
         elif event_type == "account_hold":
-            sub_status = "account_hold"
             if r:
                 try:
                     await r.set(f"user:{target_uid}:billing_status", "account_hold", ex=86400 * 60)
                 except Exception:
                     pass
-            # Authoritative DB update (NEW-008)
-            await conn.execute(
-                "UPDATE users SET billing_status = 'account_hold', updated_at = NOW() WHERE id = $1",
-                target_uid,
-            )
             log.warning("Store subscription account hold placed: user=%s store=%s", target_uid, store)
-            result = {"status": "account_hold", "tier": "free"}
-
         elif event_type in ("revoked", "expired"):
-            # Explicit expired state transition (NEW-005)
-            sub_status = event_type
             if r:
                 try:
                     await r.delete(f"user:{target_uid}:billing_status")
@@ -826,111 +951,17 @@ async def process_store_subscription_event(
                     await r.delete(f"user:{target_uid}:tier")
                 except Exception:
                     pass
-
-            if event_type == "revoked":
-                await conn.execute(
-                    """
-                    UPDATE users
-                       SET subscription_tier        = 'free',
-                           subscription_valid_until = NULL,
-                           billing_status           = $2,
-                           super_connect_credits    = GREATEST(0, COALESCE(super_connect_credits, 0) - 5),
-                           updated_at               = NOW()
-                     WHERE id = $1
-                    """,
-                    target_uid,
-                    event_type,
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE users
-                       SET subscription_tier        = 'free',
-                           subscription_valid_until = NULL,
-                           billing_status           = $2,
-                           updated_at               = NOW()
-                     WHERE id = $1
-                    """,
-                    target_uid,
-                    event_type,
-                )
-            log.info("Store subscription %s: user=%s store=%s", event_type, target_uid, store)
-            result = {"status": event_type, "tier": "free"}
-
         elif event_type in ("renewed", "active"):
-            sub_status = "active"
             if r:
                 try:
                     await r.delete(f"user:{target_uid}:billing_status")
-                except Exception:
-                    pass
-
-            target_tier = "jainune_plus"
-            if sku:
-                s_lower = sku.lower()
-                if "gold" in s_lower:
-                    target_tier = "jainune_gold"
-                elif "plus" in s_lower:
-                    target_tier = "jainune_plus"
-            elif user_row.get("subscription_tier") in ("jainune_plus", "jainune_gold"):
-                target_tier = user_row["subscription_tier"]
-
-            current_valid = user_row["subscription_valid_until"]
-            base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
-            new_valid = base_time + timedelta(days=actual_validity_days)
-            await conn.execute(
-                """
-                UPDATE users
-                   SET subscription_tier        = $1,
-                       subscription_valid_until = $2,
-                       billing_status           = 'active',
-                       updated_at               = NOW()
-                 WHERE id = $3
-                """,
-                target_tier,
-                new_valid,
-                target_uid,
-            )
-            if r:
-                try:
-                    await r.set(f"user:{target_uid}:tier", target_tier, ex=3600)
+                    # Refresh tier cache from result
+                    cached_tier = result.get("tier")
+                    if cached_tier:
+                        await r.set(f"user:{target_uid}:tier", cached_tier, ex=3600)
                     await r.set(f"user:{target_uid}:billing_status", "active", ex=3600)
                 except Exception:
                     pass
-            log.info("Store subscription renewed: user=%s store=%s tier=%s valid_until=%s (days=%d)", target_uid, store, target_tier, new_valid, actual_validity_days)
-            result = {"status": "active", "tier": target_tier, "valid_until": new_valid.isoformat()}
-
-        else:
-            log.warning("Unknown store event type: %s", event_type)
-            result = {"status": "ignored", "event_type": event_type}
-
-        # 5. Persist provider transaction state record
-        if original_transaction_id:
-            try:
-                expires_at = result.get("valid_until")
-                exp_dt = datetime.fromisoformat(expires_at) if expires_at else None
-                await conn.execute(
-                    """
-                    INSERT INTO store_subscriptions (
-                        user_id, store, original_transaction_id, sku, status,
-                        expires_at, last_event_type, last_event_timestamp, updated_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                    ON CONFLICT (store, original_transaction_id)
-                    DO UPDATE SET
-                        user_id = EXCLUDED.user_id,
-                        sku = COALESCE(EXCLUDED.sku, store_subscriptions.sku),
-                        status = EXCLUDED.status,
-                        expires_at = EXCLUDED.expires_at,
-                        last_event_type = EXCLUDED.last_event_type,
-                        last_event_timestamp = GREATEST(COALESCE(store_subscriptions.last_event_timestamp, 0), COALESCE(EXCLUDED.last_event_timestamp, 0)),
-                        updated_at = NOW()
-                    """,
-                    target_uid, store, original_transaction_id, sku, sub_status,
-                    exp_dt, event_type, event_timestamp or int(now_utc.timestamp()),
-                )
-            except asyncpg.UndefinedTableError:
-                pass
 
         if effective_event_id and r:
             try:

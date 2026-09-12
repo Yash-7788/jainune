@@ -69,7 +69,9 @@ export const useAuthStore = create<AuthStore>((set, _get) => ({
             err.code === "ERR_NETWORK" ||
             err.message === "Network Error")
         ) {
-          // Genuinely offline or network timeout without server response: fallback to saved session
+          // N-10: Genuinely offline or network timeout without server response: fallback to saved session.
+          // Known security trade-off: Banned users who launch offline enter UI cached state until
+          // network restores or 15-min token expires (bounded exposure window; all APIs fail 403).
           set({ state: "authenticated", userId: storedUserId });
         } else {
           set({ state: "unauthenticated", userId: null });

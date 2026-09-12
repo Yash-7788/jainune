@@ -167,9 +167,12 @@ export async function addPhoto(media_id: string): Promise<void> {
   await confirmUpload(media_id);
 }
 
-export async function updateVoiceSnapshot(media_id: string): Promise<{ voice_snapshot_url: string }> {
+export async function updateVoiceSnapshot(media_id: string): Promise<{ voice_snapshot_url: string | null }> {
   await confirmUpload(media_id);
-  return { voice_snapshot_url: `https://cdn.jainune.com/uploads/${media_id}.m4a` };
+  // F-12: real CDN URL is only valid after moderation passes (backend copies
+  // from quarantine → production bucket). Return null so the caller uses the
+  // local recording URI for immediate preview.
+  return { voice_snapshot_url: null };
 }
 
 export interface PresignUploadResponse {
@@ -183,7 +186,7 @@ export async function presignUpload(
   contentType: string,
   fileSizeBytes: number,
   mediaType: "photo" | "voice" = "photo",
-  position: number = 0
+  position: number = 1
 ): Promise<PresignUploadResponse> {
   const res = await apiPost<{
     media_id: string;

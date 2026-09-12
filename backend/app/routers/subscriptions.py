@@ -581,6 +581,7 @@ async def store_notification_webhook(
 async def cancel_subscription(
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
+    redis: Optional[aioredis.Redis] = Depends(get_redis_client),
 ):
     """
     Subscription cancellation status check.
@@ -588,6 +589,8 @@ async def cancel_subscription(
     Confirms no recurring billing exists and reports active access window.
     """
     user_id = UUID(str(current_user.get("id") or current_user.get("user_id")))
+    if redis:
+        await sliding_window_rate_limit(f"ratelimit:subscriptions:cancel:{user_id}", 5, 300, redis)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT subscription_tier, subscription_valid_until FROM users WHERE id = $1",

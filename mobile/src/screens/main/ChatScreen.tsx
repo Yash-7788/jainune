@@ -40,6 +40,7 @@ import * as SecureStore from "expo-secure-store";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   getMessages,
+  getChats,
   sendMessage,
   sendMediaMessage,
   markRead,
@@ -77,13 +78,15 @@ export default function ChatScreen() {
   const route = useRoute();
   const rawParams = (route.params || {}) as Partial<RouteParams>;
   const matchId = rawParams.matchId || "";
-  const otherUser = rawParams.otherUser || {
+  const paramOtherUser = rawParams.otherUser || {
     id: "",
     first_name: "Match",
     photo_url: null,
     is_online: false,
     momentum_expires_at: null,
   };
+  // F-07: cold-boot deep links arrive with empty otherUser — resolve from server
+  const [otherUser, setOtherUser] = useState(paramOtherUser);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
@@ -91,7 +94,7 @@ export default function ChatScreen() {
   const [chatBlocked, setChatBlocked] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [isOnline, setIsOnline] = useState(otherUser.is_online ?? false);
+  const [isOnline, setIsOnline] = useState(paramOtherUser.is_online ?? false);
 
   // Moderation
   const [pendingContent, setPendingContent] = useState<string | null>(null);
@@ -126,6 +129,28 @@ export default function ChatScreen() {
     const interval = setInterval(calculateTime, 60000);
     return () => clearInterval(interval);
   }, [momentumExpiry]);
+
+  // F-07: If arrived via deep link, otherUser.id is empty — resolve participant from chat list
+  useEffect(() => {
+    if (!paramOtherUser.id && matchId) {
+      getChats()
+        .then((threads) => {
+          const thread = threads.find((t) => t.match_id === matchId);
+          if (thread) {
+            setOtherUser({
+              id: thread.other_user.id,
+              first_name: thread.other_user.first_name,
+              photo_url: thread.other_user.photo_url,
+              is_online: thread.other_user.is_online,
+              momentum_expires_at: thread.momentum_expires_at,
+            });
+            setIsOnline(thread.other_user.is_online);
+          }
+        })
+        .catch(() => {});
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchId]);
 
   // Load my user ID and subscription status
   useEffect(() => {

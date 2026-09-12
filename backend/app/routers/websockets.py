@@ -1,10 +1,10 @@
 """
 WebSocket chat handler.
 
-WS /v1/ws/chat/{chat_id}?token=<access_token>
+WS /v1/ws/chat/{chat_id}?ticket=<ws_ticket>
 
 Protocol:
-  - Client connects with JWT as query param (Bearer header not possible in WS)
+  - Client obtains a single-use ticket via GET /v1/ws/ticket, then connects with ?ticket=<ticket>
   - Server validates token, verifies participant, subscribes to Redis pubsub channel
   - Incoming client frames: { "type": "typing" | "read_receipt" | "ping" }
   - Outgoing server frames: { "type": "message" | "typing" | "read_receipt" | "pong" }

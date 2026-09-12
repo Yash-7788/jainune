@@ -4,7 +4,7 @@ Notification worker — Celery tasks for push notification dispatch.
 Tasks:
   notify_new_match(match_id)         → push to both users
   notify_new_message(chat_id, sender_id, preview)  → push to recipient
-  notify_new_like(liked_user_id, liker_name)        → gold/platinum only
+  notify_new_like(liked_user_id, liker_name, liker_id)  → paid-tier users (gold/platinum/jainune_plus/jainune_gold)
   notify_match_expiring(match_id)    → 24h warning before auto-expiry
   send_daily_digest()                → broadcast "N liked your profile today"
 
@@ -163,11 +163,12 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
 
 
 @celery_app.task(name="app.workers.notification_worker.notify_new_like", bind=True, max_retries=2)
-def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
-    """Notify a gold/platinum user that someone liked their profile."""
+def notify_new_like(self, liked_user_id: str, liker_name: str, liker_id: str = "") -> None:
+    """Notify a paid-tier user that someone liked their profile."""
 
     async def _run():
-        if await _is_dedup(f"like:{liked_user_id}:{liker_name}", ttl=120):
+        dedup_actor = liker_id if liker_id else liker_name
+        if await _is_dedup(f"like:{liked_user_id}:{dedup_actor}", ttl=120):
             log.info("notify_new_like: duplicate like notification for %s skipped", liked_user_id)
             return
         conn = await _get_conn()
@@ -183,7 +184,7 @@ def notify_new_like(self, liked_user_id: str, liker_name: str) -> None:
             )
             if row is None or not row["fcm_token"]:
                 return
-            if row["subscription_tier"] not in ("gold", "platinum"):
+            if row["subscription_tier"] not in ("gold", "platinum", "jainune_plus", "jainune_gold"):
                 return  # free users don't get like notifications
 
             await send_push(

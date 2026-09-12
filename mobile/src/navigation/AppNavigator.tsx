@@ -208,7 +208,7 @@ function LoadingScreen() {
 }
 
 const linking = {
-  prefixes: [Linking.createURL("/"), "jainune://", "https://jainune.com", "https://*.jainune.com"],
+  prefixes: [Linking.createURL("/"), "jainune://", "https://jainune.com"],
   config: {
     screens: {
       Chat: "chat/:matchId",
@@ -307,11 +307,6 @@ export default function AppNavigator() {
 
   useEffect(() => {
     const cleanup = setupNotificationListeners((name, params) => {
-      routeOrQueue(name, params);
-    });
-
-    // Check cold-boot notification response
-    checkInitialNotificationResponse((name, params) => {
       routeOrQueue(name, params);
     });
 

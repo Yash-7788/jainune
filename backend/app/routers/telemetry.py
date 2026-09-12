@@ -113,7 +113,7 @@ async def ingest_events(
     Events with unknown target_user_id (not in DB) are silently dropped to
     prevent enumeration attacks.
     """
-    actor_id = uuid.UUID(str(current_user["id"]))
+    actor_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:telemetry:batch:{actor_id}", 120, 60, redis)
 
     server_ts = int(time.time() * 1000)
@@ -205,7 +205,7 @@ async def ingest_interaction_event(
     redis: RedisDep,
 ) -> TelemetryResponse:
     """Accepts single user interaction dwell telemetry event from mobile feed."""
-    actor_id = str(current_user["id"])
+    actor_id = str(current_user.get("user_id") or current_user.get("id"))
     await sliding_window_rate_limit(f"ratelimit:telemetry:event:{actor_id}", 60, 60, redis)
     server_ts = int(time.time() * 1000)
     entry = {
