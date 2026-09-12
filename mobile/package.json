@@ -57,5 +57,8 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react": "^7.35.0",
     "eslint-plugin-react-hooks": "^4.6.2"
+  },
+  "overrides": {
+    "tar": "^7.5.22"
   }
 }

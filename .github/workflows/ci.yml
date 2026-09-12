@@ -55,6 +55,12 @@ jobs:
         run: |
           python verify_endpoints.py
 
+      - name: Install pgvector in postgres service
+        run: |
+          CONTAINER=$(docker ps -q --filter "ancestor=postgis/postgis:15-3.4")
+          docker exec $CONTAINER apt-get update
+          docker exec $CONTAINER apt-get install -y postgresql-15-pgvector
+
       - name: Run migrations validation
         env:
           DATABASE_URL: postgresql://postgres:testpass@localhost:5432/jainune_test

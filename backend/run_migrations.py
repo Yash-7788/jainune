@@ -33,6 +33,10 @@ async def run_migrations():
 
     try:
         await conn.execute("""
+            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+            CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+            CREATE EXTENSION IF NOT EXISTS "postgis";
+            CREATE EXTENSION IF NOT EXISTS "vector";
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version VARCHAR(128) PRIMARY KEY,
                 applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
