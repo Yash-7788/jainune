@@ -750,4 +750,59 @@ class TestCoverageBoost(unittest.TestCase):
         self.assertIn("plans", result)
         self.assertGreater(len(result["plans"]), 0)
 
+    # ── security.py verify_otp direct coverage ────────────────────────────────
+
+    def test_security_verify_otp_success(self):
+        """Cover verify_otp happy path: lines 63-89."""
+        from app.core.security import verify_otp, hash_otp
+        from fastapi import HTTPException
+        phone = "+919999999999"
+        otp = "123456"
+        stored = hash_otp(phone, otp).encode()
+        redis = AsyncMock()
+        redis.incr = AsyncMock(return_value=1)
+        redis.expire = AsyncMock()
+        redis.get = AsyncMock(return_value=stored)
+        redis.delete = AsyncMock()
+        result = asyncio.run(verify_otp(phone, otp, redis))
+        self.assertTrue(result)
+        self.assertEqual(redis.delete.call_count, 2)
+
+    def test_security_verify_otp_rate_limited(self):
+        """Cover verify_otp rate-limit branch: lines 65-70."""
+        from app.core.security import verify_otp
+        from fastapi import HTTPException
+        redis = AsyncMock()
+        redis.incr = AsyncMock(return_value=6)
+        redis.expire = AsyncMock()
+        redis.delete = AsyncMock()
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(verify_otp("+919999999998", "000000", redis))
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    def test_security_verify_otp_expired(self):
+        """Cover verify_otp no-stored-hash branch: lines 72-77."""
+        from app.core.security import verify_otp
+        from fastapi import HTTPException
+        redis = AsyncMock()
+        redis.incr = AsyncMock(return_value=1)
+        redis.expire = AsyncMock()
+        redis.get = AsyncMock(return_value=None)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(verify_otp("+919999999997", "000000", redis))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_security_verify_otp_wrong_code(self):
+        """Cover verify_otp invalid-OTP branch: lines 79-85."""
+        from app.core.security import verify_otp
+        from fastapi import HTTPException
+        redis = AsyncMock()
+        redis.incr = AsyncMock(return_value=1)
+        redis.expire = AsyncMock()
+        redis.get = AsyncMock(return_value=b"wrong_hash_value_that_will_not_match")
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(verify_otp("+919999999996", "000000", redis))
+        self.assertEqual(ctx.exception.status_code, 401)
+
+
 
