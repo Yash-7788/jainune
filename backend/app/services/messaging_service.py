@@ -69,6 +69,7 @@ async def send_sms_otp(phone_number: str, otp: str) -> None:
 
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
         log.info("[MOCK SMS] Dispatched OTP %s to %s", otp, _mask_phone(phone_clean))
+        print(f"\n========================================\n[LOCAL DEV MOCK SMS] OTP: {otp} FOR {phone_clean}\n========================================\n", flush=True)
         return
 
     mobile = phone_clean.lstrip("+")
@@ -105,6 +106,7 @@ async def send_whatsapp_otp(phone_number: str, otp: str) -> None:
 
     if settings.debug or settings.msg91_auth_key in ("mock", "test", "test_msg91_key", ""):
         log.info("[MOCK WHATSAPP] Dispatched OTP %s to %s", otp, _mask_phone(clean_phone))
+        print(f"\n========================================\n[LOCAL DEV MOCK WHATSAPP] OTP: {otp} FOR {clean_phone}\n========================================\n", flush=True)
         return
 
     mobile = clean_phone.lstrip("+")
