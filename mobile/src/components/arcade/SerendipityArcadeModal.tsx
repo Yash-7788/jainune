@@ -53,9 +53,10 @@ const DICE_REWARDS = [
 interface Props {
   visible: boolean;
   onClose: () => void;
+  onNavigateToChat?: (chatId: string) => void;
 }
 
-export default function SerendipityArcadeModal({ visible, onClose }: Props) {
+export default function SerendipityArcadeModal({ visible, onClose, onNavigateToChat }: Props) {
   const [activeTab, setActiveTab] = useState<"wheel" | "dice">("wheel");
   const [spins, setSpins] = useState(1);
   const [rolls, setRolls] = useState(1);
@@ -109,6 +110,22 @@ export default function SerendipityArcadeModal({ visible, onClose }: Props) {
           Alert.alert("Spin Preserved", res.message);
         } else if (res.paired_user) {
           setLastWon(`✨ Paired with ${res.paired_user.first_name} (${res.paired_user.city})!`);
+          if (res.chat_id) {
+            Alert.alert(
+              "Instant Match! 🎉",
+              `You were matched with ${res.paired_user.first_name} (${res.paired_user.city})! A 15-minute speed chat is ready.`,
+              [
+                { text: "Later", style: "cancel" },
+                {
+                  text: "Chat Now",
+                  onPress: () => {
+                    onClose();
+                    onNavigateToChat?.(res.chat_id!);
+                  },
+                },
+              ]
+            );
+          }
         } else {
           setLastWon(`${prize.icon} ${prize.label}`);
         }

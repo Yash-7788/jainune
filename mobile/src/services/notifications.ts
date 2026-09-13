@@ -59,7 +59,11 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     // Send token to backend (non-blocking)
     if (token) {
-      apiPost("/users/me/fcm-token", { fcm_token: token }).catch(() => {});
+      apiPost("/users/me/fcm-token", {
+        fcm_token: token,
+        platform: Platform.OS,
+        device_id: `${Platform.OS}_${Platform.Version}`,
+      }).catch(() => {});
     }
 
     return token;

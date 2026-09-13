@@ -35,6 +35,7 @@ import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   getMyProfile,
   updateProfile,
+  updatePrompts,
   presignUpload,
   addPhoto,
   deletePhoto,
@@ -327,6 +328,10 @@ export default function EditProfileScreen() {
         looking_for: lookingFor,
         vibe_zones: vibeZones,
       });
+
+      if (prompts && prompts.length > 0) {
+        await updatePrompts(prompts);
+      }
 
       Alert.alert("Profile Updated", "Your changes have been saved.", [
         { text: "Done", onPress: () => navigation.goBack() },

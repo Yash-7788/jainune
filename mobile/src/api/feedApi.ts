@@ -77,6 +77,8 @@ export async function getFeed(limit = 15): Promise<FeedResponse> {
   return res.data;
 }
 
+export const getFeedCandidates = getFeed;
+
 /** GET /v1/feed/daily-compatible */
 export async function getDailyCompatible(): Promise<DailyCompatibleResponse> {
   const res = await apiGet<DailyCompatibleResponse>("/feed/daily-compatible");

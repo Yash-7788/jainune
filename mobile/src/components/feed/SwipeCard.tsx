@@ -96,9 +96,13 @@ function SwipeCard({
     setSwipeDirection(null);
   };
 
+  const isTopRef = useRef(isTop);
+  isTopRef.current = isTop;
+
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => isTop,
+      onStartShouldSetPanResponder: () => isTopRef.current,
+      onMoveShouldSetPanResponder: () => isTopRef.current,
       onPanResponderMove: (_, gesture) => {
         position.setValue({ x: gesture.dx, y: gesture.dy });
         const dir = gesture.dx > 20 ? "right" : gesture.dx < -20 ? "left" : gesture.dy < -40 ? "up" : null;

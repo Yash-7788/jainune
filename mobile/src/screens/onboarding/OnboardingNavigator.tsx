@@ -4,8 +4,8 @@
  * ProgressBar visible throughout. Back navigation allowed freely.
  */
 
-import React from "react";
-import { View, StyleSheet, StatusBar } from "react-native";
+import React, { useEffect, useRef } from "react";
+import { View, StyleSheet, StatusBar, BackHandler } from "react-native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { colors, spacing } from "../../theme/tokens";
 import { ProgressBar } from "../../components/core";
@@ -96,12 +96,40 @@ const stepToScreenName: Record<number, keyof OnboardingStackParams> = {
 export default function OnboardingNavigator() {
   const currentStep = useOnboardingStore((s) => s.step);
   const initialRouteName = stepToScreenName[currentStep] || "Step02";
+  const navRef = useRef<any>(null);
+
+  useEffect(() => {
+    const onBackPress = () => {
+      const step = useOnboardingStore.getState().step;
+      if (step > 2) {
+        const prevStep = step - 1;
+        const prevScreen = stepToScreenName[prevStep];
+        if (prevScreen && navRef.current) {
+          if (navRef.current.canGoBack()) {
+            navRef.current.goBack();
+          } else {
+            navRef.current.navigate(prevScreen);
+          }
+          useOnboardingStore.getState().setStep(prevStep);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
+    return () => sub.remove();
+  }, []);
 
   return (
     <View style={{ flex: 1 }}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
       <ProgressHeader />
       <Stack.Navigator
+        screenListeners={({ navigation }) => {
+          navRef.current = navigation;
+          return {};
+        }}
         screenOptions={{
           headerShown: false,
           animation: "slide_from_right",

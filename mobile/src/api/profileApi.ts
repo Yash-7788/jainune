@@ -88,9 +88,46 @@ export interface ArcadeProduct {
 // ── Profile ─────────────────────────────────────────────────────────────────
 
 export async function getMyProfile(): Promise<MyProfile> {
-  const res = await apiGet<MyProfile>("/users/me");
+  const res = await apiGet<any>("/users/me");
   if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  const d = res.data;
+  const photos = (d.photos || []).map((p: any) => ({
+    id: String(p.id || ""),
+    url: p.url || p.cdn_url || "",
+    order: p.order ?? p.position ?? 0,
+    cdn_url: p.cdn_url || p.url,
+    position: p.position ?? p.order,
+  }));
+  const prompts = (d.prompts || []).map((p: any, idx: number) => ({
+    prompt_id: String(p.prompt_id || p.id || `prompt_${idx + 1}`),
+    prompt_text: p.prompt_text || p.prompt_key || "",
+    response: p.response || p.response_text || "",
+    id: String(p.id || p.prompt_id || ""),
+    prompt_key: p.prompt_key || p.prompt_text || "",
+    response_text: p.response_text || p.response || "",
+  }));
+  return {
+    ...d,
+    photos,
+    prompts,
+  };
+}
+
+export async function updatePrompts(
+  prompts: { prompt_id?: string; prompt_text?: string; prompt_key?: string; response?: string; response_text?: string; position?: number }[]
+): Promise<void> {
+  const payload = {
+    prompts: prompts
+      .filter((p) => (p.response || p.response_text || "").trim().length > 0)
+      .map((p, idx) => ({
+        prompt_key: p.prompt_key || p.prompt_text || p.prompt_id || `prompt_${idx + 1}`,
+        response_text: (p.response || p.response_text || "").trim(),
+        position: p.position ?? idx + 1,
+      })),
+  };
+  if (payload.prompts.length === 0) return;
+  const res = await apiPut<void>("/users/me/prompts", payload);
+  if (!res.success) throw { _apiError: res.error };
 }
 
 export async function updateProfile(payload: Partial<{
@@ -403,13 +440,17 @@ export async function getArcadeWallet(): Promise<{ available_spins: number; avai
 
 export async function spinArcadeWheel(): Promise<{
   success: boolean;
+  action?: string;
   remaining_spins: number;
+  chat_id?: string | null;
   paired_user: { id: string; first_name: string; city: string } | null;
   message: string;
 }> {
   const res = await apiPost<{
     success: boolean;
+    action?: string;
     remaining_spins: number;
+    chat_id?: string | null;
     paired_user: { id: string; first_name: string; city: string } | null;
     message: string;
   }>("/arcade/spin");

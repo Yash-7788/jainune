@@ -10,12 +10,19 @@
 
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
 import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 import { ErrorCode, getFriendlyError, ERROR_MAP } from "../utils/errors";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+const DEFAULT_DEV_URL =
+  Platform.OS === "android"
+    ? "http://10.0.2.2:8000/v1"
+    : "http://localhost:8000/v1";
+
 const PRIMARY_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL || "https://api.jainune.com/v1";
+  process.env.EXPO_PUBLIC_API_URL ||
+  (__DEV__ ? DEFAULT_DEV_URL : "https://api.jainune.com/v1");
 const SERVER_URLS = [PRIMARY_BASE_URL];
 
 export const SECURE_KEYS = {
@@ -269,33 +276,62 @@ export async function uploadToPresignedUrl(
   contentType: string,
   presignedFields?: Record<string, string> | null
 ): Promise<void> {
-  const response = await fetch(fileUri);
-  const blob = await response.blob();
-
-  if (presignedFields && Object.keys(presignedFields).length > 0) {
-    const formData = new FormData();
-    for (const [key, val] of Object.entries(presignedFields)) {
-      formData.append(key, val);
+  try {
+    const FileSystem = require("expo-file-system");
+    if (presignedFields && Object.keys(presignedFields).length > 0) {
+      const uploadRes = await FileSystem.uploadAsync(presignedUrl, fileUri, {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: "file",
+        mimeType: contentType,
+        parameters: presignedFields,
+      });
+      if (uploadRes.status >= 400) {
+        throw new Error(`S3 upload failed: ${uploadRes.status}`);
+      }
+      return;
     }
-    formData.append("file", blob as any);
-    const uploadResponse = await fetch(presignedUrl, {
-      method: "POST",
-      body: formData,
+
+    const uploadRes = await FileSystem.uploadAsync(presignedUrl, fileUri, {
+      httpMethod: "PUT",
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: { "Content-Type": contentType },
     });
+    if (uploadRes.status >= 400) {
+      throw new Error(`S3 upload failed: ${uploadRes.status}`);
+    }
+    return;
+  } catch (fsErr: any) {
+    if (fsErr?.message?.includes("S3 upload failed")) throw fsErr;
+    // Fallback to fetch blob if FileSystem uploadAsync is unavailable
+    const response = await fetch(fileUri);
+    const blob = await response.blob();
+
+    if (presignedFields && Object.keys(presignedFields).length > 0) {
+      const formData = new FormData();
+      for (const [key, val] of Object.entries(presignedFields)) {
+        formData.append(key, val);
+      }
+      formData.append("file", blob as any);
+      const uploadResponse = await fetch(presignedUrl, {
+        method: "POST",
+        body: formData,
+      });
+      if (!uploadResponse.ok) {
+        throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+      }
+      return;
+    }
+
+    const uploadResponse = await fetch(presignedUrl, {
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      body: blob,
+    });
+
     if (!uploadResponse.ok) {
       throw new Error(`S3 upload failed: ${uploadResponse.status}`);
     }
-    return;
-  }
-
-  const uploadResponse = await fetch(presignedUrl, {
-    method: "PUT",
-    headers: { "Content-Type": contentType },
-    body: blob,
-  });
-
-  if (!uploadResponse.ok) {
-    throw new Error(`S3 upload failed: ${uploadResponse.status}`);
   }
 }
 

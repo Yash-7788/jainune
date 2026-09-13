@@ -48,6 +48,7 @@ import {
   blockUser,
   Message,
 } from "../../api/chatApi";
+import { useAuthStore } from "../../store/authStore";
 import { useWebSocket } from "../../hooks/useWebSocket";
 import { getSubscriptionStatus } from "../../api/profileApi";
 import { extractError } from "../../api/client";
@@ -241,7 +242,7 @@ export default function ChatScreen() {
                   !(
                     m.id.startsWith("temp_") &&
                     m.content === incoming.content &&
-                    m.sender_id === incoming.sender_id
+                    (!m.sender_id || m.sender_id === incoming.sender_id || m.sender_id === myUserId.current)
                   )
               );
               if (withoutTemp.some((m) => m.id === incoming.id)) return withoutTemp;
@@ -327,6 +328,10 @@ export default function ChatScreen() {
     setDraft("");
     setPendingContent(null);
     setDetectedType(null);
+
+    if (!myUserId.current) {
+      myUserId.current = useAuthStore.getState().userId;
+    }
 
     // Optimistic: add a local pending message
     const tempId = `temp_${Date.now()}`;
