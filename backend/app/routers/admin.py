@@ -252,6 +252,12 @@ async def ban_user(
     try:
         r = get_redis()
         await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
+        # N-17: terminate any active WebSocket connection immediately
+        import json as _json
+        await r.publish(
+            f"user:{user_id}:commands",
+            _json.dumps({"type": "force_disconnect", "reason": "Account banned."}),
+        )
     except Exception:
         pass
 

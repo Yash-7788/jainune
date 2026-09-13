@@ -157,13 +157,14 @@ def reap_ephemeral_media() -> None:
 def downgrade_expired_subscriptions() -> None:
     """
     Sweep users whose subscription_valid_until has passed.
-    Reset to free tier + clear valid_until.
+    Reset to free tier + clear valid_until + clear Redis tier cache (N-22).
     """
 
     async def _run():
         conn = await _get_conn()
         try:
-            result = await conn.execute(
+            # N-22: fetch IDs so we can bulk-delete Redis cache keys
+            rows = await conn.fetch(
                 """
                 WITH to_downgrade AS (
                     SELECT id FROM users
@@ -178,12 +179,25 @@ def downgrade_expired_subscriptions() -> None:
                        super_connect_credits     = 0,
                        updated_at                = NOW()
                  WHERE id IN (SELECT id FROM to_downgrade)
+                RETURNING id
                 """
             )
-            # asyncpg returns 'UPDATE N'
-            count = int(result.split()[-1])
+            count = len(rows)
             if count:
                 log.info("downgrade_expired_subscriptions: downgraded %d users", count)
+                # N-22: clear stale Redis tier cache so get_effective_user_tier re-reads DB
+                try:
+                    from app.core.redis import get_redis
+                    r = get_redis()
+                    if r:
+                        keys_to_del = []
+                        for row in rows:
+                            uid = str(row["id"])
+                            keys_to_del += [f"user:{uid}:tier", f"user:{uid}:subscription"]
+                        if keys_to_del:
+                            await r.delete(*keys_to_del)
+                except Exception as exc:
+                    log.warning("downgrade_expired_subscriptions: Redis cache clear failed: %s", exc)
         finally:
             await conn.close()
 
@@ -205,7 +219,36 @@ def reap_stale_matches() -> None:
     async def _run():
         conn = await _get_conn()
         try:
-            # --- Step 1: expire silent matches ---
+            # N-24 fix: Step 1 is now WARNING dispatch. It must run before the expiry
+            # update so matches right at the 7-day boundary are warned before status
+            # flips to 'expired' and becomes invisible to the warning query.
+
+            # --- Step 1 (reordered): warn matches approaching expiry ---
+            warn_ids = await conn.fetch(
+                f"""
+                SELECT id FROM matches
+                WHERE status IN ('active', 'matched')
+                  AND expiry_warned = FALSE
+                  AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
+                                                + INTERVAL '{EXPIRY_WARN_HOURS} hours'
+                LIMIT 500
+                """  # nosec B608
+            )
+
+            if warn_ids:
+                from app.workers.notification_worker import notify_match_expiring
+
+                for row in warn_ids:
+                    notify_match_expiring.delay(str(row["id"]))
+
+                ids = [row["id"] for row in warn_ids]
+                await conn.execute(
+                    "UPDATE matches SET expiry_warned = TRUE WHERE id = ANY($1::uuid[])",
+                    ids,
+                )
+                log.info("reap_stale_matches: queued %d expiry warnings", len(warn_ids))
+
+            # --- Step 2 (reordered): expire silent matches ---
             tx = conn.transaction() if hasattr(conn, "transaction") and callable(conn.transaction) else None
             if asyncio.iscoroutine(tx):
                 tx.close()
@@ -257,32 +300,6 @@ def reap_stale_matches() -> None:
                                 await r.delete(k)
                 except Exception:
                     pass
-
-            # --- Step 2: warn matches expiring within EXPIRY_WARN_HOURS ---
-            warn_ids = await conn.fetch(
-                f"""
-                SELECT id FROM matches
-                WHERE status IN ('active', 'matched')
-                  AND expiry_warned = FALSE
-                  AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '{MATCH_EXPIRY_DAYS} days'
-                                                + INTERVAL '{EXPIRY_WARN_HOURS} hours'
-                LIMIT 500
-                """  # nosec B608
-            )
-
-            if warn_ids:
-                from app.workers.notification_worker import notify_match_expiring
-
-                for row in warn_ids:
-                    notify_match_expiring.delay(str(row["id"]))
-
-                # Mark as warned to prevent duplicate notifications
-                ids = [row["id"] for row in warn_ids]
-                await conn.execute(
-                    "UPDATE matches SET expiry_warned = TRUE WHERE id = ANY($1::uuid[])",
-                    ids,
-                )
-                log.info("reap_stale_matches: queued %d expiry warnings", len(warn_ids))
         finally:
             await conn.close()
 

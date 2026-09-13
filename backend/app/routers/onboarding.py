@@ -599,10 +599,11 @@ async def step19_photos(
     await _guard_rate_limit(current_user.id, redis)
     await _require_onboarding_not_completed(current_user.id, db)
     async with db.acquire() as conn:
-        # Validate ownership and existence for all provided media IDs
+        # N-20: validate ownership, existence, AND moderation status.
+        # Rejected photos must be caught here, not silently passed to step 22.
         rows = await conn.fetch(
             """
-            SELECT id FROM user_media
+            SELECT id, status FROM user_media
             WHERE user_id = $1
               AND media_type = 'photo'
               AND id = ANY($2::uuid[])
@@ -617,6 +618,16 @@ async def step19_photos(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Media IDs not found or do not belong to this user: {missing}",
+            )
+        # N-20: reject moderation-rejected photos with a clear error at step 19
+        rejected = {str(r["id"]) for r in rows if r.get("status") in ("rejected", "processing_timeout")}
+        if rejected:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"One or more photos have been rejected by moderation and cannot be used: {rejected}. "
+                    "Please upload new photos."
+                ),
             )
         await conn.execute(
             "UPDATE users SET onboarding_step = 19, updated_at = NOW() WHERE id = $1",

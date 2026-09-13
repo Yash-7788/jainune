@@ -655,6 +655,7 @@ async def get_effective_user_tier(
                            SET subscription_tier        = 'free',
                                subscription_valid_until = NULL,
                                billing_status           = 'expired',
+                               super_connect_credits    = 0,
                                updated_at               = NOW()
                          WHERE id = $1
                         """,
@@ -667,11 +668,20 @@ async def get_effective_user_tier(
                        SET subscription_tier        = 'free',
                            subscription_valid_until = NULL,
                            billing_status           = 'expired',
+                           super_connect_credits    = 0,
                            updated_at               = NOW()
                      WHERE id = $1
                     """,
                     user_id,
                 )
+            # N-13/N-22: clear Redis tier cache after lazy downgrade
+            try:
+                from app.core.redis import get_redis
+                r = get_redis()
+                if r:
+                    await r.delete(f"user:{user_id}:tier", f"user:{user_id}:subscription")
+            except Exception:
+                pass
             return "free"
 
     return tier

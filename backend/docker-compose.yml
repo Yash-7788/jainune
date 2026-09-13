@@ -41,7 +41,7 @@ services:
     container_name: jainune_api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # N-26: bind to loopback only (0.0.0.0 exposed dev API on LAN)
     environment:
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - DEBUG=${DEBUG:-false}

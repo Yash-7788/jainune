@@ -204,7 +204,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(client)
 
     async def test_07_delete_my_account_alias(self):
-        """Account deletion endpoint works via delete_my_account."""
+        """Account deletion endpoint: hard_delete=True is downgraded to soft delete on user endpoint (N-16)."""
         from app.routers.users import delete_my_account
 
         user_id = uuid.uuid4()
@@ -215,16 +215,18 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
         mock_redis = AsyncMock()
 
-        with patch("app.services.account_service.purge_user_account", new_callable=AsyncMock) as mock_purge:
-            mock_purge.return_value = {"status": "purged"}
+        with patch("app.services.account_service.soft_delete_user_account", new_callable=AsyncMock) as mock_soft:
+            mock_soft.return_value = {"status": "soft_deleted"}
             res = await delete_my_account(
-                hard_delete=True,
+                hard_delete=True,   # N-16: always downgraded to False on user endpoint
                 current_user=current_user,
                 pool=mock_pool,
                 redis=mock_redis,
             )
             self.assertTrue(res["success"])
-            self.assertEqual(res["data"]["status"], "purged")
+            # N-16: hard_delete is silently forced to False, so soft delete path runs
+            self.assertEqual(res["data"]["status"], "deactivated")
+            mock_soft.assert_called_once()
 
     async def test_08_telemetry_event_ingestion(self):
         """Telemetry router accepts valid events and queues to redis."""

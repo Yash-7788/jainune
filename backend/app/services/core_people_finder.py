@@ -73,14 +73,16 @@ if not ok or type(candidates) ~= 'table' then
     return nil
 end
 local limit = tonumber(ARGV[1])
-if #candidates < limit then
+-- N-15 fix: serve partial batches rather than discarding when fewer remain than limit.
+if #candidates == 0 then
     redis.call('del', KEYS[1])
     return nil
 end
+local take = math.min(limit, #candidates)
 local batch = {}
 local remaining = {}
 for i = 1, #candidates do
-    if i <= limit then
+    if i <= take then
         table.insert(batch, candidates[i])
     else
         table.insert(remaining, candidates[i])
@@ -213,6 +215,22 @@ async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> N
         acquired = await redis.set(lock_key, lock_token, nx=True, ex=15)
         if not acquired:
             return
+
+        # N-23: recover orphaned flushing keys from previous crash before renaming.
+        # If process died between rename and DEL, temp key is stranded with no TTL.
+        try:
+            orphan_pattern = "buffer:user_impressions_48h:flushing:*"
+            async for orphan_key in redis.scan_iter(orphan_pattern):
+                orphan_counts = await redis.hgetall(orphan_key)
+                if orphan_counts:
+                    pipe = redis.pipeline()
+                    for k, v in orphan_counts.items():
+                        pipe.hincrby("buffer:user_impressions_48h", k, int(v))
+                    await pipe.execute()
+                await redis.delete(orphan_key)
+                log.info("flush_impressions: recovered orphaned temp key %s", orphan_key)
+        except Exception as exc:
+            log.warning("flush_impressions: orphan recovery failed: %s", exc)
 
         temp_key = f"buffer:user_impressions_48h:flushing:{lock_token}"
         rename_script = """

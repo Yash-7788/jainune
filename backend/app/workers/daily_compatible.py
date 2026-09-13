@@ -154,7 +154,9 @@ async def _run_async() -> None:
                 feed_queues[uid] = []
 
             # Checkpointed Redis persistence: flush every 100 users
-            key = f"feed_queue:{uid}"
+            # N-12 fix: write to feed:cache:{uid} (the key _get_cached_feed reads),
+            # not feed_queue:{uid} (dead key nobody consumed). N-19: orphan keys gone.
+            key = f"feed:cache:{uid}"
             pipe.set(key, json.dumps(queue), ex=FEED_QUEUE_TTL)
 
             if idx % CHECKPOINT_BATCH_SIZE == 0:

@@ -487,54 +487,112 @@ async def get_users_who_liked_me(
     current_user: CurrentUser,
     db: DBDep,
     redis: RedisDep = None,
+    # N-27: cursor pagination so users with >50 likes can see them all
+    cursor: Optional[str] = None,   # ISO timestamp from previous next_cursor
+    limit: int = 50,
 ) -> dict:
     """Fetch incoming likes from other users (server-side redacted for free tier)."""
     user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     if redis is not None:
         await sliding_window_rate_limit(f"ratelimit:interactions:liked_me:{user_id}", 30, 60, redis)
+    limit = max(1, min(limit, 50))  # clamp 1..50
 
-    query = """
-    SELECT
-        i.id AS interaction_id,
-        i.created_at,
-        u.id,
-        u.first_name,
-        u.date_of_birth,
-        u.city,
-        u.state,
-        u.dietary_strictness,
-        u.community_sect,
-        COALESCE(u.profession, u.job_title) AS profession,
-        u.education,
-        u.is_photo_verified,
-        COALESCE(photos_agg.photos, '[]'::json) AS photos
-    FROM interactions i
-    JOIN users u ON u.id = i.actor_id
-    LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position)) AS photos
-        FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved' AND um.is_processed = TRUE
-    ) photos_agg ON TRUE
-    WHERE i.target_id = $1
-      AND i.action_type IN ('like', 'super_connect')
-      AND u.account_status NOT IN ('banned', 'deleted', 'suspended')
-      AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
-      AND u.deleted_at IS NULL
-      AND u.is_paused = FALSE
-      AND NOT EXISTS (
-          SELECT 1 FROM interactions back
-          WHERE back.actor_id = $1 AND back.target_id = i.actor_id
-      )
-      AND NOT EXISTS (
-          SELECT 1 FROM user_blocks ub
-          WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
-             OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
-      )
-    ORDER BY i.created_at DESC
-    LIMIT 50
-    """
-    async with db.acquire() as conn:
-        tier = await payment_service.get_effective_user_tier(user_id, conn)
-        rows = await conn.fetch(query, user_id)
+    # N-27: cursor-based pagination (cursor = created_at of last seen row, ISO format)
+    from datetime import datetime, timezone
+    cursor_dt = None
+    if cursor:
+        try:
+            cursor_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    if cursor_dt is not None:
+        query = """
+        SELECT
+            i.id AS interaction_id,
+            i.created_at,
+            u.id,
+            u.first_name,
+            u.date_of_birth,
+            u.city,
+            u.state,
+            u.dietary_strictness,
+            u.community_sect,
+            COALESCE(u.profession, u.job_title) AS profession,
+            u.education,
+            u.is_photo_verified,
+            COALESCE(photos_agg.photos, '[]'::json) AS photos
+        FROM interactions i
+        JOIN users u ON u.id = i.actor_id
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position)) AS photos
+            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved' AND um.is_processed = TRUE
+        ) photos_agg ON TRUE
+        WHERE i.target_id = $1
+          AND i.action_type IN ('like', 'super_connect')
+          AND i.created_at < $2
+          AND u.account_status NOT IN ('banned', 'deleted', 'suspended')
+          AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
+          AND u.deleted_at IS NULL
+          AND u.is_paused = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM interactions back
+              WHERE back.actor_id = $1 AND back.target_id = i.actor_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM user_blocks ub
+              WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                 OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+          )
+        ORDER BY i.created_at DESC
+        LIMIT $3
+        """
+        async with db.acquire() as conn:
+            tier = await payment_service.get_effective_user_tier(user_id, conn)
+            rows = await conn.fetch(query, user_id, cursor_dt, limit)
+    else:
+        query = """
+        SELECT
+            i.id AS interaction_id,
+            i.created_at,
+            u.id,
+            u.first_name,
+            u.date_of_birth,
+            u.city,
+            u.state,
+            u.dietary_strictness,
+            u.community_sect,
+            COALESCE(u.profession, u.job_title) AS profession,
+            u.education,
+            u.is_photo_verified,
+            COALESCE(photos_agg.photos, '[]'::json) AS photos
+        FROM interactions i
+        JOIN users u ON u.id = i.actor_id
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object('id', um.id, 'url', um.cdn_url, 'order', um.position)) AS photos
+            FROM user_media um WHERE um.user_id = u.id AND um.media_type = 'photo' AND um.status = 'approved' AND um.is_processed = TRUE
+        ) photos_agg ON TRUE
+        WHERE i.target_id = $1
+          AND i.action_type IN ('like', 'super_connect')
+          AND u.account_status NOT IN ('banned', 'deleted', 'suspended')
+          AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
+          AND u.deleted_at IS NULL
+          AND u.is_paused = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM interactions back
+              WHERE back.actor_id = $1 AND back.target_id = i.actor_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM user_blocks ub
+              WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                 OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+          )
+        ORDER BY i.created_at DESC
+        LIMIT $2
+        """
+        async with db.acquire() as conn:
+            tier = await payment_service.get_effective_user_tier(user_id, conn)
+            rows = await conn.fetch(query, user_id, limit)
 
     is_subscriber = tier in ("jainune_plus", "gold", "platinum")
     today = date.today()
@@ -585,4 +643,10 @@ async def get_users_who_liked_me(
                 "is_verified": False,
                 "liked_at": r["created_at"].isoformat() if r.get("created_at") else None,
             })
-    return {"likes": likes, "total_count": len(likes)}
+    # N-27: compute next_cursor from oldest row in this page
+    next_cursor = None
+    if len(rows) == limit and rows:
+        last_ts = rows[-1]["created_at"]
+        if last_ts:
+            next_cursor = last_ts.isoformat()
+    return {"likes": likes, "total_count": len(likes), "next_cursor": next_cursor}

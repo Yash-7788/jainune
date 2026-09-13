@@ -179,16 +179,21 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("status IN ('approved', 'pending')", fetchval_query)
 
     def test_05_ephemeral_reaper_stale_matches_uses_coalesce_and_closes_chats(self):
-        """reap_stale_matches must COALESCE last_message_at with created_at and set chats.is_unmatched = TRUE."""
+        """reap_stale_matches must COALESCE last_message_at with created_at and set chats.is_unmatched = TRUE.
+        N-24: warn step now runs first; fetch order is [warn_ids, expired_ids]."""
         mock_conn = AsyncMock()
         mock_conn.transaction = None
         expired_match_id = uuid.uuid4()
         mock_conn.fetch.side_effect = [
-            [{"id": expired_match_id}],  # Step 1: expired_ids
-            [],                          # Step 2: warn_ids
+            [],                          # Step 1 (reordered): warn_ids (none pending)
+            [{"id": expired_match_id}],  # Step 2 (reordered): expired_ids
         ]
 
-        with patch("app.workers.ephemeral_reaper._get_conn", new_callable=AsyncMock) as mock_get_conn:
+        mock_notify = MagicMock()
+        mock_notify.delay = MagicMock()
+
+        with patch("app.workers.ephemeral_reaper._get_conn", new_callable=AsyncMock) as mock_get_conn, \
+             patch("app.workers.notification_worker.notify_match_expiring", mock_notify):
             mock_get_conn.return_value = mock_conn
             reap_stale_matches()
 

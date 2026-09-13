@@ -402,10 +402,19 @@ async def delete_my_account(
     from app.services.account_service import purge_user_account, soft_delete_user_account
 
     user_id = current_user["user_id"]
-    if hard_delete and request is not None:
-        user_role = current_user.get("role") or current_user.get("admin_role")
-        if user_role not in ("admin", "superadmin") and not current_user.get("is_admin"):
-            hard_delete = False
+    # N-16: current_user comes from get_current_user which queries 'users' table only.
+    # That table has no role/admin_role/is_admin columns; those only exist on the
+    # admin session returned by require_admin. So we cannot gate hard_delete here
+    # via current_user fields — they are always None.
+    # Policy decision: hard_delete via this user-facing endpoint is disabled for all
+    # users regardless of role. Admin hard-deletes must use the admin endpoint.
+    # Silently downgrade to soft delete without leaking internal role structure.
+    if hard_delete:
+        hard_delete = False
+        log.info(
+            "User %s requested hard_delete via user endpoint — downgraded to soft delete (use admin endpoint).",
+            user_id,
+        )
 
     log.info("User %s requested account deletion (hard_delete=%s). Reason: %s", user_id, hard_delete, reason or "none provided")
     async with pool.acquire() as conn:

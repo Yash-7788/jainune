@@ -757,7 +757,7 @@ class TestCoverageBoost(unittest.TestCase):
     # ── security.py verify_otp direct coverage ────────────────────────────────
 
     def test_security_verify_otp_success(self):
-        """Cover verify_otp happy path: lines 63-89."""
+        """Cover verify_otp happy path."""
         from app.core.security import verify_otp, hash_otp
         from fastapi import HTTPException
         phone = "+919999999999"
@@ -770,10 +770,13 @@ class TestCoverageBoost(unittest.TestCase):
         mock_pipe.execute = AsyncMock(return_value=[1, True])
         redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=stored)
+        # N-21: getdel is now called atomically; mock it too
+        redis.getdel = AsyncMock(return_value=stored)
         redis.delete = AsyncMock()
         result = asyncio.run(verify_otp(phone, otp, redis))
         self.assertTrue(result)
-        self.assertEqual(redis.delete.call_count, 2)
+        # Only rate_key delete remains (session_key consumed by getdel)
+        self.assertEqual(redis.delete.call_count, 1)
 
     def test_security_verify_otp_rate_limited(self):
         """Cover verify_otp rate-limit branch: lines 65-70."""
@@ -801,6 +804,8 @@ class TestCoverageBoost(unittest.TestCase):
         mock_pipe.execute = AsyncMock(return_value=[1, True])
         redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=None)
+        # N-21: getdel returns None for expired/missing key
+        redis.getdel = AsyncMock(return_value=None)
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(verify_otp("+919999999997", "000000", redis))
         self.assertEqual(ctx.exception.status_code, 400)
@@ -816,6 +821,8 @@ class TestCoverageBoost(unittest.TestCase):
         mock_pipe.execute = AsyncMock(return_value=[1, True])
         redis.pipeline = MagicMock(return_value=mock_pipe)
         redis.get = AsyncMock(return_value=b"wrong_hash_value_that_will_not_match")
+        # N-21: getdel returns wrong hash
+        redis.getdel = AsyncMock(return_value=b"wrong_hash_value_that_will_not_match")
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(verify_otp("+919999999996", "000000", redis))
         self.assertEqual(ctx.exception.status_code, 401)

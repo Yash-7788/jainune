@@ -72,7 +72,19 @@ async def verify_otp(
             detail="Maximum OTP verification attempts exceeded. Request a new OTP.",
         )
 
-    stored_hash = await redis.get(session_key)
+    # N-21: atomic GETDEL — prevents two concurrent requests both passing
+    # compare_digest before either fires the DELETE.
+    _GETDEL_LUA = "local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end; return v"
+    try:
+        if hasattr(redis, "getdel"):
+            stored_hash = await redis.getdel(session_key)
+        else:
+            stored_hash = await redis.eval(_GETDEL_LUA, 1, session_key)
+    except Exception:
+        stored_hash = await redis.get(session_key)
+        if stored_hash:
+            await redis.delete(session_key)
+
     if not stored_hash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -87,7 +99,6 @@ async def verify_otp(
             detail="Invalid OTP code.",
         )
 
-    await redis.delete(session_key)
     await redis.delete(rate_key)
     return True
 

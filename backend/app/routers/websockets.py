@@ -205,7 +205,9 @@ async def websocket_chat(
     pubsub = redis.pubsub()
     real_chat_id = row["id"]
     canonical_channel = f"chat:{real_chat_id}"
-    await pubsub.subscribe(canonical_channel)
+    # N-17: also subscribe to per-user command channel to receive force_disconnect
+    user_cmd_channel = f"user:{user_id}:commands"
+    await pubsub.subscribe(canonical_channel, user_cmd_channel)
 
     presence_key = f"presence:chat:{real_chat_id}:{user_id}"
     try:
@@ -223,9 +225,14 @@ async def websocket_chat(
                     continue
                 try:
                     data = json.loads(raw_msg["data"])
-                    if isinstance(data, dict) and data.get("type") == "chat_closed":
-                        await websocket.close(code=4003, reason=f"Chat closed: {data.get('reason', 'unmatched')}")
-                        break
+                    if isinstance(data, dict):
+                        if data.get("type") == "chat_closed":
+                            await websocket.close(code=4003, reason=f"Chat closed: {data.get('reason', 'unmatched')}")
+                            break
+                        # N-17: admin ban forces immediate disconnect
+                        if data.get("type") == "force_disconnect":
+                            await websocket.close(code=4003, reason=data.get("reason", "Account banned."))
+                            break
                     await asyncio.wait_for(websocket.send_json(data), timeout=5.0)
                 except (asyncio.TimeoutError, Exception):
                     break
@@ -295,7 +302,7 @@ async def websocket_chat(
         except Exception:
             pass
         try:
-            await pubsub.unsubscribe(canonical_channel)
+            await pubsub.unsubscribe(canonical_channel, user_cmd_channel)
         except Exception:
             pass
         try:
