@@ -37,6 +37,7 @@ if "celery" not in sys.modules:
 if "boto3" not in sys.modules:
     sys.modules["boto3"] = MagicMock()
     sys.modules["botocore"] = MagicMock()
+    sys.modules["botocore.config"] = MagicMock()
     sys.modules["botocore.exceptions"] = MagicMock()
 
 import jwt

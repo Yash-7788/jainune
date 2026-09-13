@@ -223,7 +223,7 @@ export async function presignUpload(
   contentType: string,
   fileSizeBytes: number,
   mediaType: "photo" | "voice" = "photo",
-  position: number = 1
+  position?: number
 ): Promise<PresignUploadResponse> {
   const res = await apiPost<{
     media_id: string;
@@ -234,7 +234,7 @@ export async function presignUpload(
     media_type: mediaType,
     content_type: contentType,
     file_size_bytes: fileSizeBytes,
-    position,
+    ...(position !== undefined ? { position } : {}),
   });
   if (!res.success) throw { _apiError: res.error };
   return {

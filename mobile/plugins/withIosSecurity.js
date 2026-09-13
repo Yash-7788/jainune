@@ -1,8 +1,52 @@
-const { withDangerousMod } = require("@expo/config-plugins");
+const { withDangerousMod, withInfoPlist, withEntitlementsPlist } = require("@expo/config-plugins");
 const fs = require("fs");
 const path = require("path");
 
-module.exports = function withIosSecurity(config) {
+function withIosSecurityInfo(config) {
+  return withInfoPlist(config, (config) => {
+    config.modResults.NSAppTransportSecurity = {
+      ...config.modResults.NSAppTransportSecurity,
+      NSAllowsArbitraryLoads: false,
+      NSExceptionDomains: {
+        ...(config.modResults.NSAppTransportSecurity?.NSExceptionDomains || {}),
+        localhost: {
+          NSExceptionAllowsInsecureHTTPLoads: true,
+        },
+        "127.0.0.1": {
+          NSExceptionAllowsInsecureHTTPLoads: true,
+        },
+      },
+      NSPinnedDomains: {
+        ...(config.modResults.NSAppTransportSecurity?.NSPinnedDomains || {}),
+        "api.jainune.com": {
+          NSIncludesSubdomains: true,
+          NSPinnedLeafIdentities: [
+            {
+              "SPKI-SHA256-BASE64": "k20YWfohKw3kUj5t5K65soVIyzxPCQFvMQkxZpmGsoo=",
+            },
+            {
+              "SPKI-SHA256-BASE64": "WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=",
+            },
+          ],
+        },
+      },
+    };
+    return config;
+  });
+}
+
+function withIosSecurityEntitlements(config) {
+  return withEntitlementsPlist(config, (config) => {
+    const existing = config.modResults["com.apple.developer.associated-domains"] || [];
+    const domain = "applinks:jainune.com";
+    if (!existing.includes(domain)) {
+      config.modResults["com.apple.developer.associated-domains"] = [...existing, domain];
+    }
+    return config;
+  });
+}
+
+function withIosSecurityPod(config) {
   return withDangerousMod(config, [
     "ios",
     async (config) => {
@@ -44,4 +88,8 @@ module.exports = function withIosSecurity(config) {
       return config;
     },
   ]);
+}
+
+module.exports = function withIosSecurity(config) {
+  return withIosSecurityPod(withIosSecurityEntitlements(withIosSecurityInfo(config)));
 };

@@ -17,6 +17,9 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.jainune.app",
+      "associatedDomains": [
+        "applinks:jainune.com"
+      ],
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Jainune uses your approximate location to connect you with nearby verified Jain singles in your region.",
         "NSMicrophoneUsageDescription": "Jainune requires microphone access to record your 7-second voice snapshot and audio sparks.",

@@ -45,7 +45,8 @@ export default function Step19Screen() {
     setUploading(true);
     setError(null);
     try {
-      const { media_id, upload_url, cdn_url, presigned_fields } = await getPresignedUploadUrl("photo");
+      const nextPosition = Math.min(6, photos.length + 1);
+      const { media_id, upload_url, cdn_url, presigned_fields } = await getPresignedUploadUrl("photo", nextPosition);
       await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg", presigned_fields);
       await confirmUpload(media_id);
       setPhotos((prev) => [...prev, { mediaId: media_id, localUri: asset.uri, cdnUrl: cdn_url }]);
@@ -54,7 +55,7 @@ export default function Step19Screen() {
     } finally {
       setUploading(false);
     }
-  }, []);
+  }, [photos.length]);
 
   // Android Activity destruction recovery (budget devices / low memory)
   useEffect(() => {

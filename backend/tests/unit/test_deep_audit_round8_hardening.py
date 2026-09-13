@@ -8,9 +8,13 @@ R8-3: Account soft-delete user_devices push notification token purging.
 R8-4: Case-insensitive and alias normalization for settings.environment.
 """
 
+import sys
 import unittest
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+
+if "botocore.config" not in sys.modules:
+    sys.modules["botocore.config"] = MagicMock()
 
 from app.core.config import Settings
 
@@ -206,6 +210,104 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("u.show_me = 'everyone'", executed_query)
         # Verify caller gender passed as $14 argument
         self.assertIn("man", query_args)
+
+    # -----------------------------------------------------------------------
+    # FINDING-01: Auto-assign free slot & prevent slot 1 overwrite
+    # -----------------------------------------------------------------------
+    @patch("boto3.client")
+    async def test_05_upload_request_auto_assigns_free_slot(self, mock_boto):
+        """When position is None, request_upload auto-assigns next free slot (e.g. 2 when 1 is occupied)."""
+        from app.routers.media import request_upload, UploadRequestBody
+
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_post.return_value = {"url": "https://s3.example.com", "fields": {}}
+        mock_boto.return_value = mock_s3
+
+        executed_inserts = []
+        mock_conn = AsyncMock()
+
+        async def track_fetch(query, *args):
+            if "SELECT position, status" in query:
+                return [{"position": 1, "status": "approved", "s3_key": "uploads/u1/photo/m1.jpg"}]
+            return []
+
+        async def track_execute(query, *args):
+            if "INSERT INTO user_media" in query:
+                executed_inserts.append(args)
+            return "INSERT 1"
+
+        mock_conn.fetch.side_effect = track_fetch
+        mock_conn.execute.side_effect = track_execute
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+
+        current_user = {"id": uuid.uuid4(), "role": "user"}
+        mock_redis = AsyncMock()
+
+        body = UploadRequestBody(
+            media_type="photo",
+            content_type="image/jpeg",
+            file_size_bytes=1024 * 500,
+            position=None,
+        )
+
+        res = await request_upload(body, current_user, mock_db, mock_redis)
+        self.assertIsNotNone(res.media_id)
+        self.assertEqual(len(executed_inserts), 1)
+        # Position is argument $5 in INSERT query
+        target_pos = executed_inserts[0][4]
+        self.assertEqual(target_pos, 2)
+
+    @patch("app.services.media_processor._delete_from_quarantine")
+    @patch("boto3.client")
+    async def test_06_upload_request_cleans_up_replaced_s3_key(self, mock_boto, mock_del_quarantine):
+        """Explicit slot replacement deletes old quarantined S3 object to prevent orphaning."""
+        from app.routers.media import request_upload, UploadRequestBody
+
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_post.return_value = {"url": "https://s3.example.com", "fields": {}}
+        mock_boto.return_value = mock_s3
+
+        mock_conn = AsyncMock()
+
+        async def track_fetch(query, *args):
+            if "SELECT position, status" in query:
+                return [{"position": 1, "status": "pending", "s3_key": "uploads/u1/photo/old_pic.jpg"}]
+            return []
+
+        mock_conn.fetch.side_effect = track_fetch
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+
+        current_user = {"id": uuid.uuid4(), "role": "user"}
+        mock_redis = AsyncMock()
+
+        body = UploadRequestBody(
+            media_type="photo",
+            content_type="image/jpeg",
+            file_size_bytes=1024 * 500,
+            position=1,
+        )
+
+        res = await request_upload(body, current_user, mock_db, mock_redis)
+        self.assertIsNotNone(res.media_id)
+        mock_del_quarantine.assert_called_once_with("uploads/u1/photo/old_pic.jpg")
 
 
 if __name__ == "__main__":
