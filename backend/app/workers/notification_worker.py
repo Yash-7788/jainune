@@ -22,7 +22,7 @@ import asyncpg
 
 from app.celery_app import celery_app
 from app.core.config import settings
-from app.services.push_notifications import send_push, send_push_multicast
+from app.services.push_notifications import get_user_device_tokens, send_push, send_push_multicast
 from app.workers.worker_pool import get_worker_conn, run_worker_task
 
 log = logging.getLogger(__name__)
@@ -37,14 +37,54 @@ async def _get_conn() -> asyncpg.Connection:
     return await get_worker_conn()
 
 
-async def _is_dedup(key: str, ttl: int = 120) -> bool:
+async def _check_and_lock_dedup(key: str, in_flight_ttl: int = 60) -> tuple[bool, str]:
+    """Acquires an in-flight reservation token. Returns (is_duplicate: bool, token: str)."""
     try:
         from app.core.redis import get_redis
         r = get_redis()
-        res = await r.set(f"notify:dedup:{key}", "1", nx=True, ex=ttl)
-        return not res
+        if await r.exists(f"notify:dedup:{key}"):
+            return True, ""
+        token = uuid.uuid4().hex
+        acquired = await r.set(f"notify:inflight:{key}", token, nx=True, ex=in_flight_ttl)
+        return not acquired, token
     except Exception:
-        return False
+        return False, ""
+
+
+async def _commit_dedup(key: str, token: str, ttl: int = 120) -> None:
+    """Commit durable deduplication after successful push delivery and clean in-flight key."""
+    try:
+        from app.core.redis import get_redis
+        r = get_redis()
+        pipe = r.pipeline()
+        pipe.set(f"notify:dedup:{key}", "1", ex=ttl)
+        pipe.delete(f"notify:inflight:{key}")
+        await pipe.execute()
+    except Exception:
+        pass
+
+
+async def _rollback_dedup(key: str, token: str) -> None:
+    """Release in-flight reservation on delivery failure so retries succeed."""
+    try:
+        from app.core.redis import get_redis
+        r = get_redis()
+        lua = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        await r.eval(lua, 1, f"notify:inflight:{key}", token)
+    except Exception:
+        pass
+
+
+async def _is_dedup(key: str, ttl: int = 120) -> bool:
+    """Backward-compatible deduplication check."""
+    is_dup, _ = await _check_and_lock_dedup(key, in_flight_ttl=ttl)
+    return is_dup
 
 
 # ---------------------------------------------------------------------------
@@ -57,17 +97,20 @@ def notify_new_match(self, match_id: str) -> None:
     """Push to both users when a mutual match is created."""
 
     async def _run():
-        if await _is_dedup(f"match:{match_id}", ttl=300):
+        dedup_key = f"match:{match_id}"
+        is_dup, token = await _check_and_lock_dedup(dedup_key, in_flight_ttl=60)
+        if is_dup:
             log.info("notify_new_match: duplicate notification for match %s skipped", match_id)
             return
         conn = await _get_conn()
+        delivered = False
         try:
             m_uuid = uuid.UUID(str(match_id))
             row = await conn.fetchrow(
                 """
                 SELECT
-                    u_a.first_name AS name_a, u_a.fcm_token AS token_a,
-                    u_b.first_name AS name_b, u_b.fcm_token AS token_b
+                    u_a.id AS id_a, u_a.first_name AS name_a, u_a.fcm_token AS token_a,
+                    u_b.id AS id_b, u_b.first_name AS name_b, u_b.fcm_token AS token_b
                 FROM matches m
                 JOIN users u_a ON u_a.id = COALESCE(m.user_a, m.user_a_id, m.user_id_1)
                 JOIN users u_b ON u_b.id = COALESCE(m.user_b, m.user_b_id, m.user_id_2)
@@ -77,24 +120,44 @@ def notify_new_match(self, match_id: str) -> None:
             )
             if row is None:
                 log.warning("notify_new_match: match %s not found", match_id)
+                await _commit_dedup(dedup_key, token, ttl=300)
                 return
 
-            await asyncio.gather(
-                send_push(
-                    row["token_a"],
+            tokens_a = (await get_user_device_tokens(row["id_a"], conn) if row.get("id_a") else []) or ([row["token_a"]] if row.get("token_a") else [])
+            tokens_b = (await get_user_device_tokens(row["id_b"], conn) if row.get("id_b") else []) or ([row["token_b"]] if row.get("token_b") else [])
+
+            tasks = []
+            for t in set(tokens_a):
+                tasks.append(send_push(
+                    t,
                     "New Match! 🎉",
                     f"You matched with {row['name_b']}! Say hello 👋",
                     {"type": "new_match", "match_id": match_id},
                     db_conn=conn,
-                ),
-                send_push(
-                    row["token_b"],
+                ))
+            for t in set(tokens_b):
+                tasks.append(send_push(
+                    t,
                     "New Match! 🎉",
                     f"You matched with {row['name_a']}! Say hello 👋",
                     {"type": "new_match", "match_id": match_id},
                     db_conn=conn,
-                ),
-            )
+                ))
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                delivered = any(isinstance(r, bool) and r for r in results)
+            else:
+                delivered = True
+
+            if delivered:
+                await _commit_dedup(dedup_key, token, ttl=300)
+            else:
+                await _rollback_dedup(dedup_key, token)
+                raise RuntimeError(f"Failed to deliver push notifications for match {match_id}")
+        except Exception:
+            await _rollback_dedup(dedup_key, token)
+            raise
         finally:
             await conn.close()
 
@@ -102,7 +165,12 @@ def notify_new_match(self, match_id: str) -> None:
         run_worker_task(_run())
     except Exception as exc:
         log.error("notify_new_match failed: %s", exc)
-        raise self.retry(exc=exc, countdown=60)
+        if hasattr(self, "retry"):
+            try:
+                self.retry(exc=exc, countdown=60)
+            except Exception:
+                raise
+
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +192,7 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
                 """
                 SELECT
                     sender.first_name AS sender_name,
+                    recipient.id AS recipient_id,
                     recipient.fcm_token AS recipient_token
                 FROM chats c
                 JOIN users sender    ON sender.id = $2
@@ -136,17 +205,22 @@ def notify_new_message(self, chat_id: str, sender_id: str, preview: str) -> None
                 c_uuid,
                 s_uuid,
             )
-            if row is None or not row["recipient_token"]:
+            if row is None:
+                return
+
+            tokens = await get_user_device_tokens(row["recipient_id"], conn) or ([row["recipient_token"]] if row.get("recipient_token") else [])
+            if not tokens:
                 return
 
             body = preview[:80] + "…" if len(preview) > 80 else preview
-            await send_push(
-                row["recipient_token"],
-                row["sender_name"],
-                body,
-                {"type": "new_message", "chat_id": chat_id, "sender_id": sender_id},
-                db_conn=conn,
-            )
+            for t in set(tokens):
+                await send_push(
+                    t,
+                    row["sender_name"],
+                    body,
+                    {"type": "new_message", "chat_id": chat_id, "sender_id": sender_id},
+                    db_conn=conn,
+                )
         finally:
             await conn.close()
 
@@ -168,7 +242,9 @@ def notify_new_like(self, liked_user_id: str, liker_name: str, liker_id: str = "
 
     async def _run():
         dedup_actor = liker_id if liker_id else liker_name
-        if await _is_dedup(f"like:{liked_user_id}:{dedup_actor}", ttl=120):
+        dedup_key = f"like:{liked_user_id}:{dedup_actor}"
+        is_dup, token = await _check_and_lock_dedup(dedup_key, in_flight_ttl=60)
+        if is_dup:
             log.info("notify_new_like: duplicate like notification for %s skipped", liked_user_id)
             return
         conn = await _get_conn()
@@ -176,24 +252,43 @@ def notify_new_like(self, liked_user_id: str, liker_name: str, liker_id: str = "
             u_uuid = uuid.UUID(str(liked_user_id))
             row = await conn.fetchrow(
                 """
-                SELECT fcm_token, subscription_tier
+                SELECT id, fcm_token, subscription_tier
                 FROM users
                 WHERE id = $1 AND account_status = 'active'
                 """,
                 u_uuid,
             )
-            if row is None or not row["fcm_token"]:
+            if row is None:
+                await _commit_dedup(dedup_key, token, ttl=120)
                 return
             if row["subscription_tier"] not in ("gold", "platinum", "jainune_plus", "jainune_gold"):
+                await _commit_dedup(dedup_key, token, ttl=120)
                 return  # free users don't get like notifications
 
-            await send_push(
-                row["fcm_token"],
-                "Someone likes you! ❤️",
-                f"{liker_name} liked your profile",
-                {"type": "new_like"},
-                db_conn=conn,
-            )
+            tokens = await get_user_device_tokens(row["id"], conn) or ([row["fcm_token"]] if row.get("fcm_token") else [])
+            if not tokens:
+                await _commit_dedup(dedup_key, token, ttl=120)
+                return
+
+            results = []
+            for t in set(tokens):
+                r = await send_push(
+                    t,
+                    "Someone likes you! ❤️",
+                    f"{liker_name} liked your profile",
+                    {"type": "new_like"},
+                    db_conn=conn,
+                )
+                results.append(r)
+
+            if any(results):
+                await _commit_dedup(dedup_key, token, ttl=120)
+            else:
+                await _rollback_dedup(dedup_key, token)
+                raise RuntimeError(f"Failed to deliver like push notification to {liked_user_id}")
+        except Exception:
+            await _rollback_dedup(dedup_key, token)
+            raise
         finally:
             await conn.close()
 
@@ -217,7 +312,9 @@ def notify_match_expiring(self, match_id: str) -> None:
     """
 
     async def _run():
-        if await _is_dedup(f"expiring:{match_id}", ttl=86400):
+        dedup_key = f"expiring:{match_id}"
+        is_dup, token = await _check_and_lock_dedup(dedup_key, in_flight_ttl=60)
+        if is_dup:
             log.info("notify_match_expiring: duplicate expiring notification for %s skipped", match_id)
             return
         conn = await _get_conn()
@@ -226,8 +323,8 @@ def notify_match_expiring(self, match_id: str) -> None:
             row = await conn.fetchrow(
                 """
                 SELECT
-                    u_a.first_name AS name_a, u_a.fcm_token AS token_a,
-                    u_b.first_name AS name_b, u_b.fcm_token AS token_b
+                    u_a.id AS id_a, u_a.first_name AS name_a, u_a.fcm_token AS token_a,
+                    u_b.id AS id_b, u_b.first_name AS name_b, u_b.fcm_token AS token_b
                 FROM matches m
                 JOIN users u_a ON u_a.id = COALESCE(m.user_a, m.user_a_id, m.user_id_1)
                 JOIN users u_b ON u_b.id = COALESCE(m.user_b, m.user_b_id, m.user_id_2)
@@ -236,24 +333,44 @@ def notify_match_expiring(self, match_id: str) -> None:
                 m_uuid,
             )
             if row is None:
+                await _commit_dedup(dedup_key, token, ttl=86400)
                 return
 
-            await asyncio.gather(
-                send_push(
-                    row["token_a"],
+            tokens_a = await get_user_device_tokens(row["id_a"], conn) or ([row["token_a"]] if row.get("token_a") else [])
+            tokens_b = await get_user_device_tokens(row["id_b"], conn) or ([row["token_b"]] if row.get("token_b") else [])
+
+            tasks = []
+            for t in set(tokens_a):
+                tasks.append(send_push(
+                    t,
                     "Match expiring soon ⏰",
                     f"Your match with {row['name_b']} expires in 24 hours! Send a message.",
                     {"type": "match_expiring", "match_id": match_id},
                     db_conn=conn,
-                ),
-                send_push(
-                    row["token_b"],
+                ))
+            for t in set(tokens_b):
+                tasks.append(send_push(
+                    t,
                     "Match expiring soon ⏰",
                     f"Your match with {row['name_a']} expires in 24 hours! Send a message.",
                     {"type": "match_expiring", "match_id": match_id},
                     db_conn=conn,
-                ),
-            )
+                ))
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                delivered = any(isinstance(r, bool) and r for r in results)
+            else:
+                delivered = True
+
+            if delivered:
+                await _commit_dedup(dedup_key, token, ttl=86400)
+            else:
+                await _rollback_dedup(dedup_key, token)
+                raise RuntimeError(f"Failed to deliver expiring match notification for {match_id}")
+        except Exception:
+            await _rollback_dedup(dedup_key, token)
+            raise
         finally:
             await conn.close()
 

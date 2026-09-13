@@ -344,21 +344,42 @@ async def get_subscription_status(
 
 class FCMTokenBody(BaseModel):
     fcm_token: str = Field(..., min_length=10, max_length=256)
+    device_id: Optional[str] = Field(None, max_length=128)
+    platform: Optional[str] = Field(None, max_length=32)
 
 
 @router.post("/me/fcm-token", status_code=status.HTTP_200_OK)
+@router.put("/me/fcm-token", status_code=status.HTTP_200_OK)
 async def set_fcm_token(
     body: FCMTokenBody,
     current_user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Register or update device FCM push notification token."""
+    """Register or update device FCM push notification token across multi-device user_devices table."""
+    uid = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2",
             body.fcm_token,
-            current_user["user_id"],
+            uid,
         )
+        try:
+            await conn.execute(
+                """
+                INSERT INTO user_devices (user_id, token, device_id, platform, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (user_id, token) DO UPDATE
+                SET updated_at = NOW(),
+                    device_id = COALESCE($3, user_devices.device_id),
+                    platform = COALESCE($4, user_devices.platform)
+                """,
+                uid,
+                body.fcm_token,
+                body.device_id,
+                body.platform,
+            )
+        except Exception as exc:
+            log.warning("Failed to persist multi-device token in user_devices for %s: %s", uid, exc)
     return {"success": True, "message": "FCM token registered"}
 
 

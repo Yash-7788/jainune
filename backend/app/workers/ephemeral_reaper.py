@@ -104,22 +104,44 @@ def reap_ephemeral_media() -> None:
                 return
 
             objects_to_delete = [{"Key": r["s3_key"]} for r in rows if r.get("s3_key")]
+            deleted_keys: set[str] = set()
+            failed_keys: list[str] = []
+
             if objects_to_delete:
                 try:
-                    await asyncio.to_thread(
+                    resp = await asyncio.to_thread(
                         s3.delete_objects,
                         Bucket=settings.aws_s3_quarantine_bucket,
-                        Delete={"Objects": objects_to_delete, "Quiet": True},
+                        Delete={"Objects": objects_to_delete, "Quiet": False},
                     )
-                except (BotoCoreError, ClientError) as exc:
+                    if isinstance(resp, dict):
+                        deleted_keys = {d["Key"] for d in resp.get("Deleted", []) if isinstance(d, dict) and "Key" in d}
+                        failed_keys = [e["Key"] for e in resp.get("Errors", []) if isinstance(e, dict) and "Key" in e]
+                    else:
+                        deleted_keys = {obj["Key"] for obj in objects_to_delete}
+                except (BotoCoreError, ClientError, Exception) as exc:
                     log.warning("Batch S3 delete failed in reap_ephemeral_media: %s", exc)
+                    failed_keys = [obj["Key"] for obj in objects_to_delete]
 
-            row_ids = [r["id"] for r in rows]
-            await conn.execute(
-                "UPDATE user_media SET s3_purged = TRUE WHERE id = ANY($1::uuid[])",
-                row_ids,
-            )
-            log.info("reap_ephemeral_media: purged %d media rows", len(rows))
+            if failed_keys:
+                try:
+                    from app.core.redis import get_redis
+                    r_inst = get_redis()
+                    if r_inst:
+                        await r_inst.sadd("s3:failed_deletions", *failed_keys)
+                except Exception as exc:
+                    log.warning("Failed to record reaper S3 deletion failures in Redis: %s", exc)
+
+            purged_row_ids = [
+                r["id"] for r in rows
+                if not r.get("s3_key") or r["s3_key"] in deleted_keys
+            ]
+            if purged_row_ids:
+                await conn.execute(
+                    "UPDATE user_media SET s3_purged = TRUE WHERE id = ANY($1::uuid[])",
+                    purged_row_ids,
+                )
+                log.info("reap_ephemeral_media: purged %d of %d media rows", len(purged_row_ids), len(rows))
         finally:
             await conn.close()
 

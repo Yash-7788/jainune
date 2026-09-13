@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -103,23 +104,53 @@ async def _get_access_token() -> str:
     return token
 
 
+async def get_user_device_tokens(user_id: uuid.UUID, conn: Any) -> list[str]:
+    """Fetch all active device tokens for a user across multi-device user_devices table."""
+    try:
+        rows = await conn.fetch("SELECT token FROM user_devices WHERE user_id = $1", user_id)
+        tokens = [r["token"] for r in rows if r.get("token")]
+        if tokens:
+            return tokens
+    except Exception as exc:
+        log.debug("user_devices query failed for %s: %s", user_id, exc)
+    try:
+        row = await conn.fetchrow("SELECT fcm_token FROM users WHERE id = $1", user_id)
+        if row and row.get("fcm_token"):
+            return [row["fcm_token"]]
+    except Exception:
+        pass
+    return []
+
+
 async def prune_invalid_device_token(device_token: str, conn: Any = None) -> None:
-    """Nullifies unregistered / rotated device token from users table."""
+    """Removes unregistered / rotated device token from user_devices and users table."""
     if not device_token:
         return
+    query = """
+        WITH deleted_devices AS (
+            DELETE FROM user_devices WHERE token = $1
+        )
+        UPDATE users SET fcm_token = NULL WHERE fcm_token = $1
+    """
+    fallback_query = "UPDATE users SET fcm_token = NULL WHERE fcm_token = $1"
     try:
         if conn is not None:
-            await conn.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", device_token)
+            try:
+                await conn.execute(query, device_token)
+            except Exception:
+                await conn.execute(fallback_query, device_token)
         else:
             import asyncpg
             conn_temp = await asyncpg.connect(settings.database_url)
             try:
-                await conn_temp.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = $1", device_token)
+                try:
+                    await conn_temp.execute(query, device_token)
+                except Exception:
+                    await conn_temp.execute(fallback_query, device_token)
             finally:
                 await conn_temp.close()
-        log.info("Pruned invalid device token: %s...", device_token[:10])
     except Exception as exc:
-        log.warning("Failed to prune invalid device token %s: %s", device_token[:10], exc)
+        log.warning("prune_invalid_device_token: failed to nullify dead token: %s", exc)
 
 
 async def send_push(

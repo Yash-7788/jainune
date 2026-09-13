@@ -982,6 +982,10 @@ async def logout_endpoint(
     await sliding_window_rate_limit(f"ratelimit:auth:logout:{user_id}", 30, 60, redis)
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+        try:
+            await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
+        except Exception:
+            pass
         await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
 
     # Invalidate feed cache and active session keys

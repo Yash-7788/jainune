@@ -37,3 +37,20 @@
 3. **Feed & Telemetry Atomicity:**
    - `core_people_finder.py` uses Redis Lua script to pop items from `feed:cache:{user_id}`, eliminating race conditions during concurrent feed fetches.
    - Telemetry worker drains Redis stream/list and executes DB `executemany` before issuing `xdel` / `ltrim`.
+
+---
+
+## 3. Additional Findings 1-9 (Production Hardening)
+
+| Finding | Component | Root Cause & Remediation | Status |
+|---|---|---|---|
+| Finding 1 | `backend/app/routers/admin.py` | Moderator `get_user_detail()` referenced non-existent columns (`marital_status`, `dietary_preference`, `gotra`, `sub_sect`, `sampradaya`, `is_verified`); aligned with canonical schema using backward-compatible aliases (`is_photo_verified AS is_verified`, `community_sect AS sub_sect`). | **FIXED + VERIFIED** |
+| Finding 2 | `backend/app/workers/daily_compatible.py` | Distributed lock `lock:daily_compatible` could expire and be deleted by another worker; hardened with UUID owner token and atomic Lua compare-and-delete script in `finally:` block. | **FIXED + VERIFIED** |
+| Finding 3 | `backend/app/routers/media.py` | Single media delete ignored failed keys from `_delete_s3_keys_sync`; captured returned failed keys and persisted to Redis retry set `s3:failed_deletions`. | **FIXED + VERIFIED** |
+| Finding 4 | `backend/app/workers/ephemeral_reaper.py` | `reap_ephemeral_media()` used `Quiet: True` and updated `s3_purged = TRUE` for all queried rows; switched to `Quiet: False`, parsed `Errors` and `Deleted`, added failed keys to retry set, and updated `s3_purged` only for confirmed deleted rows. | **FIXED + VERIFIED** |
+| Finding 5 | `backend/app/workers/notification_worker.py` | Dedup key was recorded before push delivery; implemented two-phase commit: in-flight reservation token (`notify:inflight:...`), permanent dedup committed only on confirmed delivery, and rollback on failure. | **FIXED + VERIFIED** |
+| Finding 6 | `backend/migrations/0023_user_devices.sql`, `users.py`, `auth.py`, `push_notifications.py` | Single `fcm_token` in `users` overwrote multi-device sessions; added `user_devices` table supporting multiple active devices per user, routed pushes to all active tokens, and atomic CTE cleanup on invalid tokens. | **FIXED + VERIFIED** |
+| Finding 7 | `backend/app/workers/daily_compatible.py` | Unbounded `user_list` accumulation in memory; capped working set per run with `MAX_ELIGIBLE_USERS = 5000` and checkpointed pipeline flushing. | **FIXED + VERIFIED** |
+| Finding 8 | `backend/app/routers/chats.py`, `backend/app/routers/websockets.py` | Chat message published to multiple Redis channels causing double delivery; standardized on single canonical pub/sub channel `chat:{id}`. | **FIXED + VERIFIED** |
+| Finding 9 | `backend/app/routers/location.py` | Location waitlist registration accepted caller-supplied unauthenticated phone number; strictly bound waitlist insertion to authenticated caller identity `current_user.get("phone_number")`. | **FIXED + VERIFIED** |
+

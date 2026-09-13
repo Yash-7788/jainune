@@ -126,9 +126,15 @@ async def verify_location(
             "message": f"Welcome to Jainune! Active in {zone['name']}.",
         })
 
-    # Out of coverage: register on waitlist
+    # Out of coverage: register on waitlist (bound strictly to authenticated identity, Finding 9)
+    phone = current_user.get("phone_number")
+    if body.phone_number and phone and body.phone_number != phone:
+        log.warning(
+            "Waitlist phone override attempt rejected for user %s: supplied %s != verified %s",
+            user_id, body.phone_number, phone,
+        )
+
     try:
-        phone = body.phone_number or current_user.get("phone_number")
         await save_city_waitlist(
             phone_number=phone,
             lat=body.latitude,

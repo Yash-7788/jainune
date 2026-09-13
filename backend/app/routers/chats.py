@@ -523,12 +523,9 @@ async def send_message(
             "moderation_disclaimer": msg.moderation_disclaimer,
         },
     })
-    channels = {f"chat:{actual_chat_id}"}
-    if chat.get("match_id"):
-        channels.add(f"chat:{chat['match_id']}")
-    channels.add(f"chat:{chat_id}")
-    for ch in channels:
-        await redis.publish(ch, payload_str)
+    # Publish to Redis pub/sub for WebSocket fan-out on canonical chat channel (Finding 8)
+    canonical_channel = f"chat:{actual_chat_id}"
+    await redis.publish(canonical_channel, payload_str)
 
     # Dispatch FCM push notification to recipient only if not actively in this chat
     try:
@@ -619,11 +616,8 @@ async def unmatch_chat(
     # Evict active WebSocket sessions over Redis
     try:
         eviction_payload = json.dumps({"type": "chat_closed", "reason": "unmatched"})
-        channels = {f"chat:{actual_chat_id}", f"chat:{chat_id}"}
-        if chat.get("match_id"):
-            channels.add(f"chat:{chat['match_id']}")
-        for ch in channels:
-            await redis.publish(ch, eviction_payload)
+        canonical_channel = f"chat:{actual_chat_id}"
+        await redis.publish(canonical_channel, eviction_payload)
     except Exception:
         pass
 

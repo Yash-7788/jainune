@@ -201,13 +201,11 @@ async def websocket_chat(
             await websocket.close(code=4003, reason="Communication blocked.")
             return
 
-    # ── 4. Redis pub/sub subscription ────────────────────────────────────────
+    # ── 4. Redis pub/sub subscription on canonical chat channel (Finding 8) ───
     pubsub = redis.pubsub()
     real_chat_id = row["id"]
-    sub_channels = {f"chat:{real_chat_id}", f"chat:{chat_id}"}
-    if row.get("match_id"):
-        sub_channels.add(f"chat:{row['match_id']}")
-    await pubsub.subscribe(*sub_channels)
+    canonical_channel = f"chat:{real_chat_id}"
+    await pubsub.subscribe(canonical_channel)
 
     presence_key = f"presence:chat:{real_chat_id}:{user_id}"
     try:
@@ -297,7 +295,7 @@ async def websocket_chat(
         except Exception:
             pass
         try:
-            await pubsub.unsubscribe(*sub_channels)
+            await pubsub.unsubscribe(canonical_channel)
         except Exception:
             pass
         try:

@@ -355,10 +355,25 @@ async def delete_media(
 
         s3_key = row["s3_key"]
         if s3_key:
+            failed_keys = []
             try:
-                await asyncio.to_thread(_delete_s3_keys_sync, [s3_key])
+                failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, [s3_key])
             except Exception:
-                pass
+                failed_keys = [s3_key]
+
+            if failed_keys:
+                r = redis
+                if r is None:
+                    try:
+                        from app.core.redis import get_redis
+                        r = get_redis()
+                    except Exception:
+                        r = None
+                if r is not None:
+                    try:
+                        await r.sadd("s3:failed_deletions", *failed_keys)
+                    except Exception as exc:
+                        log.warning("Failed to record failed S3 deletion in retry set: %s", exc)
 
         await conn.execute("DELETE FROM user_media WHERE id = $1 AND user_id = $2", media_id, user_id)
 

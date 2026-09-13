@@ -63,7 +63,8 @@ async def _run_async() -> None:
 
     # Distributed lock: prevents two concurrent worker instances from corrupting feed queues
     lock_key = "lock:daily_compatible"
-    lock_acquired = await redis.set(lock_key, "1", nx=True, ex=3600)
+    lock_token = uuid.uuid4().hex
+    lock_acquired = await redis.set(lock_key, lock_token, nx=True, ex=3600)
     if not lock_acquired:
         log.warning("run_daily_compatible: another instance is already running — skipping")
         await conn.close()
@@ -73,11 +74,13 @@ async def _run_async() -> None:
     try:
         log.info("run_daily_compatible: start")
 
-        # --- Fetch all eligible users via keyset pagination (NEW-013) ---
+        # --- Fetch eligible users via keyset pagination with bounded working set (Finding 7) ---
         user_list = []
         last_id = uuid.UUID("00000000-0000-0000-0000-000000000000")
         BATCH_FETCH_SIZE = 1000
-        while True:
+        MAX_ELIGIBLE_USERS = 5000  # Cap in-memory working set per run to prevent OOM (Finding 7)
+
+        while len(user_list) < MAX_ELIGIBLE_USERS:
             batch = await conn.fetch(
                 """
                 SELECT
@@ -96,7 +99,7 @@ async def _run_async() -> None:
                 ORDER BY id ASC
                 LIMIT $2
                 """,
-                last_id, BATCH_FETCH_SIZE,
+                last_id, min(BATCH_FETCH_SIZE, MAX_ELIGIBLE_USERS - len(user_list)),
             )
             if not batch:
                 break
@@ -212,7 +215,14 @@ async def _run_async() -> None:
         log.info("run_daily_compatible: complete")
     finally:
         try:
-            await redis.delete(lock_key)
+            release_script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("del", KEYS[1])
+                else
+                    return 0
+                end
+            """
+            await redis.eval(release_script, 1, lock_key, lock_token)
         except Exception as exc:
             log.debug("Lock release ignored: %s", exc)
         await conn.close()

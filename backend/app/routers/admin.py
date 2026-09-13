@@ -166,11 +166,13 @@ async def get_user_detail(
         query = """
             SELECT
                 u.id, u.phone_number, u.email, u.first_name, u.gender, u.date_of_birth,
-                u.height_cm, u.marital_status, u.dietary_preference, u.gotra,
-                u.sub_sect, u.sampradaya, u.bio, u.job_title, u.company, u.education,
+                u.height_cm, u.dietary_strictness, u.eats_root_vegetables, u.eats_onion_garlic,
+                u.paryushan_mode, u.community_sect, u.community_sect AS sub_sect,
+                u.mother_tongue, u.city, u.state, u.bio, u.job_title, u.company, u.education,
+                u.profession, u.employer, u.annual_income_range, u.looking_for,
                 u.account_status, u.subscription_tier, u.trust_score, u.created_at, u.updated_at,
-                u.last_active_at, u.location_zone, u.is_verified, u.is_paused,
-                u.suspend_until, u.deleted_at,
+                u.last_active_at, u.location_zone, u.is_photo_verified, u.is_photo_verified AS is_verified,
+                u.is_paused, u.suspend_until, u.deleted_at,
                 (SELECT COUNT(*) FROM reports WHERE reported_id = u.id) AS report_count,
                 (SELECT COUNT(*) FROM dignity_badges WHERE to_user_id = u.id) AS badge_count,
                 (SELECT COUNT(*) FROM user_media WHERE user_id = u.id AND status = 'approved') AS media_count
