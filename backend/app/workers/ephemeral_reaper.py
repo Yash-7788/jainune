@@ -534,3 +534,23 @@ def purge_stale_location_waitlist() -> None:
             await conn.close()
 
     run_worker_task(_run())
+
+
+# ---------------------------------------------------------------------------
+# Task: reap stale processing media (>30m stuck in pending/processing)
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="app.workers.ephemeral_reaper.reap_stale_processing_media")
+def reap_stale_processing_media() -> None:
+    """Cleans up uploads stuck in pending/processing for > 30 minutes."""
+    from app.services.media_processor import reap_stale_processing_media as _reap
+    from app.core.database import get_pool
+
+    async def _run():
+        pool = get_pool()
+        reaped = await _reap(pool)
+        if reaped > 0:
+            log.info("reap_stale_processing_media: cleaned up %d stuck uploads", reaped)
+
+    run_worker_task(_run())
