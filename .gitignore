@@ -64,3 +64,8 @@ credentials/
 
 .code-intelligence/
 .claude/
+.frigg/
+.infigraphignore
+.cursor/
+.kiro/
+.windsurf/
