@@ -143,7 +143,7 @@ async def _run_moderation(
                     UPDATE user_media
                     SET status = 'rejected',
                         rejection_reason = $1
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     """,
                     size_reason, media_id,
                 )

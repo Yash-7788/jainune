@@ -48,10 +48,13 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
     # -----------------------------------------------------------------------
     # R8-2: Media moderation race condition protection
     # -----------------------------------------------------------------------
+    @patch("app.services.media_processor._check_s3_size", return_value=(True, None))
     @patch("app.services.media_processor.get_pool")
     @patch("app.services.media_processor._rekognition_check")
     @patch("app.services.media_processor._delete_from_quarantine")
-    async def test_02_media_moderation_guard_prevents_overwrite(self, mock_del_quarantine, mock_rekog, mock_get_pool):
+    async def test_02_media_moderation_guard_prevents_overwrite(
+        self, mock_del_quarantine, mock_rekog, mock_get_pool, mock_s3_size
+    ):
         """If media status was already changed, rejection should not downgrade user status."""
         from app.services.media_processor import _run_moderation
 
@@ -90,6 +93,39 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         # Confirm users table was NOT downgraded to pending_media because UPDATE returned "UPDATE 0"
         downgrade_updates = [q for q, args in executed_queries if "pending_media" in q]
         self.assertEqual(len(downgrade_updates), 0)
+
+    @patch("app.services.media_processor._check_s3_size", return_value=(False, "File too large"))
+    @patch("app.services.media_processor.get_pool")
+    @patch("app.services.media_processor._delete_from_quarantine")
+    async def test_02b_s3_size_failure_guard(
+        self, mock_del_quarantine, mock_get_pool, mock_s3_size
+    ):
+        """S3 size failure rejection query must also include status = 'processing' guard."""
+        from app.services.media_processor import _run_moderation
+
+        executed_queries = []
+        mock_conn = AsyncMock()
+
+        async def track_execute(query, *args):
+            executed_queries.append((query, args))
+            return "UPDATE 1"
+
+        mock_conn.execute.side_effect = track_execute
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+        mock_get_pool.return_value = mock_db
+
+        media_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        await _run_moderation(media_id, "uploads/pic.jpg", "photo", user_id)
+
+        media_updates = [q for q, args in executed_queries if "UPDATE user_media" in q and "status = 'rejected'" in q]
+        self.assertTrue(len(media_updates) >= 1)
+        self.assertIn("status = 'processing'", media_updates[0])
 
     # -----------------------------------------------------------------------
     # R8-3: Account soft-delete user_devices push notification token purging
