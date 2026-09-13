@@ -48,15 +48,6 @@ LAUNCH_ZONES: list[dict[str, Any]] = [
         "radius_km": 100.0,
         "description": "All Bengaluru Urban & Rural, Central, VV Puram, Jayanagar, Malleshwaram, Whitefield, Electronic City, Yelahanka, Hosur border, Ramanagara",
     },
-    {
-        "id": "chennai",
-        "name": "Chennai Metropolitan Area",
-        "state": "Tamil Nadu",
-        "center_lat": 13.0827,
-        "center_lon": 80.2707,
-        "radius_km": 100.0,
-        "description": "Chennai City, Guindy, T. Nagar, Adyar, Velachery, Anna Nagar, Tambaram, OMR, Porur, Ambattur, Chengalpattu, Kanchipuram",
-    },
 ]
 
 
@@ -99,7 +90,7 @@ def verify_location_anti_spoofing(
         except ValueError:
             return False, "Invalid network client IP address."
 
-    if is_mocked and not settings.debug:
+    if is_mocked:
         return False, "Mock location detected. Please disable mock location apps or developer options."
 
     if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
@@ -118,7 +109,7 @@ def verify_location_anti_spoofing(
             return False, "Location accuracy is too low to verify launch zone."
 
     # Server-side edge network corroboration
-    if headers and not settings.debug:
+    if headers:
         h = {k.lower(): v for k, v in headers.items()}
         has_cf_headers = any(k.startswith("cf-") for k in h)
 
@@ -166,19 +157,6 @@ def verify_location_zone(lat: float, lon: float) -> tuple[bool, dict[str, Any] |
 
     if best_zone:
         return True, best_zone
-
-    # Development mode allowance: permit any coordinate when debugging
-    if settings.debug:
-        return True, {
-            "id": "chennai",
-            "name": "Chennai Metropolitan Area (Dev Allowance)",
-            "state": "Tamil Nadu",
-            "center_lat": lat,
-            "center_lon": lon,
-            "radius_km": 9999.0,
-            "distance_to_center_km": 0.0,
-            "description": "Development mode location allowance",
-        }
 
     return False, None
 

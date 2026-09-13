@@ -68,15 +68,18 @@ async def verify_location(
     user_id = current_user.get("id") or current_user.get("user_id")
     await sliding_window_rate_limit(f"ratelimit:loc_verify:{user_id}", 15, 60, redis)
 
+    from app.core.config import settings
+
     # 1. Anti-spoofing & integrity gate
     client_ip = get_trusted_client_ip(request)
+    is_mocked = body.is_mocked if not settings.debug else False
     valid_gps, spoof_error = verify_location_anti_spoofing(
         lat=body.latitude,
         lon=body.longitude,
-        is_mocked=body.is_mocked,
+        is_mocked=is_mocked,
         accuracy_meters=body.accuracy_meters,
         client_ip=client_ip,
-        headers=dict(request.headers),
+        headers=dict(request.headers) if not settings.debug else {},
     )
     if not valid_gps:
         raise HTTPException(
@@ -85,6 +88,18 @@ async def verify_location(
         )
 
     is_allowed, zone = verify_location_zone(body.latitude, body.longitude)
+    if not is_allowed and settings.debug:
+        is_allowed = True
+        zone = {
+            "id": "chennai",
+            "name": "Chennai (Development Allowance)",
+            "state": "Tamil Nadu",
+            "center_lat": body.latitude,
+            "center_lon": body.longitude,
+            "radius_km": 9999.0,
+            "distance_to_center_km": 0.0,
+            "description": "Development mode location allowance",
+        }
 
     if is_allowed and zone:
         import uuid
