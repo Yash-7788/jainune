@@ -7,7 +7,7 @@ module.exports = function withIosSecurity(config) {
     "ios",
     async (config) => {
       const iosRoot = config.modRequest.platformProjectRoot;
-      const targetDir = path.join(iosRoot, "Jainune");
+      const targetDir = path.join(iosRoot, "JainuneSecurityModule");
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
@@ -28,15 +28,15 @@ module.exports = function withIosSecurity(config) {
           if (contents.includes(insertMarker)) {
             contents = contents.replace(
               insertMarker,
-              `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './Jainune'`
+              `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
             );
           } else if (contents.includes("post_install")) {
             contents = contents.replace(
               "post_install",
-              `pod 'JainuneSecurityModule', :path => './Jainune'\n\n  post_install`
+              `pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'\n\n  post_install`
             );
           } else {
-            contents += `\n  pod 'JainuneSecurityModule', :path => './Jainune'\n`;
+            contents += `\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'\n`;
           }
           fs.writeFileSync(podfilePath, contents);
         }
