@@ -211,8 +211,10 @@ async def http_exception_handler(request: Request, exc: HTTPException | Starlett
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    from fastapi.encoders import jsonable_encoder
     code, title, friendly_msg = resolve_friendly_error(422, "validation error")
-    envelope = create_error_envelope(422, code, title, friendly_msg, raw_details=exc.errors())
+    safe_details = jsonable_encoder(exc.errors())
+    envelope = create_error_envelope(422, code, title, friendly_msg, raw_details=safe_details)
     return JSONResponse(status_code=422, content=envelope)
 
 

@@ -29,7 +29,12 @@ export function validatePhone(raw: string): { valid: boolean; e164: string; erro
       error: "Enter a valid 10-digit Indian mobile number.",
     };
   }
-  const digits = stripped.replace(/^(\+91|91)/, "");
+  let digits = stripped;
+  if (stripped.startsWith("+91") && stripped.length === 13) {
+    digits = stripped.slice(3);
+  } else if (stripped.startsWith("91") && stripped.length === 12) {
+    digits = stripped.slice(2);
+  }
   return { valid: true, e164: `+91${digits}` };
 }
 
