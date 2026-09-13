@@ -53,7 +53,7 @@ jobs:
 
       - name: Run verification script
         run: |
-          python verify_endpoints.py
+          python scripts/verify_endpoints.py
 
       - name: Install pgvector in postgres service
         run: |

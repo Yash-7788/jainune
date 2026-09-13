@@ -2,7 +2,7 @@ import os
 import re
 from pathlib import Path
 
-root_dir = Path(__file__).resolve().parent
+root_dir = Path(__file__).resolve().parent.parent
 frontend_dir = root_dir / "mobile" / "src"
 backend_dir = root_dir / "backend" / "app" / "routers"
 
