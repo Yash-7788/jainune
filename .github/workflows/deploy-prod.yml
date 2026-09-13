@@ -63,3 +63,14 @@ jobs:
               docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py
             fi
             docker compose -f backend/docker-compose.prod.yml up -d --remove-orphans
+            echo "Awaiting API healthcheck verification on loopback..."
+            for i in $(seq 1 30); do
+              if curl -s -f http://127.0.0.1:8000/livez > /dev/null; then
+                echo "Deployment successful: API is healthy and accepting connections."
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: Deployment health check failed after 60s! Inspecting logs..."
+            docker compose -f backend/docker-compose.prod.yml logs --tail 50 api
+            exit 1

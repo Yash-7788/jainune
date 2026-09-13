@@ -47,6 +47,8 @@ jobs:
           fi
 
       - name: Build Android AAB
+        env:
+          EXPO_PUBLIC_API_URL: ${{ secrets.EXPO_PUBLIC_API_URL || 'https://api.jainune.com/v1' }}
         run: |
           cd mobile/android
           chmod +x gradlew
@@ -89,6 +91,8 @@ jobs:
           pod install
 
       - name: Build iOS Workspace (Compilation Check)
+        env:
+          EXPO_PUBLIC_API_URL: ${{ secrets.EXPO_PUBLIC_API_URL || 'https://api.jainune.com/v1' }}
         run: |
           cd mobile/ios
           xcodebuild -workspace Jainune.xcworkspace -scheme Jainune -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO clean build

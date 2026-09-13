@@ -9,7 +9,7 @@ Fulfills:
 """
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 router = APIRouter(tags=["Legal"])
 
@@ -18,6 +18,7 @@ _BASE_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="index, follow">
   <title>{title} - Jainune</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0D0F14; color: #E8EBF2; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem 1.5rem; }}
@@ -46,6 +47,26 @@ _BASE_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+@router.get("/robots.txt", response_class=Response)
+def robots_txt() -> Response:
+    content = (
+        "User-agent: *\n"
+        "Allow: /legal/\n"
+        "Allow: /privacy\n"
+        "Allow: /terms\n"
+        "Allow: /child-safety\n"
+        "Allow: /community-guidelines\n"
+        "Allow: /delete-account\n"
+        "Disallow: /v1/\n"
+        "Disallow: /metrics\n"
+        "Disallow: /livez\n"
+        "Disallow: /readyz\n"
+        "Disallow: /docs\n"
+        "Disallow: /openapi.json\n"
+    )
+    return Response(content=content, media_type="text/plain")
+
 
 @router.get("/privacy", response_class=HTMLResponse)
 @router.get("/legal/privacy", response_class=HTMLResponse)
