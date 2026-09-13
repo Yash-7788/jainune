@@ -103,7 +103,6 @@ dependencies {
     implementation "androidx.multidex:multidex:2.0.1"
 }
 
-react {
-    /* Autolinking — picks up react-native-razorpay, @react-native-google-signin, etc. */
-    autolinkLibrariesWithApp()
-}
+/* Autolinking — picks up react-native-razorpay, @react-native-google-signin, etc. */
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
+

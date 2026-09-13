@@ -47,11 +47,6 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
-      - name: Prebuild Android project
-        run: |
-          cd mobile
-          npx expo prebuild --platform android --no-install
-
       - name: Ensure debug keystore for compile validation
         run: |
           mkdir -p ~/.android
@@ -96,7 +91,7 @@ jobs:
       - name: Prebuild iOS project
         run: |
           cd mobile
-          npx expo prebuild --platform ios --no-install
+          npx expo prebuild --platform ios --clean --no-install
 
       - name: Install CocoaPods
         run: |

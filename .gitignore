@@ -21,6 +21,7 @@ build/
 node_modules/
 .expo/
 .expo-shared/
+.gradle/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

@@ -24,7 +24,20 @@ module.exports = function withIosSecurity(config) {
       if (fs.existsSync(podfilePath)) {
         let contents = fs.readFileSync(podfilePath, "utf8");
         if (!contents.includes("JainuneSecurityModule")) {
-          contents += `\n  pod 'JainuneSecurityModule', :path => './Jainune'\n`;
+          const insertMarker = "use_native_modules!";
+          if (contents.includes(insertMarker)) {
+            contents = contents.replace(
+              insertMarker,
+              `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './Jainune'`
+            );
+          } else if (contents.includes("post_install")) {
+            contents = contents.replace(
+              "post_install",
+              `pod 'JainuneSecurityModule', :path => './Jainune'\n\n  post_install`
+            );
+          } else {
+            contents += `\n  pod 'JainuneSecurityModule', :path => './Jainune'\n`;
+          }
           fs.writeFileSync(podfilePath, contents);
         }
       }
