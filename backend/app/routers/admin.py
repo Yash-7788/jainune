@@ -294,6 +294,8 @@ async def suspend_user(
             if res == "UPDATE 0":
                 raise HTTPException(status_code=404, detail="User not found")
 
+            await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
@@ -309,7 +311,12 @@ async def suspend_user(
 
     try:
         r = get_redis()
-        await r.delete(f"user:session:{user_id}")
+        await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
+        import json as _json
+        await r.publish(
+            f"user:{user_id}:commands",
+            _json.dumps({"type": "force_disconnect", "reason": "Account suspended."}),
+        )
     except Exception:
         pass
 

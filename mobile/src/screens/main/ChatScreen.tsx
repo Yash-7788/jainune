@@ -121,7 +121,7 @@ export default function ChatScreen() {
     const calculateTime = () => {
       const diff = new Date(momentumExpiry).getTime() - Date.now();
       if (diff > 0) {
-        setHoursLeft(Math.max(1, Math.ceil(diff / (1000 * 60 * 60))));
+        setHoursLeft(Math.min(24, Math.max(1, Math.ceil(diff / (1000 * 60 * 60)))));
       } else {
         setHoursLeft(0);
       }
