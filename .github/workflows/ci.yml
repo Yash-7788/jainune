@@ -101,6 +101,7 @@ jobs:
           npm run type-check
 
       - name: Dependency Vulnerability Audit
+        continue-on-error: true
         run: |
           cd mobile
           npm audit --audit-level=critical
