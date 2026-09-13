@@ -83,7 +83,14 @@ export default function EmailScreen() {
     >
       <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
 
-      {error && <ErrorToast title={error.title} message={error.message} visible />}
+      {error && (
+        <ErrorToast
+          title={error.title}
+          message={error.message}
+          visible
+          onDismiss={() => setError(null)}
+        />
+      )}
 
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>

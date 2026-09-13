@@ -4,7 +4,7 @@ import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import OnboardingStep, { ChoiceChip } from "../OnboardingStep";
 import { useOnboardingStore } from "../../../store/onboardingStore";
-import { submitStep6 } from "../../../api/onboardingApi";
+import { submitStep6, submitStep7 } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
 
@@ -29,9 +29,16 @@ export default function Step06Screen() {
     try {
       await submitStep6(selected);
       updateData({ dietaryStrictness: selected });
-      setStep(7);
-      // Step 7 only shown for pure_jain / vaishnav — always navigate, step handles skip
-      navigation.navigate("Step07", { dietaryStrictness: selected });
+      const isDetail = selected === "pure_jain" || selected === "vaishnav";
+      if (isDetail) {
+        setStep(7);
+        navigation.navigate("Step07", { dietaryStrictness: selected });
+      } else {
+        await submitStep7(false, false);
+        updateData({ eatsRootVeg: false, eatsOnionGarlic: false });
+        setStep(8);
+        navigation.navigate("Step08");
+      }
     } catch (err) {
       setError(extractError(err));
     } finally {

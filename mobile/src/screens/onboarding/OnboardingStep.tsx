@@ -29,10 +29,59 @@ interface OnboardingStepProps {
   loading?: boolean;
   disabled?: boolean;
   error?: { title: string; message: string } | null;
+  onDismissError?: () => void;
   skipLabel?: string;
   onSkip?: () => void;
   scrollable?: boolean;
 }
+
+const screenNameToStep: Record<string, number> = {
+  Step02: 2,
+  Step03: 3,
+  Step04: 4,
+  Step05: 5,
+  Step06: 6,
+  Step07: 7,
+  Step08: 8,
+  Step09: 9,
+  Step10: 10,
+  Step11: 11,
+  Step12: 12,
+  Step13: 13,
+  Step14: 14,
+  Step15: 15,
+  Step16: 16,
+  Step17: 17,
+  Step18: 18,
+  Step19: 19,
+  Step20: 20,
+  Step21: 21,
+  Step22: 22,
+};
+
+const stepToScreenName: Record<number, string> = {
+  2: "Step02",
+  3: "Step03",
+  4: "Step04",
+  5: "Step05",
+  6: "Step06",
+  7: "Step07",
+  8: "Step08",
+  9: "Step09",
+  10: "Step10",
+  11: "Step11",
+  12: "Step12",
+  13: "Step13",
+  14: "Step14",
+  15: "Step15",
+  16: "Step16",
+  17: "Step17",
+  18: "Step18",
+  19: "Step19",
+  20: "Step20",
+  21: "Step21",
+  22: "Step22",
+};
 
 export default function OnboardingStep({
   title,
@@ -43,6 +92,7 @@ export default function OnboardingStep({
   loading,
   disabled,
   error,
+  onDismissError,
   skipLabel,
   onSkip,
   scrollable = false,
@@ -57,17 +107,35 @@ export default function OnboardingStep({
   React.useEffect(() => {
     if (loading) {
       setToastVisible(false);
+    } else if (error) {
+      setToastVisible(true);
     }
-  }, [loading]);
+  }, [loading, error]);
 
   const handleBack = () => {
     if (navigation.canGoBack()) {
-      const curStep = useOnboardingStore.getState().step;
-      if (curStep > 2) {
-        useOnboardingStore.getState().setStep(curStep - 1);
+      const routes = (navigation as any).getState?.()?.routes;
+      const prevRoute = routes && routes.length > 1 ? routes[routes.length - 2] : null;
+      if (prevRoute && screenNameToStep[prevRoute.name]) {
+        useOnboardingStore.getState().setStep(screenNameToStep[prevRoute.name]);
+      } else {
+        const curStep = useOnboardingStore.getState().step;
+        if (curStep > 2) {
+          useOnboardingStore.getState().setStep(curStep - 1);
+        }
       }
       navigation.goBack();
     } else {
+      const curStep = useOnboardingStore.getState().step;
+      if (curStep > 2) {
+        const prevStep = curStep - 1;
+        useOnboardingStore.getState().setStep(prevStep);
+        const prevScreen = stepToScreenName[prevStep];
+        if (prevScreen) {
+          (navigation as any).navigate(prevScreen);
+          return;
+        }
+      }
       Alert.alert(
         "Exit Onboarding?",
         "Are you sure you want to exit and return to the login screen?",
@@ -129,7 +197,10 @@ export default function OnboardingStep({
           title={error.title}
           message={error.message}
           visible={toastVisible}
-          onDismiss={() => setToastVisible(false)}
+          onDismiss={() => {
+            setToastVisible(false);
+            onDismissError?.();
+          }}
         />
       )}
 

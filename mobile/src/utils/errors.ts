@@ -119,5 +119,6 @@ export const ERROR_MAP: Record<ErrorCode, FriendlyError> = {
 };
 
 export function getFriendlyError(code: ErrorCode | string): FriendlyError {
-  return ERROR_MAP[code as ErrorCode] ?? ERROR_MAP.TEMPORARY_ERROR;
+  const err = ERROR_MAP[code as ErrorCode] ?? ERROR_MAP.TEMPORARY_ERROR;
+  return { ...err };
 }
