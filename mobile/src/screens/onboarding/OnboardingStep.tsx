@@ -109,6 +109,10 @@ export function ChoiceChip({ label, selected, onPress, emoji }: ChipProps) {
       onPress={onPress}
       activeOpacity={0.8}
       style={[styles.chip, selected && styles.chipSelected]}
+      accessible={true}
+      accessibilityRole="checkbox"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: !!selected }}
     >
       {emoji ? <Text style={styles.chipEmoji}>{emoji}</Text> : null}
       <Text style={[styles.chipLabel, selected && styles.chipLabelSelected]}>{label}</Text>
@@ -130,6 +134,11 @@ export function ToggleRow({ label, sub, value, onToggle }: ToggleRowProps) {
       onPress={() => onToggle(!value)}
       style={styles.toggleRow}
       activeOpacity={0.85}
+      accessible={true}
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityHint={sub}
+      accessibilityState={{ checked: !!value }}
     >
       <View style={styles.toggleLeft}>
         <Text style={styles.toggleLabel}>{label}</Text>

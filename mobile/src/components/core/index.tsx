@@ -40,6 +40,10 @@ export function PrimaryButton({ label, onPress, loading, disabled, style }: Prim
       disabled={disabled || loading}
       activeOpacity={0.85}
       style={[styles.primaryOuter, style]}
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }}
     >
       <LinearGradient
         colors={disabled ? ["#CCBCB0", "#CCBCB0"] : gradients.button}
@@ -73,6 +77,10 @@ export function GhostButton({ label, onPress, disabled, style }: GhostButtonProp
       disabled={disabled}
       activeOpacity={0.7}
       style={[styles.ghost, style]}
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled }}
     >
       <Text style={styles.ghostLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
     </TouchableOpacity>
@@ -102,6 +110,7 @@ export function JainuneInput({ label, error, style, ...props }: JainuneInputProp
         placeholderTextColor={colors.muted}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        accessibilityLabel={label || (typeof props.placeholder === "string" ? props.placeholder : undefined)}
         {...props}
       />
       {error ? <Text style={styles.errorText} maxFontSizeMultiplier={1.35}>{error}</Text> : null}
