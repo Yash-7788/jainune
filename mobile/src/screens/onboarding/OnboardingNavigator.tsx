@@ -5,11 +5,12 @@
  */
 
 import React, { useEffect, useRef } from "react";
-import { View, StyleSheet, StatusBar, BackHandler } from "react-native";
+import { View, StyleSheet, StatusBar, BackHandler, Alert } from "react-native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { colors, spacing } from "../../theme/tokens";
 import { ProgressBar } from "../../components/core";
 import { useOnboardingStore } from "../../store/onboardingStore";
+import { useAuthStore } from "../../store/authStore";
 
 // All step screens
 import Step02Screen from "./steps/Step02BasicInfo";
@@ -100,17 +101,27 @@ export default function OnboardingNavigator() {
 
   useEffect(() => {
     const onBackPress = () => {
-      const step = useOnboardingStore.getState().step;
-      if (step > 2) {
-        const prevStep = step - 1;
-        const prevScreen = stepToScreenName[prevStep];
-        if (prevScreen && navRef.current) {
-          if (navRef.current.canGoBack()) {
-            navRef.current.goBack();
-          } else {
-            navRef.current.navigate(prevScreen);
+      if (navRef.current) {
+        if (navRef.current.canGoBack()) {
+          const curStep = useOnboardingStore.getState().step;
+          if (curStep > 2) {
+            useOnboardingStore.getState().setStep(curStep - 1);
           }
-          useOnboardingStore.getState().setStep(prevStep);
+          navRef.current.goBack();
+          return true;
+        } else {
+          Alert.alert(
+            "Exit Onboarding?",
+            "Are you sure you want to exit and return to the login screen?",
+            [
+              { text: "Stay", style: "cancel" },
+              {
+                text: "Log Out",
+                style: "destructive",
+                onPress: () => useAuthStore.getState().logout(),
+              },
+            ]
+          );
           return true;
         }
       }

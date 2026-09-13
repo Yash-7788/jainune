@@ -11,8 +11,11 @@ import {
   Platform,
   ScrollView,
   TouchableOpacity,
+  Alert,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
+import { useAuthStore } from "../../store/authStore";
+import { useOnboardingStore } from "../../store/onboardingStore";
 import { colors, spacing, typography } from "../../theme/tokens";
 import { BackIcon } from "../../components/core/Icons";
 import { PrimaryButton, ErrorToast } from "../../components/core";
@@ -45,11 +48,50 @@ export default function OnboardingStep({
   scrollable = false,
 }: OnboardingStepProps) {
   const navigation = useNavigation();
+  const [toastVisible, setToastVisible] = React.useState(!!error);
+
+  React.useEffect(() => {
+    setToastVisible(!!error);
+  }, [error]);
+
+  React.useEffect(() => {
+    if (loading) {
+      setToastVisible(false);
+    }
+  }, [loading]);
+
+  const handleBack = () => {
+    if (navigation.canGoBack()) {
+      const curStep = useOnboardingStore.getState().step;
+      if (curStep > 2) {
+        useOnboardingStore.getState().setStep(curStep - 1);
+      }
+      navigation.goBack();
+    } else {
+      Alert.alert(
+        "Exit Onboarding?",
+        "Are you sure you want to exit and return to the login screen?",
+        [
+          { text: "Stay", style: "cancel" },
+          {
+            text: "Log Out",
+            style: "destructive",
+            onPress: () => useAuthStore.getState().logout(),
+          },
+        ]
+      );
+    }
+  };
+
+  const handleNextPress = () => {
+    setToastVisible(false);
+    onNext();
+  };
 
   const content = (
     <View style={styles.inner}>
       {/* Back */}
-      <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
+      <TouchableOpacity onPress={handleBack} style={styles.back}>
         <BackIcon color={colors.dark} />
       </TouchableOpacity>
 
@@ -64,7 +106,7 @@ export default function OnboardingStep({
       <View style={styles.cta}>
         <PrimaryButton
           label={nextLabel}
-          onPress={onNext}
+          onPress={handleNextPress}
           loading={loading}
           disabled={disabled || loading}
         />
@@ -82,7 +124,14 @@ export default function OnboardingStep({
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
-      {error && <ErrorToast title={error.title} message={error.message} visible />}
+      {error && toastVisible && (
+        <ErrorToast
+          title={error.title}
+          message={error.message}
+          visible={toastVisible}
+          onDismiss={() => setToastVisible(false)}
+        />
+      )}
 
       <ScrollView
         contentContainerStyle={{ flexGrow: 1 }}
