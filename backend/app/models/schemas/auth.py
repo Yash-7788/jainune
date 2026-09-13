@@ -155,3 +155,9 @@ class AccessTokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     expires_in: int
+
+
+class LogoutBody(BaseModel):
+    device_id: Optional[str] = Field(None, max_length=128)
+    all_devices: bool = False
+

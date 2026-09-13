@@ -6,7 +6,22 @@
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-constants";
+import * as SecureStore from "expo-secure-store";
 import { apiPost } from "../api/client";
+
+/** Stable, persistent installation identifier for multi-device push routing (R7-3) */
+export async function getOrCreateDeviceId(): Promise<string> {
+  try {
+    let id = await SecureStore.getItemAsync("jainune_device_id");
+    if (!id) {
+      id = `${Platform.OS}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 10)}`;
+      await SecureStore.setItemAsync("jainune_device_id", id);
+    }
+    return id;
+  } catch {
+    return `${Platform.OS}_${Platform.Version}`;
+  }
+}
 
 // Foreground presentation options
 Notifications.setNotificationHandler({
@@ -59,11 +74,13 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     // Send token to backend (non-blocking)
     if (token) {
-      apiPost("/users/me/fcm-token", {
-        fcm_token: token,
-        platform: Platform.OS,
-        device_id: `${Platform.OS}_${Platform.Version}`,
-      }).catch(() => {});
+      getOrCreateDeviceId().then((deviceId) => {
+        apiPost("/users/me/fcm-token", {
+          fcm_token: token,
+          platform: Platform.OS,
+          device_id: deviceId,
+        }).catch(() => {});
+      });
     }
 
     return token;

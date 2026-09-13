@@ -6,6 +6,7 @@
  * Input sanitization rules from frontend_integration_contracts.md §3.1
  */
 
+import * as SecureStore from "expo-secure-store";
 import { apiPost, saveTokens, clearTokens, extractError } from "./client";
 
 // ── Input sanitizers (client-side, matches backend validators) ────────────────
@@ -174,9 +175,16 @@ export async function refreshAccessToken(refreshToken: string): Promise<RefreshD
 }
 
 /** POST /v1/auth/logout */
-export async function logout(): Promise<void> {
+export async function logout(allDevices: boolean = false): Promise<void> {
   try {
-    await apiPost("/auth/logout");
+    let deviceId: string | null = null;
+    try {
+      deviceId = await SecureStore.getItemAsync("jainune_device_id");
+    } catch {}
+    await apiPost("/auth/logout", {
+      device_id: deviceId,
+      all_devices: allDevices,
+    });
   } catch {
     // Ignore — still clear local state
   } finally {

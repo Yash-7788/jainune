@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Optional
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,6 +35,7 @@ from app.models.schemas.auth import (
     EmailOTPRequestBody,
     EmailOTPVerifyBody,
     GoogleAuthBody,
+    LogoutBody,
     OTPRequestBody,
     OTPRequestResponse,
     OTPVerifyBody,
@@ -973,12 +974,14 @@ async def logout_endpoint(
     current_user: CurrentUserForLogout,
     db: DBDep,
     redis: RedisDep,
+    body: Optional[LogoutBody] = None,
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
 ) -> dict:
     """
     Session revocation per SECURITY.md Section 2.2:
     1. Blacklists current access token jti in Redis (<1ms lookup).
     2. Deletes active refresh token from PostgreSQL.
+    3. Scopes user_devices cleanup to current device (R7-2), retaining other devices.
     """
     try:
         payload = await validate_access_token(credentials, redis)
@@ -997,10 +1000,26 @@ async def logout_endpoint(
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
         try:
-            await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
-        except Exception:
-            pass
-        await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
+            if body and body.device_id and not body.all_devices:
+                await conn.execute(
+                    "DELETE FROM user_devices WHERE user_id = $1 AND device_id = $2",
+                    user_id,
+                    body.device_id,
+                )
+                remaining_token = await conn.fetchval(
+                    "SELECT token FROM user_devices WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
+                    user_id,
+                )
+                await conn.execute(
+                    "UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2",
+                    remaining_token,
+                    user_id,
+                )
+            else:
+                await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
+                await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
+        except Exception as exc:
+            log.warning("Failed to clean up user_devices on logout for %s: %s", user_id, exc)
 
     # Invalidate feed cache and active session keys
     try:

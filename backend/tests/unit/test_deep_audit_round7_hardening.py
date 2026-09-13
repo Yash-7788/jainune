@@ -483,7 +483,8 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         mock_redis = AsyncMock()
         mock_redis.eval = AsyncMock(return_value=1)
 
-        with patch("app.routers.location.verify_location_anti_spoofing", return_value=(True, None)), \
+        with patch("app.core.config.settings.debug", False), \
+             patch("app.routers.location.verify_location_anti_spoofing", return_value=(True, None)), \
              patch("app.routers.location.verify_location_zone", return_value=(False, None)), \
              patch("app.routers.location.save_city_waitlist", AsyncMock(side_effect=mock_save_waitlist)):
             resp = await verify_location(
@@ -500,6 +501,227 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         # CRITICAL CHECK: Phone number recorded in waitlist must be authenticated phone, NOT spoofed phone
         self.assertEqual(saved_waitlist[0]["phone_number"], "+919876543210")
         self.assertNotEqual(saved_waitlist[0]["phone_number"], "+911111111111")
+
+    # -----------------------------------------------------------------------
+    # 10. WebSocket typing/read-receipt anti-spoofing (R7-1)
+    # -----------------------------------------------------------------------
+    async def test_10_websocket_typing_read_receipt_anti_spoofing(self):
+        """WebSocket fan-out strictly binds sender_id to authenticated user_id, ignoring client spoofing."""
+        from fastapi import WebSocketDisconnect
+        from app.routers.websockets import websocket_chat
+
+        chat_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        spoofed_id = uuid.uuid4()
+
+        mock_ws = AsyncMock()
+        mock_ws.headers = {"origin": "jainune://app"}
+        mock_ws.accept = AsyncMock()
+        mock_ws.close = AsyncMock()
+
+        frames = [
+            {"type": "typing", "payload": {"sender_id": str(spoofed_id)}},
+            {"type": "read_receipt", "payload": {"sender_id": str(spoofed_id), "message_id": "msg-123"}},
+            {"type": "typing", "payload": None},  # Non-dict payload resilience
+        ]
+        async def mock_receive_json():
+            if frames:
+                return frames.pop(0)
+            raise WebSocketDisconnect()
+
+        mock_ws.receive_json = AsyncMock(side_effect=mock_receive_json)
+        mock_ws.send_json = AsyncMock()
+
+        mock_redis = AsyncMock()
+        mock_redis.getdel = AsyncMock(return_value=str(user_id))
+        mock_redis.set = AsyncMock(return_value=True)
+        mock_redis.delete = AsyncMock(return_value=True)
+
+        published_messages = []
+        async def mock_publish(channel, payload_str):
+            published_messages.append((channel, json.loads(payload_str)))
+            return 1
+        mock_redis.publish = AsyncMock(side_effect=mock_publish)
+
+        mock_pubsub = MagicMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.close = AsyncMock()
+        async def empty_listen():
+            if False:
+                yield {}
+        mock_pubsub.listen = empty_listen
+        mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+
+        mock_conn = AsyncMock()
+        async def mock_fetchrow(query, *args):
+            if "SELECT account_status, suspend_until" in query:
+                return {"account_status": "active", "suspend_until": None, "deleted_at": None}
+            elif "FROM chats" in query:
+                return {"id": chat_id, "match_id": chat_id, "is_unmatched": False, "other_id": other_id}
+            elif "SELECT account_status, deleted_at" in query:
+                return {"account_status": "active", "deleted_at": None}
+            return None
+
+        mock_conn.fetchrow = AsyncMock(side_effect=mock_fetchrow)
+        mock_conn.fetchval = AsyncMock(return_value=None)  # not blocked
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.routers.websockets.get_pool", return_value=mock_pool), \
+             patch("app.routers.websockets.get_redis", return_value=mock_redis), \
+             patch("app.routers.websockets.sliding_window_rate_limit", AsyncMock()):
+            await websocket_chat(websocket=mock_ws, chat_id=chat_id, ticket="valid_ticket")
+
+        # Verify published payloads
+        self.assertEqual(len(published_messages), 3)
+
+        # 1. Typing frame: spoofed sender_id MUST BE OVERWRITTEN by authenticated user_id
+        chan1, msg1 = published_messages[0]
+        self.assertEqual(chan1, f"chat:{chat_id}")
+        self.assertEqual(msg1["type"], "typing")
+        self.assertEqual(msg1["payload"]["sender_id"], str(user_id))
+        self.assertNotEqual(msg1["payload"]["sender_id"], str(spoofed_id))
+
+        # 2. Read receipt frame: spoofed sender_id MUST BE OVERWRITTEN and message_id preserved
+        chan2, msg2 = published_messages[1]
+        self.assertEqual(chan2, f"chat:{chat_id}")
+        self.assertEqual(msg2["type"], "read_receipt")
+        self.assertEqual(msg2["payload"]["sender_id"], str(user_id))
+        self.assertEqual(msg2["payload"]["message_id"], "msg-123")
+        self.assertNotEqual(msg2["payload"]["sender_id"], str(spoofed_id))
+
+        # 3. None payload frame: defaults safely to empty dict + authenticated sender_id
+        chan3, msg3 = published_messages[2]
+        self.assertEqual(chan3, f"chat:{chat_id}")
+        self.assertEqual(msg3["type"], "typing")
+        self.assertEqual(msg3["payload"]["sender_id"], str(user_id))
+
+    # -----------------------------------------------------------------------
+    # 11. Logout scoped to device_id retains other user devices (R7-2)
+    # -----------------------------------------------------------------------
+    async def test_11_logout_scoped_device_id_retains_secondary_device(self):
+        """Logout with device_id prunes only specified device and updates users.fcm_token to remaining device."""
+        from app.routers.auth import logout_endpoint
+        from app.models.schemas.auth import LogoutBody
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": str(user_id)}
+
+        mock_conn = AsyncMock()
+        executed_sqls = []
+
+        async def mock_execute(sql, *args):
+            executed_sqls.append((sql, args))
+            return "DELETE 1"
+
+        async def mock_fetchval(sql, *args):
+            if "SELECT token FROM user_devices" in sql:
+                return "fcm_token_tablet"
+            return None
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+        mock_conn.fetchval = AsyncMock(side_effect=mock_fetchval)
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_redis = AsyncMock()
+        mock_redis.delete = AsyncMock()
+
+        # Call logout with specific device_id
+        body = LogoutBody(device_id="device_phone_123", all_devices=False)
+        with patch("app.routers.auth.validate_access_token", AsyncMock(return_value={"jti": "jti_1", "exp": 9999999999})), \
+             patch("app.routers.auth.revoke_token", AsyncMock()), \
+             patch("app.routers.auth.sliding_window_rate_limit", AsyncMock()):
+            res = await logout_endpoint(
+                current_user=current_user,
+                db=mock_pool,
+                redis=mock_redis,
+                body=body,
+                credentials=MagicMock(),
+            )
+
+        self.assertEqual(res["data"]["message"], "You have been logged out successfully.")
+
+        # Assert refresh_tokens deleted
+        self.assertTrue(any("DELETE FROM refresh_tokens WHERE user_id = $1" in s[0] for s in executed_sqls))
+
+        # Assert user_devices deletion scoped to device_id
+        scoped_device_deletes = [
+            s for s in executed_sqls
+            if "DELETE FROM user_devices WHERE user_id = $1 AND device_id = $2" in s[0]
+        ]
+        self.assertEqual(len(scoped_device_deletes), 1)
+        self.assertEqual(scoped_device_deletes[0][1], (user_id, "device_phone_123"))
+
+        # Assert users.fcm_token updated to remaining device token instead of NULL
+        fcm_updates = [
+            s for s in executed_sqls
+            if "UPDATE users SET fcm_token = $1" in s[0]
+        ]
+        self.assertEqual(len(fcm_updates), 1)
+        self.assertEqual(fcm_updates[0][1], ("fcm_token_tablet", user_id))
+
+    # -----------------------------------------------------------------------
+    # 12. Logout all_devices clears all user devices
+    # -----------------------------------------------------------------------
+    async def test_12_logout_all_devices_wipes_all_device_tokens(self):
+        """Logout with all_devices=True wipes all rows in user_devices and clears users.fcm_token to NULL."""
+        from app.routers.auth import logout_endpoint
+        from app.models.schemas.auth import LogoutBody
+
+        user_id = uuid.uuid4()
+        current_user = {"user_id": str(user_id)}
+
+        mock_conn = AsyncMock()
+        executed_sqls = []
+
+        async def mock_execute(sql, *args):
+            executed_sqls.append((sql, args))
+            return "DELETE 1"
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_redis = AsyncMock()
+        mock_redis.delete = AsyncMock()
+
+        # Call logout with all_devices=True
+        body = LogoutBody(all_devices=True)
+        with patch("app.routers.auth.validate_access_token", AsyncMock(return_value={"jti": "jti_1", "exp": 9999999999})), \
+             patch("app.routers.auth.revoke_token", AsyncMock()), \
+             patch("app.routers.auth.sliding_window_rate_limit", AsyncMock()):
+            res = await logout_endpoint(
+                current_user=current_user,
+                db=mock_pool,
+                redis=mock_redis,
+                body=body,
+                credentials=MagicMock(),
+            )
+
+        self.assertEqual(res["data"]["message"], "You have been logged out successfully.")
+
+        # Assert all user_devices deleted
+        all_device_deletes = [
+            s for s in executed_sqls
+            if "DELETE FROM user_devices WHERE user_id = $1" in s[0] and "device_id = $2" not in s[0]
+        ]
+        self.assertEqual(len(all_device_deletes), 1)
+
+        # Assert users.fcm_token set to NULL
+        fcm_null_updates = [
+            s for s in executed_sqls
+            if "UPDATE users SET fcm_token = NULL" in s[0]
+        ]
+        self.assertEqual(len(fcm_null_updates), 1)
 
 
 if __name__ == "__main__":
