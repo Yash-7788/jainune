@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -31,6 +32,8 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import validate_access_token_raw, sliding_window_rate_limit
 from app.dependencies import CurrentUser, RedisDep
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websockets"])
 

@@ -454,7 +454,18 @@ async def verify_email_otp(
             detail="Maximum OTP verification attempts exceeded. Request a new OTP.",
         )
 
-    stored_hash = await redis.get(session_key)
+    # Atomic GETDEL prevents concurrent requests from double-consuming the same OTP
+    _GETDEL_LUA = "local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end; return v"
+    try:
+        if hasattr(redis, "getdel"):
+            stored_hash = await redis.getdel(session_key)
+        else:
+            stored_hash = await redis.eval(_GETDEL_LUA, 1, session_key)
+    except Exception:
+        stored_hash = await redis.get(session_key)
+        if stored_hash:
+            await redis.delete(session_key)
+
     if not stored_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
 
@@ -463,7 +474,6 @@ async def verify_email_otp(
     if not hmac.compare_digest(stored_str, expected_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code.")
 
-    await redis.delete(session_key)
     await redis.delete(rate_key)
 
     async with db.acquire() as conn:
@@ -617,25 +627,27 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
     google_sub = payload.get("sub")
     raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
     email = canonicalize_email(raw_email) if raw_email else None
+    email_verified = payload.get("email_verified") in (True, "true", "True")
+    verified_email = email if email_verified else None
     name = payload.get("name") or payload.get("given_name")
 
     if not google_sub:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google account identification missing.")
 
-    if email:
-        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
+    if verified_email:
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, verified_email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(google_sub), email,
+            str(google_sub), verified_email,
         )
         is_new_user = row is None
         if is_new_user:
             try:
-                if email:
+                if verified_email:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
@@ -643,13 +655,13 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
                         ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
                         RETURNING id
                         """,
-                        str(google_sub), email, name,
+                        str(google_sub), verified_email, name,
                     )
                 else:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, TRUE, 'google')
+                        VALUES ($1, $2, FALSE, 'google')
                         ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
                         RETURNING id
                         """,
@@ -659,7 +671,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
                 # Concurrent login or existing google_id under different email
                 user_id = await conn.fetchval(
                     "SELECT id FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(google_sub), email,
+                    str(google_sub), verified_email,
                 )
                 if not user_id:
                     raise
@@ -714,25 +726,27 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
     apple_sub = payload.get("sub")
     raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
     email = canonicalize_email(raw_email) if raw_email else None
+    email_verified = payload.get("email_verified") in (True, "true", "True")
+    verified_email = email if email_verified else None
     first_name = body.first_name
 
     if not apple_sub:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple account identification missing.")
 
-    if email:
-        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
+    if verified_email:
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, verified_email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(apple_sub), email,
+            str(apple_sub), verified_email,
         )
         is_new_user = row is None
         if is_new_user:
             try:
-                if email:
+                if verified_email:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
@@ -740,13 +754,13 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
                         ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
                         RETURNING id
                         """,
-                        str(apple_sub), email, first_name,
+                        str(apple_sub), verified_email, first_name,
                     )
                 else:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, TRUE, 'apple')
+                        VALUES ($1, $2, FALSE, 'apple')
                         ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
                         RETURNING id
                         """,
@@ -756,7 +770,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
                 # Concurrent login or existing apple_id under different email
                 user_id = await conn.fetchval(
                     "SELECT id FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(apple_sub), email,
+                    str(apple_sub), verified_email,
                 )
                 if not user_id:
                     raise
