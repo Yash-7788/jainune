@@ -189,7 +189,7 @@ async def _run_moderation(
                         is_processed = TRUE,
                         cdn_url = $1,
                         s3_key = $2
-                    WHERE id = $3
+                    WHERE id = $3 AND status = 'processing'
                     """,
                     cdn_url, prod_key, media_id,
                 )
@@ -213,7 +213,7 @@ async def _run_moderation(
                     UPDATE user_media
                     SET status = 'flagged',
                         rejection_reason = $1
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     """,
                     reason, media_id,
                 )
@@ -221,15 +221,17 @@ async def _run_moderation(
             return
         else:
             async with db.acquire() as conn:
-                await conn.execute(
+                res = await conn.execute(
                     """
                     UPDATE user_media
                     SET status = 'rejected',
                         rejection_reason = $1
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     """,
                     reason, media_id,
                 )
+                if res == "UPDATE 0":
+                    return
                 # If no valid photos remain, downgrade user from active to pending_media (BUG-038)
                 if user_id and media_type == "photo":
                     remaining = await conn.fetchval(
@@ -250,7 +252,7 @@ async def _run_moderation(
         try:
             async with db.acquire() as conn:
                 await conn.execute(
-                    "UPDATE user_media SET status = 'rejected', rejection_reason = $1 WHERE id = $2",
+                    "UPDATE user_media SET status = 'rejected', rejection_reason = $1 WHERE id = $2 AND status = 'processing'",
                     "PROCESSING_FAILED", media_id,
                 )
         except Exception:
