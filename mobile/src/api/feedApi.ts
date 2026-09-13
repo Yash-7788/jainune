@@ -145,8 +145,9 @@ export async function getLikes(): Promise<{ profiles: FeedCandidate[] }> {
   return res.data;
 }
 
-export async function getLikedMe(): Promise<{ likes: FeedCandidate[] }> {
-  const res = await apiGet<{ likes: FeedCandidate[] }>("/interactions/liked-me");
+export async function getLikedMe(cursor?: string): Promise<{ likes: FeedCandidate[]; next_cursor?: string | null }> {
+  const url = cursor ? `/interactions/liked-me?cursor=${encodeURIComponent(cursor)}` : "/interactions/liked-me";
+  const res = await apiGet<{ likes: FeedCandidate[]; next_cursor?: string | null }>(url);
   if (!res.success) throw { _apiError: res.error };
   return res.data;
 }

@@ -42,6 +42,8 @@ export default function LikesScreen() {
   const [tab, setTab] = useState<Tab>("matches");
   const [matches, setMatches] = useState<MatchCard[]>([]);
   const [likedMe, setLikedMe] = useState<MatchCard[]>([]);
+  const [likedMeCursor, setLikedMeCursor] = useState<string | null>(null);
+  const [likedMeLoadingMore, setLikedMeLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
@@ -53,7 +55,7 @@ export default function LikesScreen() {
     try {
       const [matchRes, likedRes, subRes] = await Promise.allSettled([
         getLikes(),
-        getLikedMe(),
+        getLikedMe(),          // first page, no cursor
         getSubscriptionStatus(),
       ]);
 
@@ -96,6 +98,8 @@ export default function LikesScreen() {
             matched_at: c.liked_at,
           }))
         );
+        // N-27: store cursor for next page
+        setLikedMeCursor(likedRes.value.next_cursor ?? null);
       }
     } catch (err) {
       setError(extractError(err));
@@ -104,6 +108,29 @@ export default function LikesScreen() {
       setRefreshing(false);
     }
   }, []);
+
+  // N-27: load next page of liked-me when user scrolls to end
+  const loadMoreLikedMe = useCallback(async () => {
+    if (!likedMeCursor || likedMeLoadingMore) return;
+    setLikedMeLoadingMore(true);
+    try {
+      const res = await getLikedMe(likedMeCursor);
+      const more = (res.likes ?? []).map((c: any) => ({
+        id: c.id,
+        first_name: c.first_name,
+        age: c.age,
+        city: c.city,
+        photo_url: c.photos?.[0]?.url,
+        matched_at: c.liked_at,
+      }));
+      setLikedMe((prev) => [...prev, ...more]);
+      setLikedMeCursor(res.next_cursor ?? null);
+    } catch {
+      // silent — list still shows existing entries
+    } finally {
+      setLikedMeLoadingMore(false);
+    }
+  }, [likedMeCursor, likedMeLoadingMore]);
 
   useFocusEffect(
     useCallback(() => {
@@ -177,6 +204,13 @@ export default function LikesScreen() {
         data={activeData}
         keyExtractor={(item) => item.id}
         numColumns={2}
+        onEndReached={tab === "liked_you" ? loadMoreLikedMe : undefined}
+        onEndReachedThreshold={0.3}
+        ListFooterComponent={
+          tab === "liked_you" && likedMeLoadingMore
+            ? <ActivityIndicator size="small" color={colors.saffron} style={{ marginVertical: 16 }} />
+            : null
+        }
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

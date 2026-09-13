@@ -860,12 +860,14 @@ async def process_store_subscription_event(
                         credits_to_claw_back,
                     )
                 else:
+                    # N-13: 'expired' store event — zero credits to match scheduled reaper behavior
                     await conn.execute(
                         """
                         UPDATE users
                            SET subscription_tier        = 'free',
                                subscription_valid_until = NULL,
                                billing_status           = $2,
+                               super_connect_credits    = 0,
                                updated_at               = NOW()
                          WHERE id = $1
                         """,

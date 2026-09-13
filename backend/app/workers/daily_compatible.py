@@ -12,7 +12,7 @@ The stable marriage step is optional for day-1; core_people_finder alone
 produces the ranked queue the mobile feed consumes via GET /v1/feed.
 This worker pre-computes and caches that queue in Redis so feed calls are O(1).
 
-Redis key: feed_queue:{user_id}   → JSON list of candidate user_ids (TTL 26h)
+Redis key: feed:cache:{user_id}   → JSON list of candidate user_ids (TTL 26h)
 """
 
 from __future__ import annotations
