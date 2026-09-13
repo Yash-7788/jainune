@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Optional
+import uuid
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
