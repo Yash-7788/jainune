@@ -309,6 +309,73 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(res.media_id)
         mock_del_quarantine.assert_called_once_with("uploads/u1/photo/old_pic.jpg")
 
+    # -----------------------------------------------------------------------
+    # FINDING-03: Proactive session replacement notification
+    # -----------------------------------------------------------------------
+    @patch("app.routers.auth.get_redis")
+    async def test_07_login_replaces_session_and_publishes_force_disconnect(self, mock_get_redis):
+        """When user logs in with an existing active session, force_disconnect is published to user commands."""
+        import json
+        from app.routers.auth import _issue_token_response
+
+        mock_redis = AsyncMock()
+        mock_get_redis.return_value = mock_redis
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = "old_token_hash_value"
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        user_id = uuid.uuid4()
+        res = await _issue_token_response(user_id, False, True, mock_conn)
+        self.assertIn("access_token", res["data"])
+        mock_redis.set.assert_called()
+        mock_redis.publish.assert_called_once()
+        call_args = mock_redis.publish.call_args[0]
+        self.assertEqual(call_args[0], f"user:{user_id}:commands")
+        payload = json.loads(call_args[1])
+        self.assertEqual(payload["type"], "force_disconnect")
+        self.assertIn("another device", payload["reason"])
+
+    @patch("app.routers.auth.validate_access_token")
+    @patch("app.routers.auth.sliding_window_rate_limit")
+    @patch("app.routers.auth.revoke_token")
+    async def test_08_logout_all_devices_publishes_force_disconnect(self, mock_revoke, mock_rate, mock_val):
+        """When user logs out with all_devices=True, force_disconnect is published to kick all active sessions."""
+        import json
+        from app.routers.auth import logout_endpoint
+        from app.models.schemas.auth import LogoutBody
+
+        mock_val.return_value = {"jti": "test-jti", "exp": 9999999999}
+        user_id = uuid.uuid4()
+        mock_conn = AsyncMock()
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+
+        mock_redis = AsyncMock()
+        credentials = MagicMock()
+        body = LogoutBody(all_devices=True)
+
+        res = await logout_endpoint(
+            current_user={"id": str(user_id)},
+            db=mock_db,
+            redis=mock_redis,
+            body=body,
+            credentials=credentials,
+        )
+        self.assertTrue(res["success"])
+        self.assertIn("message", res["data"])
+        mock_redis.publish.assert_called_once()
+        call_args = mock_redis.publish.call_args[0]
+        self.assertEqual(call_args[0], f"user:{user_id}:commands")
+        payload = json.loads(call_args[1])
+        self.assertEqual(payload["type"], "force_disconnect")
+
 
 if __name__ == "__main__":
     unittest.main()

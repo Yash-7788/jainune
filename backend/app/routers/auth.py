@@ -168,6 +168,7 @@ async def _issue_token_response(
         await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
 
     # Track old token as replaced by login rather than rotated/theft (BUG-064)
+    # Proactively notify active sessions via user commands channel (FINDING-03)
     if old_token_hash:
         try:
             r = get_redis()
@@ -178,6 +179,18 @@ async def _issue_token_response(
             )
             if hasattr(res, "__await__"):
                 await res
+            pub_res = r.publish(
+                f"user:{user_id}:commands",
+                json.dumps({
+                    "type": "force_disconnect",
+                    "reason": "Session expired due to login from another device. Please sign in again.",
+                }),
+            )
+            if hasattr(pub_res, "__await__"):
+                await pub_res
+            del_res = r.delete(f"user:session:{user_id}")
+            if hasattr(del_res, "__await__"):
+                await del_res
         except Exception as e:
             log.warning("Failed to record session replacement state in Redis: %s", e)
 
@@ -980,8 +993,8 @@ async def logout_endpoint(
     """
     Session revocation per SECURITY.md Section 2.2:
     1. Blacklists current access token jti in Redis (<1ms lookup).
-    2. Deletes active refresh token from PostgreSQL.
-    3. Scopes user_devices cleanup to current device (R7-2), retaining other devices.
+    2. Revokes active refresh token from PostgreSQL (single active session model).
+    3. Scopes push notification token cleanup (user_devices) to current device (retaining other devices for push if not all_devices).
     """
     try:
         payload = await validate_access_token(credentials, redis)
@@ -1024,6 +1037,14 @@ async def logout_endpoint(
     # Invalidate feed cache and active session keys
     try:
         await redis.delete(f"feed:cache:{user_id}", f"user:session:{user_id}")
+        if body and body.all_devices:
+            await redis.publish(
+                f"user:{user_id}:commands",
+                json.dumps({
+                    "type": "force_disconnect",
+                    "reason": "You have been logged out on all devices.",
+                }),
+            )
     except Exception:
         pass
 

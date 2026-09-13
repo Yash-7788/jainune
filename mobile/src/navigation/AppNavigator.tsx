@@ -231,16 +231,26 @@ export const navigationRef = createNavigationContainerRef();
 
 export default function AppNavigator() {
   const authState = useAuthStore((s) => s.state);
-  const pendingIntentRef = useRef<{ name: string; params: any } | null>(null);
+  const pendingIntentsRef = useRef<Array<{ name: string; params: any }>>([]);
+
+  const flushPendingIntents = useCallback(() => {
+    if (authState === "authenticated" && navigationRef.isReady()) {
+      while (pendingIntentsRef.current.length > 0) {
+        const intent = pendingIntentsRef.current.shift();
+        if (intent) {
+          (navigationRef as any).navigate(intent.name, intent.params);
+        }
+      }
+    }
+  }, [authState]);
 
   const routeOrQueue = useCallback(
     (name: string, params: any) => {
       if (authState === "authenticated" && navigationRef.isReady()) {
         (navigationRef as any).navigate(name, params);
-        pendingIntentRef.current = null;
       } else {
-        // Queue intent until authenticated navigation stack mounts (SECOND-014)
-        pendingIntentRef.current = { name, params };
+        // Queue intent until authenticated navigation stack mounts (FIFO queue)
+        pendingIntentsRef.current.push({ name, params });
       }
     },
     [authState]
@@ -249,13 +259,9 @@ export default function AppNavigator() {
   useEffect(() => {
     if (authState === "authenticated") {
       registerForPushNotificationsAsync();
-      if (navigationRef.isReady() && pendingIntentRef.current) {
-        const { name, params } = pendingIntentRef.current;
-        pendingIntentRef.current = null;
-        (navigationRef as any).navigate(name, params);
-      }
+      flushPendingIntents();
     }
-  }, [authState]);
+  }, [authState, flushPendingIntents]);
 
   const handleDeepLinkUrl = useCallback(
     (url: string) => {
@@ -321,11 +327,7 @@ export default function AppNavigator() {
         checkInitialNotificationResponse((name, params) => {
           routeOrQueue(name, params);
         });
-        if (authState === "authenticated" && pendingIntentRef.current) {
-          const { name, params } = pendingIntentRef.current;
-          pendingIntentRef.current = null;
-          (navigationRef as any).navigate(name, params);
-        }
+        flushPendingIntents();
       }}
     >
       {authState === "loading" && <LoadingScreen />}
