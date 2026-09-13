@@ -45,10 +45,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trigger Remote Deployment via SSH
+      - name: Validate Deployment Secrets
         env:
           PROD_HOST: ${{ secrets.PROD_HOST }}
-        if: env.PROD_HOST != ''
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          if [ -z "$PROD_HOST" ] || [ -z "$PROD_USER" ] || [ -z "$PROD_SSH_KEY" ]; then
+            echo "::error::Required deployment secrets (PROD_HOST, PROD_USER, PROD_SSH_KEY) are missing or empty. Deployment aborted."
+            exit 1
+          fi
+
+      - name: Trigger Remote Deployment via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.PROD_HOST }}

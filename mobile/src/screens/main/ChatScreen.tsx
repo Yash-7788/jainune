@@ -53,6 +53,10 @@ import { useWebSocket } from "../../hooks/useWebSocket";
 import { getSubscriptionStatus } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { MAX_MESSAGE_LENGTH, validateUuid } from "../../security/inputValidation";
+import {
+  enableScreenCaptureProtection,
+  disableScreenCaptureProtection,
+} from "../../security/antiReversing";
 import ContentModerationSheet, {
   scanMessage,
   DetectedType,
@@ -93,6 +97,14 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
   const [chatBlocked, setChatBlocked] = useState(false);
+
+  // Screen-capture & recording protection for private 1:1 conversation
+  useEffect(() => {
+    enableScreenCaptureProtection();
+    return () => {
+      disableScreenCaptureProtection();
+    };
+  }, []);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [isOnline, setIsOnline] = useState(paramOtherUser.is_online ?? false);
