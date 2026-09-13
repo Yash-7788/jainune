@@ -88,14 +88,13 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
-      - name: Prebuild iOS project
+      - name: Prebuild iOS project & Install CocoaPods
+        env:
+          EXPO_NO_GIT_STATUS: "1"
         run: |
           cd mobile
-          npx expo prebuild --platform ios --clean --no-install
-
-      - name: Install CocoaPods
-        run: |
-          cd mobile/ios
+          npx expo prebuild --platform ios --clean
+          cd ios
           pod install
 
       - name: Build iOS Workspace (Compilation Check)
