@@ -58,4 +58,7 @@
 | Finding 12 | `deploy/nginx/nginx.conf` | Auth location `/v1/auth/` lacked HTTP/1.1 keepalive headers and had tight 3-request burst; added `proxy_http_version 1.1;`, `proxy_set_header Connection "";`, and relaxed burst to 10. | **FIXED + VERIFIED** |
 | Finding 13 | `.github/workflows/deploy-prod.yml` | Backend deployment exited immediately after `docker compose up` without verifying container health; added loopback `/livez` healthcheck polling loop with failure exit. | **FIXED + VERIFIED** |
 | Finding 14 | `.github/workflows/mobile-build.yml` | Mobile release workflow built AAB/IPA without injecting API endpoint environment variables; injected `EXPO_PUBLIC_API_URL` into build environment. | **FIXED + VERIFIED** |
+| Finding 15 | `backend/app/routers/admin.py` | Admin suspend did not revoke refresh tokens or evict active WebSocket sessions; hardened with immediate DB token deletion, cache purge, and WebSocket `force_disconnect` command publication. | **FIXED + VERIFIED** |
+| Finding 16 | `mobile/src/screens/main/ChatScreen.tsx` | Momentum timer countdown desync on client clock skew; clamped remaining hours calculation to `[1, 24]`. | **FIXED + VERIFIED** |
+| Finding 17 | `backend/app/workers/worker_pool.py` | Celery tasks executing outside prefork workers fell back to standalone unpooled connections on every invocation; implemented lazy connection pool creation with auto-reuse. | **FIXED + VERIFIED** |
 
