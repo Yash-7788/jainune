@@ -4,7 +4,6 @@
     "slug": "jainune",
     "scheme": "jainune",
     "version": "1.0.0",
-    "sdkVersion": "51.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -76,7 +75,10 @@
         }
       ],
       "./plugins/withIosSecurity",
-      "./plugins/withAndroidSecurity"
+      "./plugins/withAndroidSecurity",
+      "expo-font",
+      "expo-secure-store",
+      "expo-asset"
     ],
     "extra": {
       "eas": {
