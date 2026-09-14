@@ -50,6 +50,12 @@ _ATTRACTION_EVENTS = {"profile_view_end", "voice_play_end", "prompt_expand"}
 # View time threshold (seconds) above which we treat a profile view as implicit like signal
 _DWELL_ATTRACTION_THRESHOLD_S = 12
 
+# Maximum reasonable duration for any single telemetry event (1 hour)
+_MAX_DURATION_MS = 3_600_000
+
+# Per (actor_id, target_id) cooldown for dwell-based vector attraction (1 hour)
+_DWELL_ATTRACTION_COOLDOWN_S = 3600
+
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -73,8 +79,11 @@ class TelemetryEvent(BaseModel):
     @field_validator("duration_ms")
     @classmethod
     def validate_duration(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v < 0:
-            raise ValueError("duration_ms must be non-negative")
+        if v is not None:
+            if v < 0:
+                raise ValueError("duration_ms must be non-negative")
+            if v > _MAX_DURATION_MS:
+                raise ValueError(f"duration_ms cannot exceed {_MAX_DURATION_MS}ms (1 hour)")
         return v
 
 
@@ -122,6 +131,8 @@ async def ingest_events(
     dropped = 0
 
     pipe = redis.pipeline(transaction=False)
+    seen_dwell_targets: set[uuid.UUID] = set()
+
     for event in batch.events:
         entry: dict = {
             "actor_id": str(actor_id),
@@ -148,18 +159,22 @@ async def ingest_events(
             and event.duration_ms is not None
             and event.duration_ms >= _DWELL_ATTRACTION_THRESHOLD_S * 1000
         ):
-            pipe.xadd(
-                "vector:update:queue",
-                {
-                    "actor_id": str(actor_id),
-                    "target_id": str(event.target_user_id),
-                    "direction": "attract",
-                    "alpha": "0.05",  # half-strength vs explicit like
-                    "reason": "dwell_signal",
-                },
-                maxlen=10_000,
-                approximate=True,
-            )
+            if event.target_user_id not in seen_dwell_targets:
+                seen_dwell_targets.add(event.target_user_id)
+                cooldown_key = f"cooldown:dwell_attract:{actor_id}:{event.target_user_id}"
+                if await redis.set(cooldown_key, "1", ex=_DWELL_ATTRACTION_COOLDOWN_S, nx=True):
+                    pipe.xadd(
+                        "vector:update:queue",
+                        {
+                            "actor_id": str(actor_id),
+                            "target_id": str(event.target_user_id),
+                            "direction": "attract",
+                            "alpha": "0.05",  # half-strength vs explicit like
+                            "reason": "dwell_signal",
+                        },
+                        maxlen=10_000,
+                        approximate=True,
+                    )
 
     try:
         await pipe.execute()

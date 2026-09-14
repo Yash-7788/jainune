@@ -13,7 +13,7 @@ Beat schedule:
   every 1  min   → flush_telemetry_buffer
   every 5  min   → reap_ephemeral_media
   every 15 min   → downgrade_expired_subscriptions
-  every 1  hour  → reap_stale_matches
+  every 1  hour  → reap_stale_matches + aggregate_hourly_metrics
   every 24 hours → run_daily_compatible + purge_deleted_users
 """
 
@@ -74,6 +74,10 @@ celery_app.conf.update(
         "reap-stale-matches-hourly": {
             "task": "app.workers.ephemeral_reaper.reap_stale_matches",
             "schedule": crontab(minute=0),  # top of every hour
+        },
+        "aggregate-hourly-metrics-hourly": {
+            "task": "app.workers.telemetry_worker.aggregate_hourly_metrics",
+            "schedule": crontab(minute=5),  # top of every hour + 5m
         },
         "run-daily-compatible-2am": {
             "task": "app.workers.daily_compatible.run_daily_compatible",

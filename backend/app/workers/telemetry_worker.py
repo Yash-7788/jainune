@@ -11,7 +11,7 @@ Redis key convention:
 Tasks:
   flush_telemetry_buffer()   every 1 min (beat)
     → LRANGE + DEL buffer → bulk INSERT INTO telemetry_events
-  aggregate_hourly_metrics() every 1 hour (beat — piggybacks on reap_stale_matches crontab)
+  aggregate_hourly_metrics() every 1 hour (beat — scheduled via celery_app.py at :05)
     → reads telemetry_events for last hour, writes aggregated rows to telemetry_hourly
 
 Telemetry event shape (JSON):
@@ -231,7 +231,7 @@ async def _flush_async() -> None:
 def aggregate_hourly_metrics() -> None:
     """
     Aggregate telemetry_events from the last hour into telemetry_hourly.
-    Called by ephemeral_reaper's hourly crontab to avoid a separate beat entry.
+    Runs hourly via Celery beat schedule at crontab(minute=5).
     """
     asyncio.run(_aggregate_async())
 
