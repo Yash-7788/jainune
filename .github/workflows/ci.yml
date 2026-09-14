@@ -51,6 +51,10 @@ jobs:
         run: |
           bandit -r backend/app -ll -q
 
+      - name: Dependency Vulnerability Audit (Safety)
+        run: |
+          safety check -r backend/requirements.txt --full-report
+
       - name: Run verification script
         run: |
           python scripts/verify_endpoints.py
@@ -101,7 +105,6 @@ jobs:
           npm run type-check
 
       - name: Dependency Vulnerability Audit
-        continue-on-error: true
         run: |
           cd mobile
           npm audit --audit-level=critical
