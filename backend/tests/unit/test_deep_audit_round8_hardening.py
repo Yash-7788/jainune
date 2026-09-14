@@ -376,6 +376,150 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(call_args[1])
         self.assertEqual(payload["type"], "force_disconnect")
 
+    # -----------------------------------------------------------------------
+    # FINDING-04: Chat message idempotency key & deduplication
+    # -----------------------------------------------------------------------
+    @patch("app.routers.chats._assert_participant")
+    @patch("app.routers.chats.sliding_window_rate_limit")
+    async def test_09_send_message_deduplicates_by_idempotency_key(self, mock_rate, mock_assert):
+        """When sending a message with existing idempotency_key, existing row is returned without duplicate insert or pub/sub."""
+        from datetime import datetime, timezone
+        from app.routers.chats import send_message
+        from app.models.schemas.chat import SendMessageRequest
+
+        chat_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        existing_msg_id = uuid.uuid4()
+        mock_assert.return_value = {
+            "id": chat_id,
+            "match_id": uuid.uuid4(),
+            "participant_1_id": user_id,
+            "participant_2_id": uuid.uuid4(),
+            "is_unmatched": False,
+            "is_expired": False,
+        }
+
+        mock_conn = AsyncMock()
+        existing_row = {
+            "id": existing_msg_id,
+            "chat_id": chat_id,
+            "sender_id": user_id,
+            "message_type": "text",
+            "content": "Jai Jinendra",
+            "media_url": None,
+            "is_read": False,
+            "created_at": datetime.now(timezone.utc),
+            "is_moderated": False,
+            "moderation_type": None,
+            "moderation_disclaimer": None,
+            "idempotency_key": "idemp-key-123",
+        }
+        mock_conn.fetchrow.return_value = existing_row
+
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+
+        mock_redis = AsyncMock()
+        body = SendMessageRequest(
+            content="Jai Jinendra",
+            idempotency_key="idemp-key-123",
+        )
+
+        res = await send_message(
+            chat_id=chat_id,
+            body=body,
+            current_user={"id": str(user_id)},
+            db=mock_db,
+            redis=mock_redis,
+            x_idempotency_key=None,
+        )
+
+        self.assertEqual(res.id, existing_msg_id)
+        self.assertEqual(res.content, "Jai Jinendra")
+        self.assertEqual(res.idempotency_key, "idemp-key-123")
+        # Ensure no second pub/sub broadcast fired
+        mock_redis.publish.assert_not_called()
+
+    @patch("app.routers.chats._assert_participant")
+    @patch("app.routers.chats.sliding_window_rate_limit")
+    @patch("app.routers.chats.get_effective_user_tier", return_value="free")
+    async def test_10_send_message_without_idempotency_key_inserts_normally(self, mock_tier, mock_rate, mock_assert):
+        """Older clients without idempotency key insert and publish normally."""
+        from datetime import datetime, timezone
+        from app.routers.chats import send_message
+        from app.models.schemas.chat import SendMessageRequest
+
+        chat_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        msg_id = uuid.uuid4()
+        mock_assert.return_value = {
+            "id": chat_id,
+            "match_id": uuid.uuid4(),
+            "participant_1_id": user_id,
+            "participant_2_id": other_id,
+            "is_unmatched": False,
+            "is_expired": False,
+        }
+
+        mock_conn = AsyncMock()
+        new_row = {
+            "id": msg_id,
+            "chat_id": chat_id,
+            "sender_id": user_id,
+            "message_type": "text",
+            "content": "Hello",
+            "media_url": None,
+            "is_read": False,
+            "created_at": datetime.now(timezone.utc),
+            "is_moderated": False,
+            "moderation_type": None,
+            "moderation_disclaimer": None,
+            "idempotency_key": None,
+        }
+
+        async def track_fetchrow(query, *args):
+            if "INSERT INTO messages" in query:
+                return new_row
+            return None
+
+        mock_conn.fetchrow.side_effect = track_fetchrow
+        mock_conn.fetchval.return_value = None  # not blocked, recipient active
+
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__.return_value = mock_conn
+        mock_ctx.__aexit__.return_value = None
+        mock_db = MagicMock()
+        mock_db.acquire.return_value = mock_ctx
+
+        mock_redis = AsyncMock()
+        body = SendMessageRequest(content="Hello")
+
+        res = await send_message(
+            chat_id=chat_id,
+            body=body,
+            current_user={"id": str(user_id)},
+            db=mock_db,
+            redis=mock_redis,
+        )
+
+        self.assertEqual(res.id, msg_id)
+        self.assertEqual(res.content, "Hello")
+        mock_redis.publish.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

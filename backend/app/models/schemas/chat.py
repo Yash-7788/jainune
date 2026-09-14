@@ -44,6 +44,7 @@ class ChatMessage(BaseModel):
     is_moderated: bool = False
     moderation_type: Optional[str] = None
     moderation_disclaimer: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class SendMessageRequest(BaseModel):
@@ -53,8 +54,12 @@ class SendMessageRequest(BaseModel):
     media_url: Optional[str] = Field(None, max_length=1024)
     media_id: Optional[str] = Field(None, max_length=128)
     user_disclaimer_approved: bool = False
+    idempotency_key: Optional[str] = Field(None, max_length=128)
+    client_message_id: Optional[str] = Field(None, max_length=128)
 
     def validate_content(self) -> None:
+        if not self.idempotency_key and self.client_message_id:
+            self.idempotency_key = self.client_message_id
         if self.type and self.message_type == "text":
             self.message_type = self.type
         if self.message_type == "image":

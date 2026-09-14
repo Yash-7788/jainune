@@ -77,6 +77,17 @@ interface RouteParams {
   momentumExpiresAt?: string | null;
 }
 
+function generateClientMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof (crypto as any).randomUUID === "function") {
+    return (crypto as any).randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
@@ -97,6 +108,9 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
   const [chatBlocked, setChatBlocked] = useState(false);
+
+  const draftIdRef = useRef<string | null>(null);
+  const lastDraftRef = useRef<string>("");
 
   // Screen-capture & recording protection for private 1:1 conversation
   useEffect(() => {
@@ -345,8 +359,10 @@ export default function ChatScreen() {
       myUserId.current = useAuthStore.getState().userId;
     }
 
-    // Optimistic: add a local pending message
-    const tempId = `temp_${Date.now()}`;
+    // Client-generated UUID for deduplication and optimistic UI (FINDING-04)
+    const clientMessageId = draftIdRef.current || generateClientMessageId();
+    draftIdRef.current = clientMessageId;
+    const tempId = `temp_${clientMessageId}`;
     const tempMsg: Message = {
       id: tempId,
       match_id: matchId,
@@ -360,11 +376,14 @@ export default function ChatScreen() {
     setMessages((prev) => [tempMsg, ...prev]);
 
     try {
-      const sent = await sendMessage(matchId, content);
+      const sent = await sendMessage(matchId, content, clientMessageId);
+      draftIdRef.current = null;
+      lastDraftRef.current = "";
       setMessages((prev) => prev.map((m) => (m.id === tempId ? sent : m)));
     } catch (err: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setDraft(content);
+      lastDraftRef.current = content;
       const e = err?._apiError;
       if (e?.code === "CHAT_NOT_ALLOWED") {
         setChatBlocked(true);
@@ -627,7 +646,15 @@ export default function ChatScreen() {
         <TextInput
           style={styles.input}
           value={draft}
-          onChangeText={(t) => t.length <= MAX_MESSAGE_LENGTH && setDraft(t)}
+          onChangeText={(t) => {
+            if (t.length <= MAX_MESSAGE_LENGTH) {
+              if (t !== lastDraftRef.current) {
+                draftIdRef.current = null;
+                lastDraftRef.current = t;
+              }
+              setDraft(t);
+            }
+          }}
           placeholder={chatBlocked ? "This conversation is no longer active" : "Type a message..."}
           placeholderTextColor={colors.muted}
           multiline
