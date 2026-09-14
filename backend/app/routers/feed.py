@@ -111,7 +111,7 @@ async def get_daily_compatible(
     """
     Returns today's Gale-Shapley stable-marriage pairing.
 
-    - Reads from `daily_compatible:{user_id}` Redis key set by nightly worker
+    - Reads from `daily_compatible:{user_id}` Redis cache (TTL aligned with midnight IST)
     - Falls back to top BRRE reciprocal result when nightly job hasn't run
     - Lock resets at midnight IST; users cannot skip their Daily Compatible
     """

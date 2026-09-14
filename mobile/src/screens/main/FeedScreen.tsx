@@ -26,6 +26,7 @@ import * as SecureStore from "expo-secure-store";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import SwipeCard from "../../components/feed/SwipeCard";
 import MatchModal from "../../components/feed/MatchModal";
+import DailyCompatibleModal from "../../components/feed/DailyCompatibleModal";
 import { Image } from "expo-image";
 import {
   getFeed,
@@ -54,6 +55,7 @@ export default function FeedScreen() {
   const [isFetching, setIsFetching] = useState(false);
   const [dailyLimitReached, setDailyLimitReached] = useState(false);
   const [showArcade, setShowArcade] = useState(false);
+  const [showDailyCompatible, setShowDailyCompatible] = useState(false);
   const offlineBannerAnim = useRef(new Animated.Value(0)).current;
   const isOffline = useRef(false);
   const requestTimestamps = useRef<number[]>([]);
@@ -331,6 +333,12 @@ export default function FeedScreen() {
         <Text style={styles.logo}>jainune</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity
+            style={styles.dailyCompBtn}
+            onPress={() => setShowDailyCompatible(true)}
+          >
+            <Text style={styles.dailyCompBtnText}>✨ Daily</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             style={styles.arcadeBtn}
             onPress={() => setShowArcade(true)}
           >
@@ -351,6 +359,12 @@ export default function FeedScreen() {
             </Text>
             <TouchableOpacity style={styles.retryBtn} onPress={fetchBatch}>
               <Text style={styles.retryBtnText}>Check for New Profiles</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.dailyCompPromoBtn}
+              onPress={() => setShowDailyCompatible(true)}
+            >
+              <Text style={styles.dailyCompPromoBtnText}>✨ View Your Daily Compatible Match</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.arcadePromoBtn}
@@ -413,6 +427,16 @@ export default function FeedScreen() {
         myPhotoUrl={myPhotoUrl}
         onOpenChat={openChat}
         onDismiss={() => { setMatch(null); setMatchCandidate(null); }}
+      />
+
+      {/* Daily Compatible modal */}
+      <DailyCompatibleModal
+        visible={showDailyCompatible}
+        onClose={() => setShowDailyCompatible(false)}
+        onMatch={(m, c) => {
+          setMatch(m);
+          setMatchCandidate(c);
+        }}
       />
 
       {/* Serendipity Arcade modal */}
@@ -547,6 +571,33 @@ const styles = StyleSheet.create({
   arcadePromoBtnText: {
     fontFamily: "Outfit_700Bold",
     color: colors.white,
+    fontSize: 14,
+  },
+  dailyCompBtn: {
+    backgroundColor: "rgba(102, 126, 234, 0.12)",
+    paddingVertical: 5,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.full,
+    borderWidth: 1,
+    borderColor: "rgba(102, 126, 234, 0.3)",
+  },
+  dailyCompBtnText: {
+    fontFamily: "Outfit_700Bold",
+    fontSize: 12,
+    color: "#667EEA",
+  },
+  dailyCompPromoBtn: {
+    marginTop: spacing.md,
+    backgroundColor: "rgba(102, 126, 234, 0.12)",
+    borderRadius: radii.full,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderWidth: 1,
+    borderColor: "rgba(102, 126, 234, 0.3)",
+  },
+  dailyCompPromoBtnText: {
+    fontFamily: "Outfit_700Bold",
+    color: "#667EEA",
     fontSize: 14,
   },
 });

@@ -211,6 +211,17 @@ async def _run_async() -> None:
                         proposal_rows,
                     )
                     log.info("run_daily_compatible: wrote %d proposals", len(proposals))
+
+                    # Invalidate stale daily_compatible cache keys for newly paired users
+                    try:
+                        cache_del_keys = []
+                        for u1, u2, _ in proposal_rows:
+                            cache_del_keys.append(f"daily_compatible:{u1}")
+                            cache_del_keys.append(f"daily_compatible:{u2}")
+                        if cache_del_keys:
+                            await redis.delete(*cache_del_keys)
+                    except Exception as cache_err:
+                        log.warning("run_daily_compatible: failed to invalidate daily_compatible keys: %s", cache_err)
             except Exception as exc:
                 log.error("StableMarriageEngine failed: %s", exc, exc_info=True)
 

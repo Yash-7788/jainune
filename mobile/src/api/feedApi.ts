@@ -45,6 +45,7 @@ export interface FeedCandidate {
     shared_traditions: string[];
   };
   is_verified?: boolean;
+  bio?: string;
 }
 
 export interface FeedResponse {

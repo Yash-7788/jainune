@@ -624,7 +624,7 @@ async def fetch_daily_compatible(
 ) -> Optional[dict]:
     """
     Returns today's stable-marriage pairing for the user, if computed.
-    The nightly GS worker writes results to `daily_compatible_cache` Redis key.
+    Cached in Redis under `daily_compatible:{user_id}` until midnight IST.
     Falls back to top BRRE result when nightly job hasn't run yet.
     """
     cache_key = f"daily_compatible:{user_id}"
@@ -798,8 +798,16 @@ async def fetch_daily_compatible(
         "pairing_algorithm": algo,
     }
 
+    from datetime import datetime, timezone, timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    midnight_ist = (now_ist + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    cache_ttl = max(60, min(86400, int((midnight_ist - now_ist).total_seconds())))
+
     try:
-        await redis.set(cache_key, json.dumps(result, default=str), ex=86400)
+        await redis.set(cache_key, json.dumps(result, default=str), ex=cache_ttl)
     except Exception as exc:
         log.warning("Failed to cache daily_compatible for user %s: %s", user_id, exc)
 
