@@ -202,6 +202,76 @@ class TestAdversarialChatSafety(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(res.is_moderated, f"False positive on benign message: '{msg}'")
             self.assertEqual(res.content, msg)
 
+    async def test_10_punctuation_evasion_battery(self):
+        """
+        FINDING-06: Verify users cannot evade safety moderation by inserting
+        punctuation characters outside the former whitelist (commas, asterisks,
+        slashes, pipes, colons, semicolons, hashes, tildes, brackets, parens).
+        """
+        social_evasions = [
+            "i,n,s,t,a,g,r,a,m",
+            "i*n*s*t*a*g*r*a*m",
+            "i/n/s/t/a/g/r/a/m",
+            "i\\n\\s\\t\\a\\g\\r\\a\\m",
+            "i|n|s|t|a|g|r|a|m",
+            "i;n;s;t;a;g;r;a;m",
+            "i:n:s:t:a:g:r:a:m",
+            "i~n~s~t~a~g~r~a~m",
+            "i#n#s#t#a#g#r#a#m",
+            "i(n)s(t)a(g)r(a)m",
+            "i[n]s[t]a[g]r[a]m",
+            "w,h,a,t,s,a,p,p",
+            "w/h/a/t/s/a/p/p",
+            "w*h*a*t*s*a*p*p",
+            "t,e,l,e,g,r,a,m",
+            "t|e|l|e|g|r|a|m",
+            "s,n,a,p,c,h,a,t",
+            "s*n*a*p*c*h*a*t",
+            "s/n/a/p/c/h/a/t",
+            "i,n,s,t,a",
+            "s,n,a,p",
+        ]
+        for msg in social_evasions:
+            res = await filter_chat_content(msg, self.chat_id, self.user_id, self.redis)
+            self.assertTrue(res.is_moderated, f"Failed to catch social evasion: '{msg}'")
+            self.assertEqual(res.moderation_type, "SOCIAL_ID")
+            self.assertIn("#", res.content)
+
+        dating_evasions = [
+            "t,i,n,d,e,r",
+            "t/i/n/d/e/r",
+            "b,u,m,b,l,e",
+            "b*u*m*b*l*e",
+            "h,i,n,g,e",
+            "s,h,a,a,d,i",
+        ]
+        for msg in dating_evasions:
+            res = await filter_chat_content(msg, self.chat_id, self.user_id, self.redis)
+            self.assertTrue(res.is_moderated, f"Failed to catch dating evasion: '{msg}'")
+            self.assertEqual(res.moderation_type, "DATING_APP")
+            self.assertIn("#", res.content)
+
+        phone_evasions = [
+            "9,8,7,6,5,4,3,2,1,0",
+            "9/8/7/6/5/4/3/2/1/0",
+            "9*8*7*6*5*4*3*2*1*0",
+            "9|8|7|6|5|4|3|2|1|0",
+            "9;8;7;6;5;4;3;2;1;0",
+            "(987)/654/3210",
+            "(987)*654*3210",
+            "+91,9,8,7,6,5,4,3,2,1,0",
+            "+91/9/8/7/6/5/4/3/2/1/0",
+            "nine,eight,seven,six",
+            "nine/eight/seven/six",
+            "nine*eight*seven*six",
+            "nine|eight|seven|six",
+        ]
+        for p in phone_evasions:
+            res = await filter_chat_content(p, self.chat_id, self.user_id, self.redis)
+            self.assertTrue(res.is_moderated, f"Failed to catch phone evasion: '{p}'")
+            self.assertEqual(res.moderation_type, "NUMBERS")
+            self.assertIn("#", res.content)
+
 
 if __name__ == "__main__":
     unittest.main()

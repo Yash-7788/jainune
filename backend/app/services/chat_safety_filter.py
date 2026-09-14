@@ -74,38 +74,47 @@ def normalize_text_with_mapping(text: str) -> tuple[str, list[int]]:
 # 1. Full Platform Names (Zero Ambiguity in ANY Casing Combination)
 # ---------------------------------------------------------------------------
 
-_FULL_PLATFORMS = [
-    # Social Platforms
-    r"\bi[\s\.\-_]*n[\s\.\-_]*[s5][\s\.\-_]*t[\s\.\-_]*a[\s\.\-_]*g[\s\.\-_]*r[\s\.\-_]*a[\s\.\-_]*m\b",
-    r"\b[s5][\s\.\-_]*n[\s\.\-_]*a[\s\.\-_]*p[\s\.\-_]*c[\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*t\b",
-    r"\bw[\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*t[\s\.\-_]*[s5][\s\.\-_]*a[\s\.\-_]*p[\s\.\-_]*p\b",
-    r"\bt[\s\.\-_]*e[\s\.\-_]*l[\s\.\-_]*e[\s\.\-_]*g[\s\.\-_]*r[\s\.\-_]*a[\s\.\-_]*m\b",
-    r"\bf[\s\.\-_]*a[\s\.\-_]*c[\s\.\-_]*e[\s\.\-_]*b[\s\.\-_]*o[\s\.\-_]*o[\s\.\-_]*k\b",
-    r"\bt[\s\.\-_]*w[\s\.\-_]*i[\s\.\-_]*t[\s\.\-_]*t[\s\.\-_]*e[\s\.\-_]*r\b",
-    r"\bd[\s\.\-_]*i[\s\.\-_]*[s5][\s\.\-_]*c[\s\.\-_]*o[\s\.\-_]*r[\s\.\-_]*d\b",
-    r"\bx[\s\.\-_]*\.[\s\.\-_]*c[\s\.\-_]*o[\s\.\-_]*m\b",
-    r"\bt[\s\.\-_]*h[\s\.\-_]*r[\s\.\-_]*e[\s\.\-_]*a[\s\.\-_]*d[\s\.\-_]*[s5]\b",
-    r"\bw[\s\.\-_]*e[\s\.\-_]*c[\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*t\b",
-    r"\b[s5][\s\.\-_]*i[\s\.\-_]*g[\s\.\-_]*n[\s\.\-_]*a[\s\.\-_]*l\b",
-    # Competitor Dating & Matrimonial Apps
-    r"\bt[\s\.\-_]*i[\s\.\-_]*n[\s\.\-_]*d[\s\.\-_]*e[\s\.\-_]*r\b",
-    r"\bb[\s\.\-_]*u[\s\.\-_]*m[\s\.\-_]*b[\s\.\-_]*l[\s\.\-_]*e\b",
-    r"\bh[\s\.\-_]*i[\s\.\-_]*n[\s\.\-_]*g[\s\.\-_]*e\b",
-    r"\b[s5][\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*a[\s\.\-_]*d[\s\.\-_]*i\b",
-    r"\bj[\s\.\-_]*e[\s\.\-_]*e[\s\.\-_]*v[\s\.\-_]*a[\s\.\-_]*n[\s\.\-_]*[s5][\s\.\-_]*a[\s\.\-_]*t[\s\.\-_]*h[\s\.\-_]*i\b",
-    r"\bb[\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*r[\s\.\-_]*a[\s\.\-_]*t[\s\.\-_]*m[\s\.\-_]*a[\s\.\-_]*t[\s\.\-_]*r[\s\.\-_]*i[\s\.\-_]*m[\s\.\-_]*o[\s\.\-_]*n[\s\.\-_]*y\b",
-    r"\bb[\s\.\-_]*e[\s\.\-_]*t[\s\.\-_]*t[\s\.\-_]*e[\s\.\-_]*r[\s\.\-_]*h[\s\.\-_]*a[\s\.\-_]*l[\s\.\-_]*f\b",
-    r"\baisle\b",
-    r"\bd[\s\.\-_]*i[\s\.\-_]*l[\s\.\-_]*m[\s\.\-_]*i[\s\.\-_]*l\b",
-    r"\bh[\s\.\-_]*a[\s\.\-_]*p[\s\.\-_]*p[\s\.\-_]*n\b",
-    r"\bo[\s\.\-_]*k[\s\.\-_]*c[\s\.\-_]*u[\s\.\-_]*p[\s\.\-_]*i[\s\.\-_]*d\b",
-    r"\bpure\b",
-    r"\bc[\s\.\-_]*o[\s\.\-_]*f[\s\.\-_]*f[\s\.\-_]*e[\s\.\-_]*e[\s\.\-_]*m[\s\.\-_]*e[\s\.\-_]*e[\s\.\-_]*t[\s\.\-_]*[s5][\s\.\-_]*b[\s\.\-_]*a[\s\.\-_]*g[\s\.\-_]*e[\s\.\-_]*l\b",
-    r"\bb[\s\.\-_]*a[\s\.\-_]*d[\s\.\-_]*o[\s\.\-_]*o\b",
-    r"\bg[\s\.\-_]*r[\s\.\-_]*i[\s\.\-_]*n[\s\.\-_]*d[\s\.\-_]*r\b",
-    r"\bq[\s\.\-_]*u[\s\.\-_]*a[\s\.\-_]*c[\s\.\-_]*k[\s\.\-_]*q[\s\.\-_]*u[\s\.\-_]*a[\s\.\-_]*c[\s\.\-_]*k\b",
+# Canonical inter-character noise separators (whitespace, punctuation, symbols, emojis):
+_SEP = r"[^a-zA-Z0-9]*"
+_SEP_DIGIT = r"[^a-zA-Z0-9,;:]*"
+_WORD_SEP = r"[^a-zA-Z0-9]+"
+
+_SOCIAL_PLATFORMS = [
+    rf"\bi{_SEP}n{_SEP}[s5]{_SEP}t{_SEP}a{_SEP}g{_SEP}r{_SEP}a{_SEP}m\b",
+    rf"\b[s5]{_SEP}n{_SEP}a{_SEP}p{_SEP}c{_SEP}h{_SEP}a{_SEP}t\b",
+    rf"\bw{_SEP}h{_SEP}a{_SEP}t{_SEP}[s5]{_SEP}a{_SEP}p{_SEP}p\b",
+    rf"\bt{_SEP}e{_SEP}l{_SEP}e{_SEP}g{_SEP}r{_SEP}a{_SEP}m\b",
+    rf"\bf{_SEP}a{_SEP}c{_SEP}e{_SEP}b{_SEP}o{_SEP}o{_SEP}k\b",
+    rf"\bt{_SEP}w{_SEP}i{_SEP}t{_SEP}t{_SEP}e{_SEP}r\b",
+    rf"\bd{_SEP}i{_SEP}[s5]{_SEP}c{_SEP}o{_SEP}r{_SEP}d\b",
+    rf"\bx{_SEP}\.{_SEP}c{_SEP}o{_SEP}m\b",
+    rf"\bt{_SEP}h{_SEP}r{_SEP}e{_SEP}a{_SEP}d{_SEP}[s5]\b",
+    rf"\bw{_SEP}e{_SEP}c{_SEP}h{_SEP}a{_SEP}t\b",
+    rf"\b[s5]{_SEP}i{_SEP}g{_SEP}n{_SEP}a{_SEP}l\b",
 ]
+
+_DATING_PLATFORMS = [
+    rf"\bt{_SEP}i{_SEP}n{_SEP}d{_SEP}e{_SEP}r\b",
+    rf"\bb{_SEP}u{_SEP}m{_SEP}b{_SEP}l{_SEP}e\b",
+    rf"\bh{_SEP}i{_SEP}n{_SEP}g{_SEP}e\b",
+    rf"\b[s5]{_SEP}h{_SEP}a{_SEP}a{_SEP}d{_SEP}i\b",
+    rf"\bj{_SEP}e{_SEP}e{_SEP}v{_SEP}a{_SEP}n{_SEP}[s5]{_SEP}a{_SEP}t{_SEP}h{_SEP}i\b",
+    rf"\bb{_SEP}h{_SEP}a{_SEP}r{_SEP}a{_SEP}t{_SEP}m{_SEP}a{_SEP}t{_SEP}r{_SEP}i{_SEP}m{_SEP}o{_SEP}n{_SEP}y\b",
+    rf"\bb{_SEP}e{_SEP}t{_SEP}t{_SEP}e{_SEP}r{_SEP}h{_SEP}a{_SEP}l{_SEP}f\b",
+    r"\baisle\b",
+    rf"\bd{_SEP}i{_SEP}l{_SEP}m{_SEP}i{_SEP}l\b",
+    rf"\bh{_SEP}a{_SEP}p{_SEP}p{_SEP}n\b",
+    rf"\bo{_SEP}k{_SEP}c{_SEP}u{_SEP}p{_SEP}i{_SEP}d\b",
+    r"\bpure\b",
+    rf"\bc{_SEP}o{_SEP}f{_SEP}f{_SEP}e{_SEP}e{_SEP}m{_SEP}e{_SEP}e{_SEP}t{_SEP}[s5]{_SEP}b{_SEP}a{_SEP}g{_SEP}e{_SEP}l\b",
+    rf"\bb{_SEP}a{_SEP}d{_SEP}o{_SEP}o\b",
+    rf"\bg{_SEP}r{_SEP}i{_SEP}n{_SEP}d{_SEP}r\b",
+    rf"\bq{_SEP}u{_SEP}a{_SEP}c{_SEP}k{_SEP}q{_SEP}u{_SEP}a{_SEP}c{_SEP}k\b",
+]
+
+_FULL_PLATFORMS = _SOCIAL_PLATFORMS + _DATING_PLATFORMS
 _RE_FULL_PLATFORMS = re.compile("|".join(f"(?:{p})" for p in _FULL_PLATFORMS), re.IGNORECASE)
+_RE_DATING_PLATFORMS = re.compile("|".join(f"(?:{p})" for p in _DATING_PLATFORMS), re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +123,12 @@ _RE_FULL_PLATFORMS = re.compile("|".join(f"(?:{p})" for p in _FULL_PLATFORMS), r
 
 _SHORTHAND_INTENT = [
     # Insta / 1nsta (unambiguous app shorthand)
-    r"\b[i1!][\s\.\-_]*n[\s\.\-_]*[s5][\s\.\-_]*t[\s\.\-_]*a\b",
+    rf"\b[i1!]{_SEP}n{_SEP}[s5]{_SEP}t{_SEP}a\b",
     # Gram only when used in social handle context
     r"\b(?:my|your|ur|check|on|add|dm|send|the)\s+gram\b",
     r"\bgram\s+(?:handle|id|username|account|profile)\b",
     # Snap with handle / social intent
-    r"\b(?:my|your|ur|his|her|add|dm|send|ping|check|on|in)?\s*[s5][\s\.\-_]*n[\s\.\-_]*a[\s\.\-_]*p\s*(?:id|handle|username|me|is|:)?\b",
+    rf"\b(?:my|your|ur|his|her|add|dm|send|ping|check|on|in)?\s*[s5]{_SEP}n{_SEP}a{_SEP}p\s*(?:id|handle|username|me|is|:)?\b",
     # Acronyms with handle / colon notation: my sc is user, sc: user, ig: user, tg: user
     r"\b(?:my\s+)?(?:sc|ig|tg|fb)\s*(?:is|:|=)\s*\w+\b",
     # Action verbs followed by handle markers
@@ -143,15 +152,15 @@ _RE_BENIGN_SNAP = re.compile(
 
 _PHONE_PATTERNS = [
     # Standard 10-digit Indian phone with optional country code (+91, 91, 0)
-    r"(?:\+?91[\s\.\-_]*)?[6-9](?:[\s\.\-_]*\d){9}\b",
+    rf"(?<![\d\.])(?:\+?91{_SEP})?[6-9](?:{_SEP}\d){{9}}\b",
     # (987) 654-3210 style
-    r"\(\d{3}\)[\s\.\-_]*\d{3}[\s\.\-_]*\d{4}\b",
-    # 7 or more contiguous or spaced digits
-    r"\b\d(?:[\s\.\-_]*\d){6,}\b",
+    rf"\(\d{{3}}\){_SEP}\d{{3}}{_SEP}\d{{4}}\b",
+    # 7 or more contiguous or spaced digits (excluding comma/colon/semicolon to avoid GPS lat/long collisions)
+    rf"\b\d(?:{_SEP_DIGIT}\d){{6,}}\b",
     # Series of 4 or more word digits: "nine eight seven six five"
-    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine)(?:[\s\.\-_,]+(?:zero|one|two|three|four|five|six|seven|eight|nine)){3,}\b",
+    rf"\b(?:zero|one|two|three|four|five|six|seven|eight|nine)(?:{_WORD_SEP}(?:zero|one|two|three|four|five|six|seven|eight|nine)){{3,}}\b",
     # 3 or more word digits if preceded by call / phone / number / contact
-    r"\b(?:call|phone|ph|num|number|dial|reach|contact)\s+(?:me\s+)?(?:at\s+|on\s+)?(?:zero|one|two|three|four|five|six|seven|eight|nine)(?:[\s\.\-_,]+(?:zero|one|two|three|four|five|six|seven|eight|nine)){2,}\b",
+    rf"\b(?:call|phone|ph|num|number|dial|reach|contact)\s+(?:me\s+)?(?:at\s+|on\s+)?(?:zero|one|two|three|four|five|six|seven|eight|nine)(?:{_WORD_SEP}(?:zero|one|two|three|four|five|six|seven|eight|nine)){{2,}}\b",
 ]
 _RE_PHONE = re.compile("|".join(f"(?:{p})" for p in _PHONE_PATTERNS), re.IGNORECASE)
 
@@ -421,8 +430,7 @@ async def filter_chat_content(
     if has_phone:
         detected_types.append("NUMBERS")
     if has_full_platform or has_shorthand:
-        lowered = normalized.lower()
-        if any(d in lowered for d in ["tinder", "bumble", "hinge", "shaadi", "jeevansathi", "matrimony"]):
+        if _RE_DATING_PLATFORMS.search(normalized):
             detected_types.append("DATING_APP")
         else:
             detected_types.append("SOCIAL_ID")
