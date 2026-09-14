@@ -109,34 +109,57 @@ def verify_location_anti_spoofing(
             return False, "Location accuracy is too low to verify launch zone."
 
     # Server-side edge network corroboration
-    if headers:
-        h = {k.lower(): v for k, v in headers.items()}
-        has_cf_headers = any(k.startswith("cf-") for k in h)
+    h = {k.lower(): v for k, v in headers.items()} if headers else {}
+    has_cf_headers = any(k.startswith("cf-") for k in h)
+    origin_secret = getattr(settings, "cloudflare_origin_secret", "")
+    require_corroboration = getattr(settings, "require_edge_location_corroboration", False)
 
-        if has_cf_headers:
-            origin_secret = getattr(settings, "cloudflare_origin_secret", "")
-            edge_token = h.get("x-edge-secret") or h.get("x-origin-secret")
-            if origin_secret:
-                if not edge_token or edge_token != origin_secret:
-                    return False, "Untrusted edge network headers detected without valid origin secret."
-            elif settings.environment == "production":
-                return False, "Untrusted edge network headers detected in production without origin lock."
+    # If origin secret is configured, require valid origin/edge token
+    # (prevents direct-to-origin bypass where cf-* headers are omitted)
+    if origin_secret:
+        edge_token = h.get("x-edge-secret") or h.get("x-origin-secret")
+        if not edge_token or edge_token != origin_secret:
+            return False, "Untrusted edge network headers detected without valid origin secret."
+    elif settings.environment == "production" and has_cf_headers:
+        return False, "Untrusted edge network headers detected in production without origin lock."
 
-        country = h.get("cf-ipcountry") or h.get("x-country-code")
-        if country and country.upper() not in ("IN", "XX", "T1"):
-            return False, f"Network location ({country.upper()}) is outside Jainune active launch zones in India."
+    country = h.get("cf-ipcountry") or h.get("x-country-code")
+    if country and country.upper() not in ("IN", "XX", "T1"):
+        return False, f"Network location ({country.upper()}) is outside Jainune active launch zones in India."
 
-        ip_lat_str = h.get("cf-iplatitude")
-        ip_lon_str = h.get("cf-iplongitude")
-        if ip_lat_str and ip_lon_str:
-            try:
-                ip_lat = float(ip_lat_str)
-                ip_lon = float(ip_lon_str)
-                dist_km = haversine_distance_km(lat, lon, ip_lat, ip_lon)
-                if dist_km > 600.0:
-                    return False, f"GPS coordinates conflict with network geolocation ({int(dist_km)} km discrepancy)."
-            except (ValueError, TypeError):
-                pass
+    ip_lat_str = h.get("cf-iplatitude")
+    ip_lon_str = h.get("cf-iplongitude")
+
+    # Observability: log missing geolocation headers in production or when origin secret is set
+    if settings.environment == "production" or origin_secret:
+        missing_headers = []
+        if not country:
+            missing_headers.append("cf-ipcountry")
+        if not ip_lat_str or not ip_lon_str:
+            missing_headers.append("cf-iplatitude/cf-iplongitude")
+        if missing_headers:
+            log.warning(
+                "location_anti_spoofing.missing_edge_headers: %s",
+                ", ".join(missing_headers),
+            )
+
+    # Fail-closed if edge corroboration is strictly required by configuration
+    if require_corroboration:
+        if not country:
+            return False, "Missing required edge country header (cf-ipcountry)."
+        if not ip_lat_str or not ip_lon_str:
+            return False, "Missing required edge coordinate headers (cf-iplatitude/cf-iplongitude)."
+
+    if ip_lat_str and ip_lon_str:
+        try:
+            ip_lat = float(ip_lat_str)
+            ip_lon = float(ip_lon_str)
+            dist_km = haversine_distance_km(lat, lon, ip_lat, ip_lon)
+            if dist_km > 600.0:
+                return False, f"GPS coordinates conflict with network geolocation ({int(dist_km)} km discrepancy)."
+        except (ValueError, TypeError):
+            if require_corroboration:
+                return False, "Malformed edge network coordinates."
 
     return True, None
 

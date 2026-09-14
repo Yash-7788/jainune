@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     # Cloudflare Turnstile & Origin Protection
     turnstile_secret_key: str = ""
     cloudflare_origin_secret: str = ""
+    require_edge_location_corroboration: bool = False
 
     # App Store / Google Play Store Webhook Secret (BUG-026)
     store_webhook_secret: str = ""
