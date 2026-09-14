@@ -13,9 +13,9 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
-  SafeAreaView,
   Linking,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 
 export type LegalDocType = "privacy" | "terms" | "child_safety" | "community" | "deletion";

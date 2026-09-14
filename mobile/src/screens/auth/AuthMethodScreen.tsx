@@ -15,7 +15,6 @@ import {
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import { PrimaryButton, GhostButton, ErrorToast } from "../../components/core";
@@ -24,6 +23,15 @@ import { useAuthStore } from "../../store/authStore";
 import { extractError } from "../../api/client";
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 import type { AuthStackParams } from "../../navigation/AppNavigator";
+
+// Dynamic import: @react-native-google-signin requires native modules unavailable in Expo Go
+let GoogleSignin: any = null;
+try {
+  const gsModule = require("@react-native-google-signin/google-signin");
+  GoogleSignin = gsModule?.GoogleSignin || gsModule?.default;
+} catch {
+  // Native module unavailable in Expo Go — Google Sign-In button will show a friendly error
+}
 
 // Configure Google Sign-In at module level (safeguarded for Expo Go)
 try {
@@ -47,6 +55,13 @@ export default function AuthMethodScreen() {
   const [legalDoc, setLegalDoc] = React.useState<LegalDocType | null>(null);
 
   const handleGoogle = async () => {
+    if (!GoogleSignin) {
+      setError({
+        title: "Unavailable",
+        message: "Google Sign-In requires a development build. Use Phone or Email in Expo Go.",
+      });
+      return;
+    }
     setLoading("google");
     setError(null);
     try {

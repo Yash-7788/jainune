@@ -45,7 +45,12 @@
           "locationWhenInUsePermission": "Jainune needs your location to connect you with verified Jain singles in Mumbai MMR, Pune, and Bengaluru."
         }
       ],
-      "./plugins/withIosSecurity"
+      "expo-apple-authentication",
+      "@react-native-google-signin/google-signin",
+      "./plugins/withIosSecurity",
+      "expo-font",
+      "expo-secure-store",
+      "expo-asset"
     ]
   }
 }

@@ -1,26 +1,52 @@
 /**
  * Push Notification Service — Phase 8 / M9-NAV-02
  * Handles push permissions, Expo push token retrieval, and routing on notification tap.
+ * Expo Go SDK 53+ safe: expo-notifications is dynamically loaded only in non-Expo Go environments.
  */
 
 import { Platform } from "react-native";
-import * as Notifications from "expo-notifications";
-import * as Device from "expo-constants";
+import Constants, { ExecutionEnvironment } from "expo-constants";
 import { apiPost } from "../api/client";
 
-// Foreground presentation options
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-  }),
-});
+// Detect if running inside Expo Go app
+const isExpoGo =
+  Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
+  Constants.appOwnership === "expo";
+
+// Dynamically acquire expo-notifications module to prevent top-level evaluation errors in Expo Go
+function getNotifications(): any {
+  if (isExpoGo) return null;
+  try {
+    return require("expo-notifications");
+  } catch {
+    return null;
+  }
+}
+
+// Foreground presentation options (guarded for non-Expo Go builds)
+try {
+  const Notifications = getNotifications();
+  if (Notifications?.setNotificationHandler) {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: true,
+      }),
+    });
+  }
+} catch {
+  // Ignored
+}
 
 /**
  * Registers device for push notifications and registers token with backend.
  */
 export async function registerForPushNotificationsAsync(): Promise<string | null> {
+  if (isExpoGo) return null;
+  const Notifications = getNotifications();
+  if (!Notifications) return null;
+
   try {
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
@@ -73,7 +99,7 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
  * Routes a notification response payload to the appropriate screen.
  */
 export function handleNotificationRouting(
-  response: Notifications.NotificationResponse,
+  response: any,
   navigate: (name: string, params?: any) => void
 ): void {
   try {
@@ -119,6 +145,9 @@ export function handleNotificationRouting(
 export async function checkInitialNotificationResponse(
   navigate: (name: string, params?: any) => void
 ): Promise<void> {
+  if (isExpoGo) return;
+  const Notifications = getNotifications();
+  if (!Notifications?.getLastNotificationResponseAsync) return;
   try {
     const response = await Notifications.getLastNotificationResponseAsync();
     if (response) {
@@ -131,11 +160,21 @@ export async function checkInitialNotificationResponse(
  * Listens for user tapping a push notification while app is running or backgrounded.
  */
 export function setupNotificationListeners(navigate: (name: string, params?: any) => void) {
-  const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-    handleNotificationRouting(response, navigate);
-  });
+  if (isExpoGo) return () => {};
+  const Notifications = getNotifications();
+  if (!Notifications?.addNotificationResponseReceivedListener) return () => {};
 
-  return () => {
-    responseSubscription.remove();
-  };
+  try {
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener((response: any) => {
+      handleNotificationRouting(response, navigate);
+    });
+
+    return () => {
+      try {
+        responseSubscription.remove();
+      } catch {}
+    };
+  } catch {
+    return () => {};
+  }
 }

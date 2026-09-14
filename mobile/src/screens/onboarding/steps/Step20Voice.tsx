@@ -4,16 +4,24 @@
  */
 import React, { useState, useRef } from "react";
 import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
-import { Audio } from "expo-av";
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import OnboardingStep from "../OnboardingStep";
 import { VoiceIcon } from "../../../components/core/Icons";
-import { colors, spacing, typography, radii } from "../../../theme/tokens";
+import { colors, spacing, typography } from "../../../theme/tokens";
 import { useOnboardingStore } from "../../../store/onboardingStore";
 import { submitStep20, getPresignedUploadUrl, uploadToS3, confirmUpload } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
+
+// Dynamic require for Audio to prevent ExponentAV native module crash in Expo Go
+function getAudioModule(): any {
+  try {
+    return require("expo-av")?.Audio ?? null;
+  } catch {
+    return null;
+  }
+}
 
 type Nav = NativeStackNavigationProp<OnboardingStackParams, "Step20">;
 
@@ -33,6 +41,11 @@ export default function Step20Screen() {
   const elapsed = useRef(0);
 
   const startRecording = async () => {
+    const Audio = getAudioModule();
+    if (!Audio) {
+      setError({ title: "Notice", message: "Voice recording requires a standalone development build. You can skip this step." });
+      return;
+    }
     const { status: perm } = await Audio.requestPermissionsAsync();
     if (perm !== "granted") {
       setError({ title: "Microphone Access", message: "Please allow microphone access to record your voice snapshot." });

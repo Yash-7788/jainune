@@ -85,12 +85,57 @@ export interface ArcadeProduct {
   amount_inr: number;
 }
 
+// ── Mock Data for Offline DEV Mode ──────────────────────────────────────────
+
+const MOCK_MY_PROFILE: MyProfile = {
+  id: "dev_user_1",
+  first_name: "Aarav",
+  date_of_birth: "1998-05-15",
+  gender: "male",
+  city: "Mumbai",
+  state: "Maharashtra",
+  profession: "Software Engineer",
+  education: "B.Tech Computer Science",
+  dietary_strictness: "jain_strict",
+  eats_root_vegetables: false,
+  eats_onion_garlic: false,
+  community_sect: "shvetambara",
+  open_to_relocation: true,
+  looking_for: ["marriage"],
+  vibe_zones: ["travel", "foodie", "meditation"],
+  photos: [
+    { id: "p1", url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80", order: 1 },
+    { id: "p2", url: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80", order: 2 },
+  ],
+  prompts: [
+    { prompt_id: "pr1", prompt_text: "My ideal Sunday looks like...", response: "Early morning Navkar Mantra, home-cooked Jain breakfast, and a quiet book." },
+    { prompt_id: "pr2", prompt_text: "A non-negotiable for me...", response: "Respecting Jain dietary traditions and family values." },
+  ],
+  voice_snapshot_url: null,
+  is_verified: true,
+  account_status: "active",
+  paryushan_mode: false,
+  subscription_tier: "free",
+  subscription_expires_at: null,
+  liked_by_count: 5,
+  profile_health_score: 92,
+};
+
 // ── Profile ─────────────────────────────────────────────────────────────────
 
 export async function getMyProfile(): Promise<MyProfile> {
-  const res = await apiGet<MyProfile>("/users/me");
-  if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  try {
+    const res = await apiGet<MyProfile>("/users/me");
+    if (res.success && res.data) return res.data;
+  } catch (err) {
+    if (__DEV__) {
+      console.log("[DEV] getMyProfile failed, returning mock profile");
+      return MOCK_MY_PROFILE;
+    }
+    throw err;
+  }
+  if (__DEV__) return MOCK_MY_PROFILE;
+  throw { _apiError: { code: "TEMPORARY_ERROR", message: "Failed to fetch profile" } };
 }
 
 export async function updateProfile(payload: Partial<{
@@ -142,25 +187,48 @@ export async function updateProfile(payload: Partial<{
     }
   }
 
-  const res = await apiPatch<MyProfile>("/users/me", sanitized);
-  if (!res.success) throw { _apiError: res.error };
-  return res.data;
+  try {
+    const res = await apiPatch<MyProfile>("/users/me", sanitized);
+    if (res.success && res.data) return res.data;
+  } catch (err) {
+    if (__DEV__) {
+      return { ...MOCK_MY_PROFILE, ...payload } as any;
+    }
+    throw err;
+  }
+  if (__DEV__) return { ...MOCK_MY_PROFILE, ...payload } as any;
+  throw { _apiError: { code: "TEMPORARY_ERROR", message: "Failed to update profile" } };
 }
 
 export async function reorderPhotos(photo_ids: string[]): Promise<void> {
   const positions = photo_ids.map((id, index) => ({ media_id: id, position: index + 1 }));
-  const res = await apiPatch<void>("/media/reorder", { positions });
-  if (!res.success) throw { _apiError: res.error };
+  try {
+    const res = await apiPatch<void>("/media/reorder", { positions });
+    if (!res.success) throw { _apiError: res.error };
+  } catch (err) {
+    if (__DEV__) return;
+    throw err;
+  }
 }
 
 export async function deletePhoto(photo_id: string): Promise<void> {
-  const res = await apiDelete<void>(`/media/${photo_id}`);
-  if (!res.success) throw { _apiError: res.error };
+  try {
+    const res = await apiDelete<void>(`/media/${photo_id}`);
+    if (!res.success) throw { _apiError: res.error };
+  } catch (err) {
+    if (__DEV__) return;
+    throw err;
+  }
 }
 
 export async function confirmUpload(media_id: string): Promise<void> {
-  const res = await apiPost<void>("/media/upload/confirm", { media_id });
-  if (!res.success) throw { _apiError: res.error };
+  try {
+    const res = await apiPost<void>("/media/upload/confirm", { media_id });
+    if (!res.success) throw { _apiError: res.error };
+  } catch (err) {
+    if (__DEV__) return;
+    throw err;
+  }
 }
 
 export async function addPhoto(media_id: string): Promise<void> {
@@ -169,9 +237,6 @@ export async function addPhoto(media_id: string): Promise<void> {
 
 export async function updateVoiceSnapshot(media_id: string): Promise<{ voice_snapshot_url: string | null }> {
   await confirmUpload(media_id);
-  // F-12: real CDN URL is only valid after moderation passes (backend copies
-  // from quarantine → production bucket). Return null so the caller uses the
-  // local recording URI for immediate preview.
   return { voice_snapshot_url: null };
 }
 
@@ -188,24 +253,48 @@ export async function presignUpload(
   mediaType: "photo" | "voice" = "photo",
   position: number = 1
 ): Promise<PresignUploadResponse> {
-  const res = await apiPost<{
-    media_id: string;
-    presigned_url: string;
-    s3_key: string;
-    presigned_fields?: Record<string, string> | null;
-  }>("/media/upload/request", {
-    media_type: mediaType,
-    content_type: contentType,
-    file_size_bytes: fileSizeBytes,
-    position,
-  });
-  if (!res.success) throw { _apiError: res.error };
-  return {
-    upload_url: res.data.presigned_url,
-    media_id: res.data.media_id,
-    cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
-    presigned_fields: res.data.presigned_fields,
-  };
+  try {
+    const res = await apiPost<{
+      media_id: string;
+      presigned_url: string;
+      s3_key: string;
+      presigned_fields?: Record<string, string> | null;
+    }>("/media/upload/request", {
+      media_type: mediaType,
+      content_type: contentType,
+      file_size_bytes: fileSizeBytes,
+      position,
+    });
+    if (res.success && res.data) {
+      return {
+        upload_url: res.data.presigned_url,
+        media_id: res.data.media_id,
+        cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
+        presigned_fields: res.data.presigned_fields,
+      };
+    }
+  } catch (err) {
+    if (__DEV__) {
+      const mockId = `mock_media_${Date.now()}`;
+      return {
+        upload_url: "https://httpbin.org/put",
+        media_id: mockId,
+        cdn_url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80",
+        presigned_fields: null,
+      };
+    }
+    throw err;
+  }
+  if (__DEV__) {
+    const mockId = `mock_media_${Date.now()}`;
+    return {
+      upload_url: "https://httpbin.org/put",
+      media_id: mockId,
+      cdn_url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80",
+      presigned_fields: null,
+    };
+  }
+  throw { _apiError: { code: "TEMPORARY_ERROR", message: "Upload presign failed" } };
 }
 
 export async function getSettings(): Promise<{
@@ -227,10 +316,15 @@ export async function updateSettings(payload: {
   discovery_paused?: boolean;
 }): Promise<void> {
   if (payload.discovery_paused !== undefined) {
-    if (payload.discovery_paused) {
-      await apiPost("/users/me/pause");
-    } else {
-      await apiPost("/users/me/unpause");
+    try {
+      if (payload.discovery_paused) {
+        await apiPost("/users/me/pause");
+      } else {
+        await apiPost("/users/me/unpause");
+      }
+    } catch (err) {
+      if (__DEV__) return;
+      throw err;
     }
   }
 }
@@ -298,26 +392,57 @@ export async function cancelSubscription(): Promise<{ access_until: string }> {
 }
 
 export async function getSubscriptionStatus(): Promise<SubscriptionStatus> {
-  const res = await apiGet<{
-    user_id: string;
-    tier: string;
-    valid_until: string | null;
-    daily_likes_remaining: number | null;
-    super_likes_remaining: number;
-    can_see_who_liked: boolean;
-  }>("/users/me/subscription");
-  if (!res.success) throw { _apiError: res.error };
-  const d = res.data;
-  const isSubscriber = d.tier !== "free";
+  try {
+    const res = await apiGet<{
+      user_id: string;
+      tier: string;
+      valid_until: string | null;
+      daily_likes_remaining: number | null;
+      super_likes_remaining: number;
+      can_see_who_liked: boolean;
+    }>("/users/me/subscription");
+    if (res.success && res.data) {
+      const d = res.data;
+      const isSubscriber = d.tier !== "free";
+      return {
+        tier: d.tier as any,
+        is_active: isSubscriber,
+        status: isSubscriber ? "active" : "expired",
+        expires_at: d.valid_until,
+        current_period_end: d.valid_until,
+        daily_likes_remaining: d.daily_likes_remaining ?? 999,
+        super_connects_remaining: d.super_likes_remaining ?? 0,
+        can_see_who_liked: d.can_see_who_liked ?? false,
+        plan_id: null,
+        cancel_at_period_end: false,
+      };
+    }
+  } catch (err) {
+    if (__DEV__) {
+      return {
+        tier: "free",
+        is_active: false,
+        status: "expired",
+        expires_at: null,
+        current_period_end: null,
+        daily_likes_remaining: 10,
+        super_connects_remaining: 1,
+        can_see_who_liked: false,
+        plan_id: null,
+        cancel_at_period_end: false,
+      };
+    }
+    throw err;
+  }
   return {
-    tier: d.tier as any,
-    is_active: isSubscriber,
-    status: isSubscriber ? "active" : "expired",
-    expires_at: d.valid_until,
-    current_period_end: d.valid_until,
-    daily_likes_remaining: d.daily_likes_remaining ?? 999,
-    super_connects_remaining: d.super_likes_remaining ?? 0,
-    can_see_who_liked: d.can_see_who_liked ?? false,
+    tier: "free",
+    is_active: false,
+    status: "expired",
+    expires_at: null,
+    current_period_end: null,
+    daily_likes_remaining: 10,
+    super_connects_remaining: 1,
+    can_see_who_liked: false,
     plan_id: null,
     cancel_at_period_end: false,
   };

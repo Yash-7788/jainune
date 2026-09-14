@@ -30,8 +30,16 @@ import {
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
-import { Audio } from "expo-av";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
+
+// Dynamic require for Audio to prevent ExponentAV native module crash in Expo Go
+function getAudioModule(): any {
+  try {
+    return require("expo-av")?.Audio ?? null;
+  } catch {
+    return null;
+  }
+}
 import {
   getMyProfile,
   updateProfile,
@@ -156,6 +164,11 @@ export default function EditProfileScreen() {
   };
 
   const handleToggleVoiceRecording = async () => {
+    const Audio = getAudioModule();
+    if (!Audio) {
+      Alert.alert("Notice", "Voice recording requires a standalone development build.");
+      return;
+    }
     if (isRecording) {
       if (!recording) return;
       setIsRecording(false);
@@ -254,7 +267,7 @@ export default function EditProfileScreen() {
 
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ["images"],
         allowsEditing: true,
         aspect: [4, 5],
         quality: 0.8,
