@@ -347,18 +347,45 @@ async def reinstate_user(
             if res == "UPDATE 0":
                 raise HTTPException(status_code=404, detail="User not found")
 
+            # Resolve all prior unresolved reports for this user so stale reports don't immediately re-trigger auto-suspension (FINDING-12)
+            dismiss_res = await conn.execute(
+                """
+                UPDATE reports
+                   SET resolved         = TRUE,
+                       resolved_by      = $1,
+                       resolved_at      = NOW(),
+                       resolution_notes = 'Auto-resolved on manual user reinstatement by superadmin',
+                       action_taken     = 'dismissed'
+                 WHERE reported_id = $2
+                   AND resolved = FALSE
+                """,
+                admin["user_id"],
+                user_id,
+            )
+            dismissed_count = 0
+            if dismiss_res and dismiss_res.startswith("UPDATE "):
+                try:
+                    dismissed_count = int(dismiss_res.split()[1])
+                except (IndexError, ValueError):
+                    pass
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
                     (admin_user_id, target_user_id, action, reason, ip_address, user_agent)
-                VALUES ($1, $2, 'reinstate', 'Manual reinstate by superadmin', $3::inet, $4)
+                VALUES ($1, $2, 'reinstate', $3, $4::inet, $5)
                 """,
                 admin["user_id"],
                 user_id,
+                f"Manual reinstate by superadmin; dismissed {dismissed_count} unresolved report(s)",
                 admin_ip,
                 admin_ua,
             )
-    return {"reinstated": True, "user_id": user_id}
+
+            # Recompute trust score to reflect resolution inside the same transaction
+            await recompute_trust_score(user_id, conn)
+
+    return {"reinstated": True, "user_id": user_id, "dismissed_reports": dismissed_count}
 
 
 # ---------------------------------------------------------------------------

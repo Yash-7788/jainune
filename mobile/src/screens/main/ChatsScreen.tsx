@@ -5,7 +5,7 @@
  * 5 UI states: loading | populated | empty | error | offline
  */
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -69,12 +69,10 @@ export default function ChatsScreen() {
     }
   }, []);
 
-  useEffect(() => { load(); }, []);
-
   useFocusEffect(
     useCallback(() => {
-      load(true);
-    }, [load])
+      load(threads.length > 0);
+    }, [load, threads.length])
   );
 
   const renderItem = useCallback(
