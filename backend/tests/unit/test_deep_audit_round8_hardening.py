@@ -520,6 +520,163 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.content, "Hello")
         mock_redis.publish.assert_called_once()
 
+    def test_11_all_migration_files_have_down_migrations(self):
+        """All backend/migrations/*.sql files must have matching down/*.down.sql."""
+        from pathlib import Path
+        migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+        down_dir = migrations_dir / "down"
+
+        up_files = {p.stem for p in migrations_dir.glob("*.sql")}
+        down_files = {p.stem.replace(".down", "") for p in down_dir.glob("*.down.sql")}
+
+        missing = up_files - down_files
+        self.assertEqual(missing, set(), f"Missing down migrations for: {missing}")
+
+    async def test_12_run_migrations_get_current_version(self):
+        """get_current_version prints the latest applied version or NONE."""
+        import io
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        backend_root = str(Path(__file__).resolve().parents[2])
+        if backend_root not in sys.path:
+            sys.path.insert(0, backend_root)
+        import run_migrations
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchval.return_value = "schema_migrations"
+        mock_conn.fetchrow.return_value = {"version": "0025_messages_idempotency_key.sql"}
+        mock_conn.close.return_value = None
+
+        with patch("asyncpg.connect", AsyncMock(return_value=mock_conn)), patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            await run_migrations.get_current_version()
+            self.assertEqual(mock_out.getvalue().strip(), "0025_messages_idempotency_key.sql")
+
+        # When table does not exist
+        mock_conn.fetchval.return_value = None
+        with patch("asyncpg.connect", AsyncMock(return_value=mock_conn)), patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            await run_migrations.get_current_version()
+            self.assertEqual(mock_out.getvalue().strip(), "NONE")
+
+    async def test_13_run_migrations_rollback_target_version(self):
+        """rollback_migrations stops at target_version and deletes schema_migrations entries."""
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        backend_root = str(Path(__file__).resolve().parents[2])
+        if backend_root not in sys.path:
+            sys.path.insert(0, backend_root)
+        import run_migrations
+
+        mock_conn = AsyncMock()
+        mock_conn.fetch.return_value = [
+            {"version": "0025_messages_idempotency_key.sql"},
+            {"version": "0024_matches_status_check_and_liked_me_pagination.sql"},
+            {"version": "0023_user_devices.sql"},
+        ]
+        mock_conn.execute.return_value = None
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_tx
+        mock_tx.__aexit__.return_value = None
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        mock_conn.close.return_value = None
+
+        with patch("asyncpg.connect", AsyncMock(return_value=mock_conn)):
+            await run_migrations.rollback_migrations(steps=None, target_version="0024_matches_status_check_and_liked_me_pagination.sql")
+
+        # 0025 was rolled back, but 0024 was target, so stopped at 0024.
+        delete_calls = [call for call in mock_conn.execute.call_args_list if "DELETE FROM schema_migrations" in str(call)]
+        self.assertEqual(len(delete_calls), 1)
+        self.assertIn("0025_messages_idempotency_key.sql", str(delete_calls[0]))
+
+    def test_14_deploy_prod_workflow_has_automated_rollback(self):
+        """deploy-prod.yml must capture PREV_IMAGE / PREV_MIGRATION and execute rollback."""
+        from pathlib import Path
+        import yaml
+
+        workflow_path = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "deploy-prod.yml"
+        self.assertTrue(workflow_path.exists())
+
+        content = workflow_path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(content)
+        self.assertIn("jobs", parsed)
+
+        # Ensure rollback and state capture logic exist in script
+        self.assertIn("PREV_IMAGE=$(docker inspect", content)
+        self.assertIn("PREV_MIGRATION=$(docker compose", content)
+        self.assertIn("Preflight sanity check", content)
+        self.assertIn("=== INITIATING AUTOMATIC ROLLBACK ===", content)
+        self.assertIn("run_migrations.py --to-version", content)
+        self.assertIn('export BACKEND_IMAGE="$PREV_IMAGE"', content)
+        self.assertIn(".current_backend_image", content)
+
+    async def test_15_envelope_and_legal_coverage(self):
+        """Verify response envelopes, legal routes, and voice upload presigning."""
+        from app.core.responses import ok, err
+        from app.routers.legal import robots_txt, privacy_policy
+        from app.routers.media import presign_upload_get, UploadRequestResponse
+
+        # Responses ok and err branches
+        ok_res = ok({"data": 1}, meta={"test": True})
+        self.assertTrue(ok_res["success"])
+        self.assertTrue(ok_res["meta"]["test"])
+
+        err_res = err("TEST_ERROR", "Error msg", details=["some_detail"])
+        self.assertFalse(err_res["success"])
+        self.assertEqual(err_res["error"]["code"], "TEST_ERROR")
+        self.assertEqual(err_res["error"]["details"], ["some_detail"])
+
+        # Legal routes
+        rob = robots_txt()
+        self.assertIn("User-agent", rob.body.decode())
+        priv = await privacy_policy()
+        self.assertIn("Introduction", priv)
+        from app.routers.legal import terms_of_service, child_safety_standards, community_guidelines
+        terms = await terms_of_service()
+        self.assertIn("Eligibility", terms)
+        child = await child_safety_standards()
+        self.assertIn("Child Safety", child)
+        guidelines = await community_guidelines()
+        self.assertIn("Ahimsa", guidelines)
+
+        # Media voice presign adapter
+        mock_user = {"id": uuid.uuid4()}
+        mock_db = MagicMock()
+        mock_redis = MagicMock()
+        with patch("app.routers.media.request_upload", AsyncMock(return_value=UploadRequestResponse(media_id=uuid.uuid4(), presigned_url="http://s3", s3_key="voice_key"))):
+            voice_res = await presign_upload_get(current_user=mock_user, db=mock_db, redis=mock_redis, type="voice")
+            self.assertEqual(voice_res.s3_key, "voice_key")
+
+    async def test_16_upload_validation_errors(self):
+        """Verify request_upload validates content-type and size limits for photo and voice."""
+        from fastapi import HTTPException
+        from app.routers.media import request_upload, UploadRequestBody
+
+        mock_user = {"id": uuid.uuid4()}
+        mock_db = MagicMock()
+        mock_redis = MagicMock()
+
+        # Invalid photo content type
+        b1 = UploadRequestBody(media_type="photo", content_type="application/pdf", file_size_bytes=1000)
+        with self.assertRaises(HTTPException) as ctx:
+            await request_upload(b1, mock_user, mock_db, mock_redis)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # Invalid voice content type
+        b2 = UploadRequestBody(media_type="voice", content_type="video/mp4", file_size_bytes=1000)
+        with self.assertRaises(HTTPException) as ctx:
+            await request_upload(b2, mock_user, mock_db, mock_redis)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # Voice too large (6MB passes model le=10MB but fails voice limit 5MB)
+        b3 = UploadRequestBody(media_type="voice", content_type="audio/m4a", file_size_bytes=6 * 1024 * 1024)
+        with self.assertRaises(HTTPException) as ctx:
+            await request_upload(b3, mock_user, mock_db, mock_redis)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("5 MB", ctx.exception.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

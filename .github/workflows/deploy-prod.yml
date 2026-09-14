@@ -64,21 +64,110 @@ jobs:
           key: ${{ secrets.PROD_SSH_KEY }}
           script: |
             cd /opt/jainune
-            export BACKEND_IMAGE="ghcr.io/${{ env.REPO_LOWER }}/backend:${{ github.sha }}"
+
+            TARGET_IMAGE="ghcr.io/${{ env.REPO_LOWER }}/backend:${{ github.sha }}"
+            echo "Target deployment image: $TARGET_IMAGE"
+
+            # Capture currently running container image for rollback
+            PREV_IMAGE=$(docker inspect --format='{{.Config.Image}}' jainune_prod_api 2>/dev/null || cat /opt/jainune/.current_backend_image 2>/dev/null || echo "")
+            echo "Current running backend image: ${PREV_IMAGE:-none}"
+
+            # Pull target image
+            export BACKEND_IMAGE="$TARGET_IMAGE"
+            echo "Pulling target image: $BACKEND_IMAGE"
             docker compose -f backend/docker-compose.prod.yml pull
-            if [ "${{ inputs.migrate_db }}" = "true" ]; then
-              echo "Reconciling database migrations..."
-              docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py
+
+            # Pre-flight sanity check on target image (validates imports/configs before any DB mutation or service disruption)
+            echo "Running pre-flight sanity check on $BACKEND_IMAGE..."
+            if ! docker compose -f backend/docker-compose.prod.yml run --rm api python -c "import app.main; print('Preflight sanity check OK')"; then
+              echo "ERROR: Preflight sanity check failed on $BACKEND_IMAGE! Aborting deployment prior to database mutations."
+              exit 1
             fi
+
+            # Database migrations with state tracking
+            MIGRATIONS_APPLIED=false
+            PREV_MIGRATION=""
+            if [ "${{ inputs.migrate_db }}" = "true" ]; then
+              echo "Capturing current database migration state..."
+              PREV_MIGRATION=$(docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py --current-version 2>/dev/null | tr -d '\r' | tail -n 1)
+              echo "Pre-deploy migration version: ${PREV_MIGRATION:-NONE}"
+
+              echo "Reconciling database migrations..."
+              if ! docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py; then
+                echo "ERROR: Database migration failed! Reverting schema to ${PREV_MIGRATION:-NONE}..."
+                if [ -n "$PREV_MIGRATION" ]; then
+                  docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py --to-version "$PREV_MIGRATION" || true
+                fi
+                exit 1
+              fi
+              MIGRATIONS_APPLIED=true
+            fi
+
+            # Deploy new containers
+            echo "Starting production services with $BACKEND_IMAGE..."
             docker compose -f backend/docker-compose.prod.yml up -d --remove-orphans
+
             echo "Awaiting API healthcheck verification on loopback..."
+            HEALTHY=false
             for i in $(seq 1 30); do
               if curl -s -f http://127.0.0.1:8000/livez > /dev/null; then
-                echo "Deployment successful: API is healthy and accepting connections."
-                exit 0
+                echo "Deployment successful: API is healthy and accepting connections (attempt $i/30)."
+                HEALTHY=true
+                break
               fi
               sleep 2
             done
+
+            if [ "$HEALTHY" = "true" ]; then
+              echo "$BACKEND_IMAGE" > /opt/jainune/.current_backend_image
+              echo "Deployment completed successfully. Current image state persisted."
+              exit 0
+            fi
+
             echo "ERROR: Deployment health check failed after 60s! Inspecting logs..."
             docker compose -f backend/docker-compose.prod.yml logs --tail 50 api
+
+            echo "=== INITIATING AUTOMATIC ROLLBACK ==="
+            ROLLBACK_FAILED=false
+
+            # Roll back database migrations if applied
+            if [ "$MIGRATIONS_APPLIED" = "true" ] && [ -n "$PREV_MIGRATION" ]; then
+              echo "Rolling back database migrations to $PREV_MIGRATION..."
+              if ! docker compose -f backend/docker-compose.prod.yml run --rm api python run_migrations.py --to-version "$PREV_MIGRATION"; then
+                echo "WARNING: Database migration rollback encountered errors!"
+                ROLLBACK_FAILED=true
+              fi
+            fi
+
+            # Roll back containers to previous image
+            if [ -n "$PREV_IMAGE" ] && [ "$PREV_IMAGE" != "$TARGET_IMAGE" ]; then
+              echo "Rolling back containers to previous known-good image: $PREV_IMAGE..."
+              export BACKEND_IMAGE="$PREV_IMAGE"
+              docker compose -f backend/docker-compose.prod.yml up -d --remove-orphans
+
+              echo "Verifying rollback container healthcheck..."
+              ROLLBACK_HEALTHY=false
+              for j in $(seq 1 15); do
+                if curl -s -f http://127.0.0.1:8000/livez > /dev/null; then
+                  echo "Rollback verified: Previous image is healthy and accepting connections."
+                  ROLLBACK_HEALTHY=true
+                  break
+                fi
+                sleep 2
+              done
+
+              if [ "$ROLLBACK_HEALTHY" != "true" ]; then
+                echo "CRITICAL: Rollback containers also failed health check!"
+                docker compose -f backend/docker-compose.prod.yml logs --tail 50 api
+                ROLLBACK_FAILED=true
+              fi
+            else
+              echo "WARNING: No prior image tag available or target matches previous ($PREV_IMAGE). Container rollback skipped."
+            fi
+
+            if [ "$ROLLBACK_FAILED" = "true" ]; then
+              echo "CRITICAL: Deployment failed AND automatic rollback encountered errors. Manual operator intervention required immediately."
+            else
+              echo "AUTOMATIC ROLLBACK SUCCESSFUL: Production restored to previous state ($PREV_IMAGE). Release $TARGET_IMAGE aborted."
+            fi
             exit 1

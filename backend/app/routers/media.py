@@ -245,13 +245,15 @@ async def presign_upload_get(
     position: Optional[int] = Query(None, ge=1, le=6),
 ) -> UploadRequestResponse:
     # Compatibility adapter for mobile with full capacity (BUG-055)
-    ct = "image/jpeg" if type == "photo" else "audio/m4a"
-    size = _MAX_PHOTO_BYTES if type == "photo" else _MAX_VOICE_BYTES
+    media_type = type if isinstance(type, str) else "photo"
+    pos = position if isinstance(position, int) else None
+    ct = "image/jpeg" if media_type == "photo" else "audio/m4a"
+    size = _MAX_PHOTO_BYTES if media_type == "photo" else _MAX_VOICE_BYTES
     body = UploadRequestBody(
-        media_type=type,
+        media_type=media_type,
         content_type=ct,
         file_size_bytes=size,
-        position=position,
+        position=pos,
     )
     return await request_upload(body, current_user, db, redis)
 
