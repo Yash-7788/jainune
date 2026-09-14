@@ -184,9 +184,11 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
         mock_conn = AsyncMock()
         mock_conn.transaction = None
         expired_match_id = uuid.uuid4()
+        expired_chat_id = uuid.uuid4()
         mock_conn.fetch.side_effect = [
             [],                          # Step 1 (reordered): warn_ids (none pending)
             [{"id": expired_match_id}],  # Step 2 (reordered): expired_ids
+            [{"id": expired_chat_id}],   # Step 3: chat_ids from UPDATE chats RETURNING id
         ]
 
         mock_notify = MagicMock()
@@ -200,8 +202,8 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
         fetch_queries = [call[0][0] for call in mock_conn.fetch.call_args_list]
         self.assertTrue(any("COALESCE(last_message_at, created_at)" in q for q in fetch_queries))
 
-        execute_queries = [call[0][0] for call in mock_conn.execute.call_args_list]
-        self.assertTrue(any("UPDATE chats SET is_unmatched = TRUE" in q for q in execute_queries))
+        all_queries = fetch_queries + [call[0][0] for call in mock_conn.execute.call_args_list]
+        self.assertTrue(any("UPDATE chats SET is_unmatched = TRUE" in q for q in all_queries))
 
     async def test_06_push_notifications_stringifies_data_values(self):
         """FCM v1 requires all values in data payload to be strings."""

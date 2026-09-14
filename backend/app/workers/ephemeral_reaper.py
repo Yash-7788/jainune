@@ -253,6 +253,7 @@ def reap_stale_matches() -> None:
             if asyncio.iscoroutine(tx):
                 tx.close()
                 tx = None
+            chat_ids: list[Any] = []
             if tx is not None and hasattr(tx, "__aenter__") and not asyncio.iscoroutine(tx):
                 async with tx:
                     expired_ids = await conn.fetch(
@@ -267,10 +268,11 @@ def reap_stale_matches() -> None:
                     )
                     if expired_ids:
                         exp_list = [r["id"] for r in expired_ids]
-                        await conn.execute(
-                            "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                        chat_rows = await conn.fetch(
+                            "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[]) RETURNING id",
                             exp_list,
                         )
+                        chat_ids = [r["id"] for r in chat_rows]
             else:
                 expired_ids = await conn.fetch(
                     f"""
@@ -284,18 +286,19 @@ def reap_stale_matches() -> None:
                 )
                 if expired_ids:
                     exp_list = [r["id"] for r in expired_ids]
-                    await conn.execute(
-                        "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                    chat_rows = await conn.fetch(
+                        "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[]) RETURNING id",
                         exp_list,
                     )
+                    chat_ids = [r["id"] for r in chat_rows]
             if expired_ids:
                 log.info("reap_stale_matches: expired %d matches and closed chats", len(expired_ids))
                 try:
                     from app.core.redis import get_redis
                     r = get_redis()
                     if r and hasattr(r, "scan_iter"):
-                        for mid in exp_list:
-                            pattern = f"chat:safety:single_chars:{mid}:*"
+                        for cid in chat_ids:
+                            pattern = f"chat:safety:single_chars:{cid}:*"
                             async for k in r.scan_iter(pattern):
                                 await r.delete(k)
                 except Exception:
