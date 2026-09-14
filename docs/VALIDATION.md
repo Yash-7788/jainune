@@ -2,6 +2,8 @@
 
 Date: 14 September 2026. Baseline main: `9ed9fc5d1c6f190efb4fec32f067da9f4bfd2d3b`.
 
+Review: [draft PR #2](https://github.com/Yash-7788/jainune/pull/2). GitHub reported `action_required` for the fork's [mobile compilation workflow](https://github.com/Yash-7788/jainune/actions/runs/34822080638) and [CI workflow](https://github.com/Yash-7788/jainune/actions/runs/34822080691). A repository maintainer must inspect and approve the fork workflow runs. No remote native-build success is claimed.
+
 | Verification | Result |
 | --- | --- |
 | Backend suite (`pytest tests/unit tests/integration -q`) | **357 passed**, 1 warning; **73.24%** coverage against the required 70% |
