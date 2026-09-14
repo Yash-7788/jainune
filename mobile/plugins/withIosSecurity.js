@@ -68,11 +68,10 @@ function withIosSecurityPod(config) {
       if (fs.existsSync(podfilePath)) {
         let contents = fs.readFileSync(podfilePath, "utf8");
         if (!contents.includes("JainuneSecurityModule")) {
-          const insertMarker = "use_native_modules!";
-          if (contents.includes(insertMarker)) {
+          if (/^.*use_native_modules!.*$/m.test(contents)) {
             contents = contents.replace(
-              insertMarker,
-              `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
+              /^(.*use_native_modules!.*)$/m,
+              `$1\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
             );
           } else if (contents.includes("post_install")) {
             contents = contents.replace(
