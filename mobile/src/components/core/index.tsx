@@ -19,6 +19,11 @@ import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { colors, spacing, radii, typography, gradients } from "../../theme/tokens";
 
+// ── New Delight Exports ───────────────────────────────────────────────────────
+export { default as PixelHeart } from "./PixelHeart";
+export { default as PeekingHeartMascot } from "./PeekingHeartMascot";
+export { BlueBoyHeart, PinkGirlHeart } from "./CuteCharacters";
+
 // ── PrimaryButton ─────────────────────────────────────────────────────────────
 
 interface PrimaryButtonProps {
@@ -30,35 +35,62 @@ interface PrimaryButtonProps {
 }
 
 export function PrimaryButton({ label, onPress, loading, disabled, style }: PrimaryButtonProps) {
+  const scaleAnim = React.useRef(new Animated.Value(1)).current;
+  const translateYAnim = React.useRef(new Animated.Value(0)).current;
+
+  const handlePressIn = () => {
+    if (disabled || loading) return;
+    Animated.parallel([
+      Animated.spring(scaleAnim, { toValue: 0.965, tension: 200, friction: 10, useNativeDriver: true }),
+      Animated.spring(translateYAnim, { toValue: 2, tension: 200, friction: 10, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.parallel([
+      Animated.spring(scaleAnim, { toValue: 1, tension: 200, friction: 10, useNativeDriver: true }),
+      Animated.spring(translateYAnim, { toValue: 0, tension: 200, friction: 10, useNativeDriver: true }),
+    ]).start();
+  };
+
   const handlePress = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onPress();
   };
 
   return (
-    <TouchableOpacity
-      onPress={handlePress}
-      disabled={disabled || loading}
-      activeOpacity={0.85}
-      style={[styles.primaryOuter, style]}
-      accessible={true}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }}
+    <Animated.View
+      style={[
+        { transform: [{ scale: scaleAnim }, { translateY: translateYAnim }] },
+        style,
+      ]}
     >
-      <LinearGradient
-        colors={disabled ? ["#CCBCB0", "#CCBCB0"] : gradients.button}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 0 }}
-        style={styles.primaryGradient}
+      <TouchableOpacity
+        onPress={handlePress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        disabled={disabled || loading}
+        activeOpacity={0.92}
+        style={[styles.primaryOuter, disabled && styles.primaryDisabled]}
+        accessible={true}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }}
       >
-        {loading ? (
-          <ActivityIndicator color={colors.white} size="small" />
-        ) : (
-          <Text style={styles.primaryLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
-        )}
-      </LinearGradient>
-    </TouchableOpacity>
+        <LinearGradient
+          colors={disabled ? ["#DDD6CF", "#DDD6CF"] : gradients.button}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.primaryGradient}
+        >
+          {loading ? (
+            <ActivityIndicator color={colors.white} size="small" />
+          ) : (
+            <Text style={styles.primaryLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
+          )}
+        </LinearGradient>
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
@@ -72,19 +104,46 @@ interface GhostButtonProps {
 }
 
 export function GhostButton({ label, onPress, disabled, style }: GhostButtonProps) {
+  const scaleAnim = React.useRef(new Animated.Value(1)).current;
+  const translateYAnim = React.useRef(new Animated.Value(0)).current;
+
+  const handlePressIn = () => {
+    if (disabled) return;
+    Animated.parallel([
+      Animated.spring(scaleAnim, { toValue: 0.965, tension: 200, friction: 10, useNativeDriver: true }),
+      Animated.spring(translateYAnim, { toValue: 2, tension: 200, friction: 10, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.parallel([
+      Animated.spring(scaleAnim, { toValue: 1, tension: 200, friction: 10, useNativeDriver: true }),
+      Animated.spring(translateYAnim, { toValue: 0, tension: 200, friction: 10, useNativeDriver: true }),
+    ]).start();
+  };
+
   return (
-    <TouchableOpacity
-      onPress={onPress}
-      disabled={disabled}
-      activeOpacity={0.7}
-      style={[styles.ghost, style]}
-      accessible={true}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
+    <Animated.View
+      style={[
+        { transform: [{ scale: scaleAnim }, { translateY: translateYAnim }] },
+        style,
+      ]}
     >
-      <Text style={styles.ghostLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
-    </TouchableOpacity>
+      <TouchableOpacity
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        disabled={disabled}
+        activeOpacity={0.85}
+        style={[styles.ghost, disabled && styles.ghostDisabled]}
+        accessible={true}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityState={{ disabled: !!disabled }}
+      >
+        <Text style={styles.ghostLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
@@ -260,15 +319,22 @@ export function ErrorToast({ title, message, visible, onDismiss }: ToastProps) {
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  // PrimaryButton
+  // PrimaryButton — Thick Black Border & Tactile Shadow
   primaryOuter: {
     borderRadius: radii.full,
     overflow: "hidden",
-    shadowColor: colors.saffron,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 6,
+    borderWidth: 2,
+    borderColor: "#1C1C1E",
+    shadowColor: "#1C1C1E",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 0,
+    elevation: 4,
+  },
+  primaryDisabled: {
+    borderColor: "#B0A8A0",
+    shadowOpacity: 0,
+    elevation: 0,
   },
   primaryGradient: {
     minHeight: 52,
@@ -279,23 +345,37 @@ const styles = StyleSheet.create({
   },
   primaryLabel: {
     ...typography.cta,
+    fontFamily: "Outfit_700Bold",
     color: colors.white,
+    letterSpacing: 0.3,
   },
 
-  // GhostButton
+  // GhostButton — Thick Black Border & Clean Tactile Fill
   ghost: {
     minHeight: 52,
     borderRadius: radii.full,
-    borderWidth: 1.5,
-    borderColor: colors.saffron,
+    borderWidth: 2,
+    borderColor: "#1C1C1E",
+    backgroundColor: colors.white,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.sm,
+    shadowColor: "#1C1C1E",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 0,
+    elevation: 2,
+  },
+  ghostDisabled: {
+    borderColor: "#D5CECA",
+    opacity: 0.5,
   },
   ghostLabel: {
     ...typography.cta,
-    color: colors.saffron,
+    fontFamily: "Outfit_700Bold",
+    color: "#1C1C1E",
+    letterSpacing: 0.2,
   },
 
   // TextInput
