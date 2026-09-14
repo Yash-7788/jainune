@@ -159,6 +159,50 @@ class TestBotDefenseHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail, "Invalid request submission.")
 
+    def test_production_mobile_client_exempt_from_turnstile_when_secret_set(self):
+        """Native mobile clients (iOS/Android) pass authentication in production without Turnstile token."""
+        from app.core.config import settings
+
+        with patch.object(settings, "turnstile_secret_key", "0x4AAAAAAtestsecret"):
+            # 1. Android mobile client with platform header -> passes
+            is_bot, reason = verify_bot_integrity(
+                headers={"x-client-platform": "android"},
+                turnstile_token=None,
+                is_production=True,
+            )
+            self.assertFalse(is_bot)
+            self.assertEqual(reason, "")
+
+            # 2. iOS mobile client with native User-Agent -> passes
+            is_bot, reason = verify_bot_integrity(
+                headers={"user-agent": "JainuneApp/1.0.0 (ios)"},
+                turnstile_token=None,
+                is_production=True,
+            )
+            self.assertFalse(is_bot)
+            self.assertEqual(reason, "")
+
+            # 3. Web browser without Turnstile token in production -> blocked
+            is_bot, reason = verify_bot_integrity(
+                headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+                turnstile_token=None,
+                is_production=True,
+            )
+            self.assertTrue(is_bot)
+            self.assertIn("challenge failed", reason)
+
+            # 4. Web browser with valid header token -> passes
+            with patch("app.core.bot_defense.verify_turnstile_token", return_value=True):
+                is_bot, reason = verify_bot_integrity(
+                    headers={
+                        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "x-turnstile-token": "0.valid_cf_token",
+                    },
+                    turnstile_token=None,
+                    is_production=True,
+                )
+                self.assertFalse(is_bot)
+
 
 if __name__ == "__main__":
     unittest.main()

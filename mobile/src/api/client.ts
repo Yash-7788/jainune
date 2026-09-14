@@ -84,6 +84,9 @@ function createClient(baseURL: string): AxiosInstance {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       Accept: "application/json",
+      "X-Client-Platform": Platform.OS,
+      "X-App-Version": "1.0.0",
+      "User-Agent": `JainuneApp/1.0.0 (${Platform.OS})`,
     },
   });
 }
@@ -134,7 +137,15 @@ _client.interceptors.response.use(
         const resp = await axios.post(
           `${SERVER_URLS[0]}/auth/token/refresh`,
           { refresh_token: refreshToken },
-          { timeout: 10_000, headers: { "Content-Type": "application/json" } }
+          {
+            timeout: 10_000,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Client-Platform": Platform.OS,
+              "X-App-Version": "1.0.0",
+              "User-Agent": `JainuneApp/1.0.0 (${Platform.OS})`,
+            },
+          }
         );
         const { access_token, refresh_token: new_refresh } = resp.data.data;
         const userId =

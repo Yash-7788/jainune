@@ -72,6 +72,11 @@ if not ok or type(candidates) ~= 'table' then
     redis.call('del', KEYS[1])
     return nil
 end
+-- Validate elements: cache must contain candidate profile objects, not primitive strings
+if #candidates > 0 and type(candidates[1]) ~= 'table' then
+    redis.call('del', KEYS[1])
+    return nil
+end
 local limit = tonumber(ARGV[1])
 -- N-15 fix: serve partial batches rather than discarding when fewer remain than limit.
 if #candidates == 0 then
@@ -108,7 +113,11 @@ async def _get_cached_feed(
     try:
         raw = await redis.get(key)
         if raw:
-            return json.loads(raw)
+            data = json.loads(raw)
+            if isinstance(data, list) and (not data or isinstance(data[0], dict)):
+                return data
+            # Invalid/corrupted cache format (e.g. list of raw ID strings) — clean up
+            await redis.delete(key)
     except Exception as exc:
         log.warning("Redis feed cache decode error for user %s: %s", user_id, exc)
     return None
@@ -157,25 +166,29 @@ async def fetch_recommended_feed(
             cached_json = await redis.eval(_POP_FEED_SCRIPT, 1, f"feed:cache:{user_id}", limit)
             if cached_json:
                 batch = json.loads(cached_json)
-                return {
-                    "candidates": batch,
-                    "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
-                    "exhausted": False,
-                    "from_cache": True,
-                }
-        except Exception as exc:
-            log.warning("Atomic feed cache pop failed: %s", exc)
-            try:
-                cached_json = await redis.get(f"feed:cache:{user_id}")
-                if cached_json:
-                    raw_batch = json.loads(cached_json)
-                    batch = raw_batch[:limit]
+                if isinstance(batch, list) and (not batch or isinstance(batch[0], dict)):
                     return {
                         "candidates": batch,
                         "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
                         "exhausted": False,
                         "from_cache": True,
                     }
+                await redis.delete(f"feed:cache:{user_id}")
+        except Exception as exc:
+            log.warning("Atomic feed cache pop failed: %s", exc)
+            try:
+                cached_json = await redis.get(f"feed:cache:{user_id}")
+                if cached_json:
+                    raw_batch = json.loads(cached_json)
+                    if isinstance(raw_batch, list) and (not raw_batch or isinstance(raw_batch[0], dict)):
+                        batch = raw_batch[:limit]
+                        return {
+                            "candidates": batch,
+                            "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                            "exhausted": False,
+                            "from_cache": True,
+                        }
+                    await redis.delete(f"feed:cache:{user_id}")
             except Exception:
                 pass
 

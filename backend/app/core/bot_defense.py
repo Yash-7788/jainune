@@ -126,13 +126,43 @@ def verify_bot_integrity(
     if ua and _RE_BOT_UA.search(ua):
         return True, f"Automated traffic / bot detected ({ua})"
 
+    # Case-insensitive header lookup for X-Client-Platform
+    client_platform = ""
+    if hasattr(headers, "get"):
+        client_platform = headers.get("x-client-platform") or headers.get("X-Client-Platform") or ""
+    if not client_platform and isinstance(headers, (dict, Mapping)):
+        for k, v in headers.items():
+            if str(k).lower() == "x-client-platform":
+                client_platform = str(v)
+                break
+    client_platform = str(client_platform).strip().lower()
+
+    # Also extract x-turnstile-token from headers if not provided in body
+    if not turnstile_token:
+        if hasattr(headers, "get"):
+            turnstile_token = headers.get("x-turnstile-token") or headers.get("X-Turnstile-Token")
+        if not turnstile_token and isinstance(headers, (dict, Mapping)):
+            for k, v in headers.items():
+                if str(k).lower() == "x-turnstile-token":
+                    turnstile_token = str(v)
+                    break
+
+    ua_lower = ua.lower()
+    is_native_mobile = (
+        client_platform in ("ios", "android")
+        or "jainune" in ua_lower
+    )
+
     # 3. Turnstile token verification
     from app.core.config import settings
-    if settings.turnstile_secret_key or (is_production and turnstile_token):
-        if not turnstile_token or not verify_turnstile_token(turnstile_token, remote_ip):
-            return True, "Security verification challenge failed"
-    elif turnstile_token:
+    if turnstile_token:
         if not verify_turnstile_token(turnstile_token, remote_ip):
             return True, "Security verification challenge failed"
+    elif settings.turnstile_secret_key:
+        # Native mobile clients are exempt from web browser Turnstile verification
+        if not is_native_mobile:
+            return True, "Security verification challenge failed"
+    elif is_production and not is_native_mobile:
+        return True, "Security verification challenge failed"
 
     return False, ""

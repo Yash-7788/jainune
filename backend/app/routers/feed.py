@@ -54,9 +54,10 @@ async def get_feed(
                 limit=limit,
                 force_refresh=False,
             )
-            for c in result["candidates"]:
-                c.pop("_behavioral_affinity", None)
-                c.pop("_cultural_score", None)
+            for c in result.get("candidates", []):
+                if isinstance(c, dict):
+                    c.pop("_behavioral_affinity", None)
+                    c.pop("_cultural_score", None)
             return FeedResponse(**result)
 
     # Enrich current_user with location + behavior vector for pipeline on cache miss
@@ -91,9 +92,10 @@ async def get_feed(
     )
 
     # Strip internal scoring fields before returning
-    for c in result["candidates"]:
-        c.pop("_behavioral_affinity", None)
-        c.pop("_cultural_score", None)
+    for c in result.get("candidates", []):
+        if isinstance(c, dict):
+            c.pop("_behavioral_affinity", None)
+            c.pop("_cultural_score", None)
 
     return FeedResponse(**result)
 
