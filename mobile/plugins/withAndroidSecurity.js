@@ -9,6 +9,8 @@ function withAndroidAppConfig(config) {
     if (mainApplication) {
       mainApplication.$["android:largeHeap"] = "true";
       mainApplication.$["android:networkSecurityConfig"] = "@xml/network_security_config";
+      mainApplication.$["android:supportsRtl"] = "false";
+      mainApplication.$["android:usesCleartextTraffic"] = "false";
     }
 
     // Strip debug SYSTEM_ALERT_WINDOW from release manifest
