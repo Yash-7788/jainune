@@ -35,6 +35,11 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
