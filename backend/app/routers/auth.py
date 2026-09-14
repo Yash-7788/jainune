@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Optional
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,6 +35,7 @@ from app.models.schemas.auth import (
     EmailOTPRequestBody,
     EmailOTPVerifyBody,
     GoogleAuthBody,
+    LogoutBody,
     OTPRequestBody,
     OTPRequestResponse,
     OTPVerifyBody,
@@ -167,6 +168,7 @@ async def _issue_token_response(
         await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
 
     # Track old token as replaced by login rather than rotated/theft (BUG-064)
+    # Proactively notify active sessions via user commands channel (FINDING-03)
     if old_token_hash:
         try:
             r = get_redis()
@@ -177,6 +179,18 @@ async def _issue_token_response(
             )
             if hasattr(res, "__await__"):
                 await res
+            pub_res = r.publish(
+                f"user:{user_id}:commands",
+                json.dumps({
+                    "type": "force_disconnect",
+                    "reason": "Session expired due to login from another device. Please sign in again.",
+                }),
+            )
+            if hasattr(pub_res, "__await__"):
+                await pub_res
+            del_res = r.delete(f"user:session:{user_id}")
+            if hasattr(del_res, "__await__"):
+                await del_res
         except Exception as e:
             log.warning("Failed to record session replacement state in Redis: %s", e)
 
@@ -454,7 +468,18 @@ async def verify_email_otp(
             detail="Maximum OTP verification attempts exceeded. Request a new OTP.",
         )
 
-    stored_hash = await redis.get(session_key)
+    # Atomic GETDEL prevents concurrent requests from double-consuming the same OTP
+    _GETDEL_LUA = "local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end; return v"
+    try:
+        if hasattr(redis, "getdel"):
+            stored_hash = await redis.getdel(session_key)
+        else:
+            stored_hash = await redis.eval(_GETDEL_LUA, 1, session_key)
+    except Exception:
+        stored_hash = await redis.get(session_key)
+        if stored_hash:
+            await redis.delete(session_key)
+
     if not stored_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
 
@@ -463,7 +488,6 @@ async def verify_email_otp(
     if not hmac.compare_digest(stored_str, expected_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code.")
 
-    await redis.delete(session_key)
     await redis.delete(rate_key)
 
     async with db.acquire() as conn:
@@ -617,25 +641,27 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
     google_sub = payload.get("sub")
     raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
     email = canonicalize_email(raw_email) if raw_email else None
+    email_verified = payload.get("email_verified") in (True, "true", "True")
+    verified_email = email if email_verified else None
     name = payload.get("name") or payload.get("given_name")
 
     if not google_sub:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google account identification missing.")
 
-    if email:
-        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
+    if verified_email:
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, verified_email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(google_sub), email,
+            str(google_sub), verified_email,
         )
         is_new_user = row is None
         if is_new_user:
             try:
-                if email:
+                if verified_email:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
@@ -643,13 +669,13 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
                         ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
                         RETURNING id
                         """,
-                        str(google_sub), email, name,
+                        str(google_sub), verified_email, name,
                     )
                 else:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, TRUE, 'google')
+                        VALUES ($1, $2, FALSE, 'google')
                         ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
                         RETURNING id
                         """,
@@ -659,7 +685,7 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
                 # Concurrent login or existing google_id under different email
                 user_id = await conn.fetchval(
                     "SELECT id FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(google_sub), email,
+                    str(google_sub), verified_email,
                 )
                 if not user_id:
                     raise
@@ -714,25 +740,27 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
     apple_sub = payload.get("sub")
     raw_email = payload.get("email", "").strip().lower() if payload.get("email") else None
     email = canonicalize_email(raw_email) if raw_email else None
+    email_verified = payload.get("email_verified") in (True, "true", "True")
+    verified_email = email if email_verified else None
     first_name = body.first_name
 
     if not apple_sub:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Apple account identification missing.")
 
-    if email:
-        is_disp, reason = await asyncio.to_thread(is_disposable_email, email, allow_custom_domains=True)
+    if verified_email:
+        is_disp, reason = await asyncio.to_thread(is_disposable_email, verified_email, allow_custom_domains=True)
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(apple_sub), email,
+            str(apple_sub), verified_email,
         )
         is_new_user = row is None
         if is_new_user:
             try:
-                if email:
+                if verified_email:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
@@ -740,13 +768,13 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
                         ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
                         RETURNING id
                         """,
-                        str(apple_sub), email, first_name,
+                        str(apple_sub), verified_email, first_name,
                     )
                 else:
                     user_id = await conn.fetchval(
                         """
                         INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, TRUE, 'apple')
+                        VALUES ($1, $2, FALSE, 'apple')
                         ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
                         RETURNING id
                         """,
@@ -756,7 +784,7 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
                 # Concurrent login or existing apple_id under different email
                 user_id = await conn.fetchval(
                     "SELECT id FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(apple_sub), email,
+                    str(apple_sub), verified_email,
                 )
                 if not user_id:
                     raise
@@ -959,12 +987,14 @@ async def logout_endpoint(
     current_user: CurrentUserForLogout,
     db: DBDep,
     redis: RedisDep,
+    body: Optional[LogoutBody] = None,
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
 ) -> dict:
     """
     Session revocation per SECURITY.md Section 2.2:
     1. Blacklists current access token jti in Redis (<1ms lookup).
-    2. Deletes active refresh token from PostgreSQL.
+    2. Revokes active refresh token from PostgreSQL (single active session model).
+    3. Scopes push notification token cleanup (user_devices) to current device (retaining other devices for push if not all_devices).
     """
     try:
         payload = await validate_access_token(credentials, redis)
@@ -983,14 +1013,38 @@ async def logout_endpoint(
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
         try:
-            await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
-        except Exception:
-            pass
-        await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
+            if body and body.device_id and not body.all_devices:
+                await conn.execute(
+                    "DELETE FROM user_devices WHERE user_id = $1 AND device_id = $2",
+                    user_id,
+                    body.device_id,
+                )
+                remaining_token = await conn.fetchval(
+                    "SELECT token FROM user_devices WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
+                    user_id,
+                )
+                await conn.execute(
+                    "UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2",
+                    remaining_token,
+                    user_id,
+                )
+            else:
+                await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
+                await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
+        except Exception as exc:
+            log.warning("Failed to clean up user_devices on logout for %s: %s", user_id, exc)
 
     # Invalidate feed cache and active session keys
     try:
         await redis.delete(f"feed:cache:{user_id}", f"user:session:{user_id}")
+        if body and body.all_devices:
+            await redis.publish(
+                f"user:{user_id}:commands",
+                json.dumps({
+                    "type": "force_disconnect",
+                    "reason": "You have been logged out on all devices.",
+                }),
+            )
     except Exception:
         pass
 

@@ -43,9 +43,11 @@ function getAudioModule(): any {
 import {
   getMyProfile,
   updateProfile,
+  updatePrompts,
   presignUpload,
   addPhoto,
   deletePhoto,
+  reorderPhotos,
   updateVoiceSnapshot,
   MyProfile,
 } from "../../api/profileApi";
@@ -214,7 +216,8 @@ export default function EditProfileScreen() {
     try {
       const mime = asset.type === "image" ? "image/jpeg" : "image/jpeg";
       const sizeBytes = asset.fileSize || 1024 * 1024;
-      const presign = await presignUpload(mime, sizeBytes);
+      const nextPos = Math.min(6, photos.length + 1);
+      const presign = await presignUpload(mime, sizeBytes, "photo", nextPos);
       await uploadToPresignedUrl(presign.upload_url, asset.uri, mime, presign.presigned_fields);
       await addPhoto(presign.media_id);
       setPhotos((prev) => [
@@ -226,7 +229,7 @@ export default function EditProfileScreen() {
     } finally {
       setUploadingPhoto(false);
     }
-  }, []);
+  }, [photos.length]);
 
   // Android low-memory Activity recreation recovery
   useEffect(() => {
@@ -295,7 +298,11 @@ export default function EditProfileScreen() {
         onPress: async () => {
           try {
             await deletePhoto(photoId);
-            setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+            const remaining = photos.filter((p) => p.id !== photoId);
+            setPhotos(remaining);
+            if (remaining.length > 0) {
+              await reorderPhotos(remaining.map((p) => p.id)).catch(() => {});
+            }
           } catch (err) {
             Alert.alert("Error", extractError(err).message);
           }
@@ -340,6 +347,10 @@ export default function EditProfileScreen() {
         looking_for: lookingFor,
         vibe_zones: vibeZones,
       });
+
+      if (prompts && prompts.length > 0) {
+        await updatePrompts(prompts);
+      }
 
       Alert.alert("Profile Updated", "Your changes have been saved.", [
         { text: "Done", onPress: () => navigation.goBack() },

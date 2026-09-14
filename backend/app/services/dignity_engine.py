@@ -102,7 +102,7 @@ async def file_report(
         )
 
         # Evaluate auto-action thresholds
-        actioned = await _evaluate_auto_action(reported_id, conn)
+        actioned = await _evaluate_auto_action(reported_id, conn, is_underage=(reason == "underage"))
         if actioned:
             await recompute_trust_score(reported_id, conn)
 
@@ -112,6 +112,7 @@ async def file_report(
 async def _evaluate_auto_action(
     user_id: UUID,
     conn: asyncpg.Connection,
+    is_underage: bool = False,
 ) -> bool:
     """
     Evaluate abuse reports against user_id.
@@ -119,24 +120,28 @@ async def _evaluate_auto_action(
     - Auto-bans are NEVER triggered by unreviewed reports (must be moderator-confirmed).
     - Auto-quarantine/suspension requires at least AUTO_SUSPEND_THRESHOLD distinct reporters
       with established trust scores (>= 40) and account age > 48h.
+    - Child safety: Expedited quarantine on underage reports pending moderator confirmation.
     """
-    valid_reporters_count = await conn.fetchval(
-        """
-        SELECT COUNT(DISTINCT r.reporter_id)
-        FROM reports r
-        JOIN users u ON u.id = r.reporter_id
-        WHERE r.reported_id = $1
-          AND r.resolved = FALSE
-          AND u.trust_score >= 40
-          AND u.created_at <= NOW() - INTERVAL '48 hours'
-        """,
-        user_id,
-    )
+    if is_underage:
+        count = AUTO_SUSPEND_THRESHOLD
+    else:
+        valid_reporters_count = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT r.reporter_id)
+            FROM reports r
+            JOIN users u ON u.id = r.reporter_id
+            WHERE r.reported_id = $1
+              AND r.resolved = FALSE
+              AND u.trust_score >= 40
+              AND u.created_at <= NOW() - INTERVAL '48 hours'
+            """,
+            user_id,
+        )
+        count = valid_reporters_count or 0
 
-    count = valid_reporters_count or 0
-    if count >= AUTO_BAN_THRESHOLD:
-        new_status = "banned"
-    elif count >= AUTO_SUSPEND_THRESHOLD:
+    if count >= AUTO_SUSPEND_THRESHOLD:
+        # Invariant: Auto-bans are NEVER triggered by unreviewed reports (must be moderator-confirmed).
+        # Unreviewed reports only trigger quarantine/suspension pending human review.
         new_status = "suspended"
     else:
         return False
@@ -158,10 +163,23 @@ async def _evaluate_auto_action(
         new_status,
         user_id,
     )
+    try:
+        from app.core.redis import get_redis
+        r = get_redis()
+        await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
+        import json as _json
+        await r.publish(
+            f"user:{user_id}:commands",
+            _json.dumps({"type": "force_disconnect", "reason": "Account suspended pending review."}),
+        )
+    except Exception:
+        pass
+
     log.warning(
-        "Auto-quarantine: user %s suspended pending mod review (trusted_reporters=%d)",
+        "Auto-quarantine: user %s suspended pending mod review (count=%d, underage=%s)",
         user_id,
-        valid_reporters_count,
+        count,
+        is_underage,
     )
     return True
 

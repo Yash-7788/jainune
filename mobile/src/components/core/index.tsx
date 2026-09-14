@@ -13,6 +13,7 @@ import {
   TextInput as RNTextInput,
   TextInputProps,
   Animated,
+  Platform,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
@@ -40,6 +41,10 @@ export function PrimaryButton({ label, onPress, loading, disabled, style }: Prim
       disabled={disabled || loading}
       activeOpacity={0.85}
       style={[styles.primaryOuter, style]}
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }}
     >
       <LinearGradient
         colors={disabled ? ["#CCBCB0", "#CCBCB0"] : gradients.button}
@@ -73,6 +78,10 @@ export function GhostButton({ label, onPress, disabled, style }: GhostButtonProp
       disabled={disabled}
       activeOpacity={0.7}
       style={[styles.ghost, style]}
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled }}
     >
       <Text style={styles.ghostLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
     </TouchableOpacity>
@@ -102,6 +111,7 @@ export function JainuneInput({ label, error, style, ...props }: JainuneInputProp
         placeholderTextColor={colors.muted}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        accessibilityLabel={label || (typeof props.placeholder === "string" ? props.placeholder : undefined)}
         {...props}
       />
       {error ? <Text style={styles.errorText} maxFontSizeMultiplier={1.35}>{error}</Text> : null}
@@ -206,13 +216,42 @@ interface ToastProps {
   title: string;
   message: string;
   visible: boolean;
+  onDismiss?: () => void;
 }
 
-export function ErrorToast({ title, message, visible }: ToastProps) {
-  if (!visible) return null;
+export function ErrorToast({ title, message, visible, onDismiss }: ToastProps) {
+  const [dismissed, setDismissed] = React.useState(false);
+
+  React.useEffect(() => {
+    setDismissed(false);
+    if (!visible) return;
+    const timer = setTimeout(() => {
+      setDismissed(true);
+      onDismiss?.();
+    }, 7000);
+    return () => clearTimeout(timer);
+  }, [visible, title, message]);
+
+  if (!visible || dismissed) return null;
+
+  const handleClose = () => {
+    setDismissed(true);
+    onDismiss?.();
+  };
+
   return (
     <View style={styles.toast}>
-      <Text style={styles.toastTitle}>{title}</Text>
+      <View style={styles.toastHeaderRow}>
+        <Text style={styles.toastTitle}>{title}</Text>
+        <TouchableOpacity
+          onPress={handleClose}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityRole="button"
+          accessibilityLabel="Close error message"
+        >
+          <Text style={styles.toastClose}>✕</Text>
+        </TouchableOpacity>
+      </View>
       <Text style={styles.toastMsg}>{message}</Text>
     </View>
   );
@@ -325,7 +364,7 @@ const styles = StyleSheet.create({
   // Toast
   toast: {
     position: "absolute",
-    top: 60,
+    top: Platform.OS === "ios" ? 44 : 28,
     left: spacing.base,
     right: spacing.base,
     backgroundColor: colors.dark,
@@ -338,10 +377,23 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 10,
   },
+  toastHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+  },
   toastTitle: {
     ...typography.h3,
     color: colors.white,
-    marginBottom: 4,
+    flex: 1,
+    marginRight: spacing.sm,
+  },
+  toastClose: {
+    color: "#AAAAAA",
+    fontSize: 16,
+    fontWeight: "700",
+    paddingHorizontal: 4,
   },
   toastMsg: {
     ...typography.bodySmall,

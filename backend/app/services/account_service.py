@@ -329,6 +329,7 @@ async def soft_delete_user_account(
             user_id,
         )
         await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
 
         # Terminate active matches and chats for soft-deleted user
         await conn.execute(

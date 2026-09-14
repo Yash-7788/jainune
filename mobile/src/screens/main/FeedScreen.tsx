@@ -419,6 +419,7 @@ export default function FeedScreen() {
       <SerendipityArcadeModal
         visible={showArcade}
         onClose={() => setShowArcade(false)}
+        onNavigateToChat={(chatId) => openChat(chatId)}
       />
     </View>
   );

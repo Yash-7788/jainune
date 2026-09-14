@@ -513,17 +513,24 @@ async def roll_lucky_dice(
     redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """
-    Consume 1 dice roll credit from wallet and generate lucky match ticket.
+    Consume 1 dice roll credit from wallet and generate lucky match pairing.
     (SUBSCRIPTION_SPEC.md §4.3: Lucky Match Dice Roll)
     """
-    await sliding_window_rate_limit(f"ratelimit:arcade:roll:{current_user['user_id']}", 30, 60, redis)
+    user_id = current_user.get("user_id") or current_user.get("id")
+    await sliding_window_rate_limit(f"ratelimit:arcade:roll:{user_id}", 30, 60, redis)
     import secrets
+    sys_rand = secrets.SystemRandom()
+    roll_outcome = [sys_rand.randint(1, 6), sys_rand.randint(1, 6)]
+    total = sum(roll_outcome)
+
+    chat_id = None
+    candidate = None
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Concurrency lock on user arcade wallet to serialize burst requests
             await conn.execute(
                 "SELECT available_dice_rolls FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE",
-                current_user["user_id"],
+                user_id,
             )
             remaining = await conn.fetchval(
                 """
@@ -533,7 +540,7 @@ async def roll_lucky_dice(
                  WHERE user_id = $1 AND available_dice_rolls > 0
                 RETURNING available_dice_rolls
                 """,
-                current_user["user_id"],
+                user_id,
             )
             if remaining is None:
                 raise HTTPException(
@@ -547,16 +554,123 @@ async def roll_lucky_dice(
                     (user_id, action_type, dice_rolls_delta, status)
                 VALUES ($1, 'spend_roll', -1, 'spent')
                 """,
-                current_user["user_id"],
+                user_id,
             )
 
-    sys_rand = secrets.SystemRandom()
-    roll_outcome = [sys_rand.randint(1, 6), sys_rand.randint(1, 6)]
+            # Find active candidate with safety, blocklist, and preference filters
+            show_me = current_user.get("show_me")
+            target_gender = "man" if show_me in ("men", "man") else ("woman" if show_me in ("women", "woman") else None)
+
+            # Bounded candidate pool sample
+            candidate = await conn.fetchrow(
+                """
+                WITH candidate_pool AS (
+                    SELECT id, first_name, city
+                    FROM users u
+                    WHERE u.id != $1
+                      AND u.account_status = 'active'
+                      AND u.is_paused = FALSE
+                      AND u.onboarding_completed = TRUE
+                      AND ($2::text IS NULL OR u.gender = $2::text)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM user_blocks ub
+                          WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
+                             OR (ub.blocked_id = $1 AND ub.blocker_id = u.id)
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM interactions i
+                          WHERE i.actor_id = $1 AND i.target_id = u.id
+                      )
+                    LIMIT 50
+                )
+                SELECT id, first_name, city
+                FROM candidate_pool
+                ORDER BY random()
+                LIMIT 1
+                """,
+                user_id,
+                target_gender,
+            )
+
+            if not candidate:
+                # No eligible candidate found right now: refund dice roll credit and preserve wallet balance
+                await conn.execute(
+                    """
+                    UPDATE user_arcade_wallet
+                       SET available_dice_rolls = available_dice_rolls + 1,
+                           updated_at = NOW()
+                     WHERE user_id = $1
+                    """,
+                    user_id,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO arcade_transactions
+                        (user_id, action_type, dice_rolls_delta, status)
+                    VALUES ($1, 'refund_roll_no_candidate', 1, 'refunded')
+                    """,
+                    user_id,
+                )
+                return {
+                    "success": False,
+                    "action": "dice_roll",
+                    "dice": roll_outcome,
+                    "total": total,
+                    "remaining_dice_rolls": remaining + 1,
+                    "chat_id": None,
+                    "paired_user": None,
+                    "message": f"Rolled {roll_outcome[0]} and {roll_outcome[1]} (total {total})! No matching candidate available right now. Roll credit preserved.",
+                }
+
+            cand_id = candidate["id"]
+            pair = sorted([str(user_id), str(cand_id)])
+            u1 = uuid.UUID(pair[0])
+            u2 = uuid.UUID(pair[1])
+            match_row = await conn.fetchrow(
+                """
+                INSERT INTO matches
+                    (user_a, user_b, user_id_1, user_id_2, user_a_id, user_b_id, match_type, status)
+                VALUES ($1, $2, $1, $2, $1, $2, 'lucky_dice', 'active')
+                ON CONFLICT (user_a, user_b) DO UPDATE
+                    SET match_type = EXCLUDED.match_type
+                RETURNING id
+                """,
+                u1, u2,
+            )
+            from datetime import datetime, timezone, timedelta
+            chat_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            chat_row = await conn.fetchrow(
+                """
+                INSERT INTO chats
+                    (match_id, participant_1_id, participant_2_id, participant_a, participant_b, is_ephemeral, expires_at)
+                VALUES ($1, $2, $3, $2, $3, TRUE, $4)
+                ON CONFLICT (match_id) DO UPDATE
+                    SET is_ephemeral = TRUE, expires_at = EXCLUDED.expires_at, is_unmatched = FALSE
+                RETURNING id
+                """,
+                match_row["id"], u1, u2, chat_expires_at,
+            )
+            chat_id = chat_row["id"]
+            await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
+
+    # Register in Redis active dice pool with 30m TTL
+    try:
+        await redis.sadd(f"arcade:dice_pool:{total}", str(user_id))
+        await redis.expire(f"arcade:dice_pool:{total}", 1800)
+    except Exception:
+        pass
+
     return {
         "success": True,
         "action": "dice_roll",
         "dice": roll_outcome,
-        "total": sum(roll_outcome),
+        "total": total,
         "remaining_dice_rolls": remaining,
-        "message": f"Rolled {roll_outcome[0]} and {roll_outcome[1]}! Match ticket active for 30 minutes.",
+        "chat_id": str(chat_id) if chat_id else None,
+        "paired_user": {
+            "id": str(candidate["id"]),
+            "first_name": candidate["first_name"],
+            "city": candidate["city"],
+        },
+        "message": f"Rolled {roll_outcome[0]} and {roll_outcome[1]} (total {total})! Lucky Match activated with 30-minute momentum window.",
     }

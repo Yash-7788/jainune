@@ -4,12 +4,13 @@
  * ProgressBar visible throughout. Back navigation allowed freely.
  */
 
-import React from "react";
-import { View, StyleSheet, StatusBar } from "react-native";
+import React, { useEffect, useRef } from "react";
+import { View, StyleSheet, StatusBar, BackHandler, Alert } from "react-native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { colors, spacing } from "../../theme/tokens";
 import { ProgressBar } from "../../components/core";
 import { useOnboardingStore } from "../../store/onboardingStore";
+import { useAuthStore } from "../../store/authStore";
 
 // All step screens
 import Step02Screen from "./steps/Step02BasicInfo";
@@ -93,15 +94,93 @@ const stepToScreenName: Record<number, keyof OnboardingStackParams> = {
   22: "Step22",
 };
 
+const screenNameToStep: Record<string, number> = {
+  Step02: 2,
+  Step03: 3,
+  Step04: 4,
+  Step05: 5,
+  Step06: 6,
+  Step07: 7,
+  Step08: 8,
+  Step09: 9,
+  Step10: 10,
+  Step11: 11,
+  Step12: 12,
+  Step13: 13,
+  Step14: 14,
+  Step15: 15,
+  Step16: 16,
+  Step17: 17,
+  Step18: 18,
+  Step19: 19,
+  Step20: 20,
+  Step21: 21,
+  Step22: 22,
+};
+
 export default function OnboardingNavigator() {
   const currentStep = useOnboardingStore((s) => s.step);
   const initialRouteName = stepToScreenName[currentStep] || "Step02";
+  const navRef = useRef<any>(null);
+
+  useEffect(() => {
+    const onBackPress = () => {
+      if (navRef.current) {
+        if (navRef.current.canGoBack()) {
+          const routes = navRef.current.getState()?.routes;
+          const prevRoute = routes && routes.length > 1 ? routes[routes.length - 2] : null;
+          if (prevRoute && screenNameToStep[prevRoute.name]) {
+            useOnboardingStore.getState().setStep(screenNameToStep[prevRoute.name]);
+          } else {
+            const curStep = useOnboardingStore.getState().step;
+            if (curStep > 2) {
+              useOnboardingStore.getState().setStep(curStep - 1);
+            }
+          }
+          navRef.current.goBack();
+          return true;
+        } else {
+          const curStep = useOnboardingStore.getState().step;
+          if (curStep > 2) {
+            const prevStep = curStep - 1;
+            useOnboardingStore.getState().setStep(prevStep);
+            const prevScreen = stepToScreenName[prevStep];
+            if (prevScreen) {
+              navRef.current.navigate(prevScreen);
+              return true;
+            }
+          }
+          Alert.alert(
+            "Exit Onboarding?",
+            "Are you sure you want to exit and return to the login screen?",
+            [
+              { text: "Stay", style: "cancel" },
+              {
+                text: "Log Out",
+                style: "destructive",
+                onPress: () => useAuthStore.getState().logout(),
+              },
+            ]
+          );
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
+    return () => sub.remove();
+  }, []);
 
   return (
     <View style={{ flex: 1 }}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
       <ProgressHeader />
       <Stack.Navigator
+        screenListeners={({ navigation }) => {
+          navRef.current = navigation;
+          return {};
+        }}
         screenOptions={{
           headerShown: false,
           animation: "slide_from_right",

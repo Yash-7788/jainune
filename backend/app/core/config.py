@@ -1,6 +1,6 @@
-from typing import List
+from typing import Any, List
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +9,20 @@ class Settings(BaseSettings):
 
     # Runtime
     environment: str = "development"
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def normalize_environment(cls, v: Any) -> str:
+        if isinstance(v, str):
+            clean = v.strip().lower()
+            if clean in ("prod", "production"):
+                return "production"
+            if clean in ("dev", "development"):
+                return "development"
+            if clean in ("stage", "staging"):
+                return "staging"
+            return clean
+        return "development"
     debug: bool = False
     app_version: str = "1.0.0"
     allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]
@@ -74,6 +88,7 @@ class Settings(BaseSettings):
     # Cloudflare Turnstile & Origin Protection
     turnstile_secret_key: str = ""
     cloudflare_origin_secret: str = ""
+    require_edge_location_corroboration: bool = False
 
     # App Store / Google Play Store Webhook Secret (BUG-026)
     store_webhook_secret: str = ""

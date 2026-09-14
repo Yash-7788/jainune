@@ -358,7 +358,7 @@ export async function submitStep22(): Promise<OnboardingStatus> {
 }
 
 // GET /v1/media/presign-upload?type=photo|voice
-export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<PresignData> {
+export async function getPresignedUploadUrl(type: "photo" | "voice", position?: number): Promise<PresignData> {
   try {
     const res = await apiPost<{
       media_id: string;
@@ -369,7 +369,7 @@ export async function getPresignedUploadUrl(type: "photo" | "voice"): Promise<Pr
       media_type: type,
       content_type: type === "photo" ? "image/jpeg" : "audio/m4a",
       file_size_bytes: type === "photo" ? 2 * 1024 * 1024 : 1024 * 1024,
-      position: 1,
+      ...(position !== undefined ? { position } : { position: 1 }),
     });
     if (!res.success) throw { _apiError: res.error };
     return {

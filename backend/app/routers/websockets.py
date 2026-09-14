@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -31,6 +32,8 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import validate_access_token_raw, sliding_window_rate_limit
 from app.dependencies import CurrentUser, RedisDep
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websockets"])
 
@@ -267,15 +270,16 @@ async def websocket_chat(
                     continue
 
                 if msg_type in ("typing", "read_receipt"):
-                    # Fan out to other participant via the same Redis channel
+                    # Fan out to other participant via the same Redis channel (R7-1: trusted sender_id must not be spoofed)
                     try:
+                        client_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
                         await redis.publish(
                             f"chat:{real_chat_id}",
                             json.dumps({
                                 "type": msg_type,
                                 "payload": {
+                                    **client_payload,
                                     "sender_id": str(user_id),
-                                    **data.get("payload", {}),
                                 },
                             }),
                         )

@@ -99,6 +99,30 @@ async def run_migrations():
         await conn.close()
 
 
+async def get_current_version():
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+    except Exception as exc:
+        print(f"Error connecting to database: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        table_check = await conn.fetchval("SELECT to_regclass('schema_migrations')")
+        if not table_check:
+            print("NONE")
+            return
+
+        row = await conn.fetchrow(
+            "SELECT version FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1"
+        )
+        if row and row["version"]:
+            print(row["version"])
+        else:
+            print("NONE")
+    finally:
+        await conn.close()
+
+
 async def rollback_migrations(steps: int = 1, target_version: str = None):
     print(f"Connecting to database for rollback: {DATABASE_URL.split('@')[-1]}")
     try:
@@ -114,10 +138,14 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
             return
 
         applied_versions = [r["version"] for r in applied_rows]
+        if target_version and target_version != "NONE" and target_version not in applied_versions:
+            print(f"  [ERROR] Target version '{target_version}' not found in applied migrations.")
+            sys.exit(1)
+
         rolled_back_count = 0
 
         for version in applied_versions:
-            if target_version and version == target_version:
+            if target_version and target_version != "NONE" and version == target_version:
                 print(f"Reached target version {target_version}. Stopping rollback.")
                 break
             if steps is not None and rolled_back_count >= steps:
@@ -153,7 +181,12 @@ async def rollback_migrations(steps: int = 1, target_version: str = None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--rollback":
+    if len(sys.argv) > 1 and sys.argv[1] == "--current-version":
+        asyncio.run(get_current_version())
+    elif len(sys.argv) > 1 and sys.argv[1] == "--to-version":
+        target = sys.argv[2] if len(sys.argv) > 2 else "NONE"
+        asyncio.run(rollback_migrations(steps=None, target_version=target))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--rollback":
         count = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         asyncio.run(rollback_migrations(steps=count))
     else:

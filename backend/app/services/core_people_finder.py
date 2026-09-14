@@ -337,6 +337,8 @@ async def _run_pipeline(
     eats_onion = user_data.get("eats_onion_garlic", False)
     sect = user_data.get("community_sect", "open")
     relocation = user_data.get("open_to_relocation", False)
+    target_gender = gender_map.get(user_data.get("show_me", "everyone"), None)
+    my_gender = user_data.get("gender")
     max_km = user_data.get("max_distance_km", 30)
 
     query = """
@@ -361,6 +363,7 @@ async def _run_pipeline(
             u.subscription_tier,
             u.is_photo_verified,
             u.impressions_last_48h,
+            u.show_me,
             -- Geodetic distance in km; NULL if location is NULL
             CASE
                 WHEN u.location IS NOT NULL AND $1::geometry IS NOT NULL
@@ -402,6 +405,14 @@ async def _run_pipeline(
             AND u.onboarding_completed = TRUE
             -- Gender filter (NULL = everyone)
             AND ($9::text IS NULL OR u.gender = $9::text)
+            -- Reciprocal gender filter (candidate must also want to see requester's gender, R8-1)
+            AND (
+                $14::text IS NULL
+                OR u.show_me IS NULL
+                OR u.show_me = 'everyone'
+                OR (u.show_me IN ('men', 'man') AND $14::text IN ('men', 'man'))
+                OR (u.show_me IN ('women', 'woman') AND $14::text IN ('women', 'woman'))
+            )
             -- Hard dietary dealbreaker: pure_jain must only see pure_jain or vegan
             AND (
                 $3 != 'pure_jain'
@@ -496,6 +507,7 @@ async def _run_pipeline(
             _DIGNITY_THRESHOLD,     # $11 int
             _DIGNITY_BOOST,         # $12 float
             internal_limit,         # $13 int
+            my_gender,              # $14 text | NULL (R8-1)
         )
 
         # Batch-load media (photos + voice) for all candidate ids

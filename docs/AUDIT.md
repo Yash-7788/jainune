@@ -1,8 +1,8 @@
 # Jainune Production Security & Architecture Audit Verification
 
-**Status:** RECONCILED & HARDENED (All 83 findings across Audit 1 & Audit 2 addressed)  
-**Suite Status:** 219 passed, 0 failed, 0 warnings (100% clean)  
-**Test Command:** `python -m pytest tests/unit -q -o addopts=""`
+**Status:** RECONCILED & HARDENED (All findings across Audits 1-3 & Deploy Audit addressed)  
+**Suite Status:** 318 passed, 0 failed (100% clean, 72.64% coverage)  
+**Test Command:** `pytest backend/tests -q`
 
 ---
 
@@ -53,4 +53,12 @@
 | Finding 7 | `backend/app/workers/daily_compatible.py` | Unbounded `user_list` accumulation in memory; capped working set per run with `MAX_ELIGIBLE_USERS = 5000` and checkpointed pipeline flushing. | **FIXED + VERIFIED** |
 | Finding 8 | `backend/app/routers/chats.py`, `backend/app/routers/websockets.py` | Chat message published to multiple Redis channels causing double delivery; standardized on single canonical pub/sub channel `chat:{id}`. | **FIXED + VERIFIED** |
 | Finding 9 | `backend/app/routers/location.py` | Location waitlist registration accepted caller-supplied unauthenticated phone number; strictly bound waitlist insertion to authenticated caller identity `current_user.get("phone_number")`. | **FIXED + VERIFIED** |
+| Finding 10 | `deploy/cloudflare/waf_rules.json` | Webhook endpoints (`/v1/subscriptions/webhook`, `/v1/subscriptions/store-notification`) and legal compliance routes were blocked by automated UA and international IP challenge rules; added explicit bypass exemptions. | **FIXED + VERIFIED** |
+| Finding 11 | `deploy/nginx/nginx.conf` | WebSocket location `/v1/ws/` lacked `proxy_buffering off;` causing frame buffering delays; enabled unbuffered proxy streaming. | **FIXED + VERIFIED** |
+| Finding 12 | `deploy/nginx/nginx.conf` | Auth location `/v1/auth/` lacked HTTP/1.1 keepalive headers and had tight 3-request burst; added `proxy_http_version 1.1;`, `proxy_set_header Connection "";`, and relaxed burst to 10. | **FIXED + VERIFIED** |
+| Finding 13 | `.github/workflows/deploy-prod.yml` | Backend deployment exited immediately after `docker compose up` without verifying container health; added loopback `/livez` healthcheck polling loop with failure exit. | **FIXED + VERIFIED** |
+| Finding 14 | `.github/workflows/mobile-build.yml` | Mobile release workflow built AAB/IPA without injecting API endpoint environment variables; injected `EXPO_PUBLIC_API_URL` into build environment. | **FIXED + VERIFIED** |
+| Finding 15 | `backend/app/routers/admin.py` | Admin suspend did not revoke refresh tokens or evict active WebSocket sessions; hardened with immediate DB token deletion, cache purge, and WebSocket `force_disconnect` command publication. | **FIXED + VERIFIED** |
+| Finding 16 | `mobile/src/screens/main/ChatScreen.tsx` | Momentum timer countdown desync on client clock skew; clamped remaining hours calculation to `[1, 24]`. | **FIXED + VERIFIED** |
+| Finding 17 | `backend/app/workers/worker_pool.py` | Celery tasks executing outside prefork workers fell back to standalone unpooled connections on every invocation; implemented lazy connection pool creation with auto-reuse. | **FIXED + VERIFIED** |
 

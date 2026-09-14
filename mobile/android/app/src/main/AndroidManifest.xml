@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.jainune.app">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- ── Network ─────────────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -50,8 +49,7 @@
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="false"
-        android:theme="@style/AppTheme"
-        android:extractNativeLibs="true">
+        android:theme="@style/AppTheme">
 
         <!--
             android:debuggable is NOT set here.

@@ -11,8 +11,11 @@ import {
   Platform,
   ScrollView,
   TouchableOpacity,
+  Alert,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
+import { useAuthStore } from "../../store/authStore";
+import { useOnboardingStore } from "../../store/onboardingStore";
 import { colors, spacing, typography } from "../../theme/tokens";
 import { BackIcon } from "../../components/core/Icons";
 import { PrimaryButton, ErrorToast } from "../../components/core";
@@ -26,10 +29,59 @@ interface OnboardingStepProps {
   loading?: boolean;
   disabled?: boolean;
   error?: { title: string; message: string } | null;
+  onDismissError?: () => void;
   skipLabel?: string;
   onSkip?: () => void;
   scrollable?: boolean;
 }
+
+const screenNameToStep: Record<string, number> = {
+  Step02: 2,
+  Step03: 3,
+  Step04: 4,
+  Step05: 5,
+  Step06: 6,
+  Step07: 7,
+  Step08: 8,
+  Step09: 9,
+  Step10: 10,
+  Step11: 11,
+  Step12: 12,
+  Step13: 13,
+  Step14: 14,
+  Step15: 15,
+  Step16: 16,
+  Step17: 17,
+  Step18: 18,
+  Step19: 19,
+  Step20: 20,
+  Step21: 21,
+  Step22: 22,
+};
+
+const stepToScreenName: Record<number, string> = {
+  2: "Step02",
+  3: "Step03",
+  4: "Step04",
+  5: "Step05",
+  6: "Step06",
+  7: "Step07",
+  8: "Step08",
+  9: "Step09",
+  10: "Step10",
+  11: "Step11",
+  12: "Step12",
+  13: "Step13",
+  14: "Step14",
+  15: "Step15",
+  16: "Step16",
+  17: "Step17",
+  18: "Step18",
+  19: "Step19",
+  20: "Step20",
+  21: "Step21",
+  22: "Step22",
+};
 
 export default function OnboardingStep({
   title,
@@ -40,16 +92,74 @@ export default function OnboardingStep({
   loading,
   disabled,
   error,
+  onDismissError,
   skipLabel,
   onSkip,
   scrollable = false,
 }: OnboardingStepProps) {
   const navigation = useNavigation();
+  const [toastVisible, setToastVisible] = React.useState(!!error);
+
+  React.useEffect(() => {
+    setToastVisible(!!error);
+  }, [error]);
+
+  React.useEffect(() => {
+    if (loading) {
+      setToastVisible(false);
+    } else if (error) {
+      setToastVisible(true);
+    }
+  }, [loading, error]);
+
+  const handleBack = () => {
+    if (navigation.canGoBack()) {
+      const routes = (navigation as any).getState?.()?.routes;
+      const prevRoute = routes && routes.length > 1 ? routes[routes.length - 2] : null;
+      if (prevRoute && screenNameToStep[prevRoute.name]) {
+        useOnboardingStore.getState().setStep(screenNameToStep[prevRoute.name]);
+      } else {
+        const curStep = useOnboardingStore.getState().step;
+        if (curStep > 2) {
+          useOnboardingStore.getState().setStep(curStep - 1);
+        }
+      }
+      navigation.goBack();
+    } else {
+      const curStep = useOnboardingStore.getState().step;
+      if (curStep > 2) {
+        const prevStep = curStep - 1;
+        useOnboardingStore.getState().setStep(prevStep);
+        const prevScreen = stepToScreenName[prevStep];
+        if (prevScreen) {
+          (navigation as any).navigate(prevScreen);
+          return;
+        }
+      }
+      Alert.alert(
+        "Exit Onboarding?",
+        "Are you sure you want to exit and return to the login screen?",
+        [
+          { text: "Stay", style: "cancel" },
+          {
+            text: "Log Out",
+            style: "destructive",
+            onPress: () => useAuthStore.getState().logout(),
+          },
+        ]
+      );
+    }
+  };
+
+  const handleNextPress = () => {
+    setToastVisible(false);
+    onNext();
+  };
 
   const content = (
     <View style={styles.inner}>
       {/* Back */}
-      <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
+      <TouchableOpacity onPress={handleBack} style={styles.back}>
         <BackIcon color={colors.dark} />
       </TouchableOpacity>
 
@@ -64,7 +174,7 @@ export default function OnboardingStep({
       <View style={styles.cta}>
         <PrimaryButton
           label={nextLabel}
-          onPress={onNext}
+          onPress={handleNextPress}
           loading={loading}
           disabled={disabled || loading}
         />
@@ -82,7 +192,17 @@ export default function OnboardingStep({
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
-      {error && <ErrorToast title={error.title} message={error.message} visible />}
+      {error && toastVisible && (
+        <ErrorToast
+          title={error.title}
+          message={error.message}
+          visible={toastVisible}
+          onDismiss={() => {
+            setToastVisible(false);
+            onDismissError?.();
+          }}
+        />
+      )}
 
       <ScrollView
         contentContainerStyle={{ flexGrow: 1 }}
@@ -109,6 +229,10 @@ export function ChoiceChip({ label, selected, onPress, emoji }: ChipProps) {
       onPress={onPress}
       activeOpacity={0.8}
       style={[styles.chip, selected && styles.chipSelected]}
+      accessible={true}
+      accessibilityRole="checkbox"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: !!selected }}
     >
       {emoji ? <Text style={styles.chipEmoji}>{emoji}</Text> : null}
       <Text style={[styles.chipLabel, selected && styles.chipLabelSelected]}>{label}</Text>
@@ -130,6 +254,11 @@ export function ToggleRow({ label, sub, value, onToggle }: ToggleRowProps) {
       onPress={() => onToggle(!value)}
       style={styles.toggleRow}
       activeOpacity={0.85}
+      accessible={true}
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityHint={sub}
+      accessibilityState={{ checked: !!value }}
     >
       <View style={styles.toggleLeft}>
         <Text style={styles.toggleLabel}>{label}</Text>

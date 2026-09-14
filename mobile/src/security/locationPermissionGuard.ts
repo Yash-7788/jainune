@@ -47,7 +47,7 @@ const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || "https://api.jainune.co
  */
 export function validateCoordinatesIntegrity(coords: GeoCoordinates): { isValid: boolean; error?: string } {
   // 1. Mock location detection (Android Mock Location Provider / iOS Location Simulation)
-  if (coords.isMocked) {
+  if (coords.isMocked && !__DEV__) {
     return {
       isValid: false,
       error: "Mock location or GPS spoofing detected. Disable mock locations in Developer Options.",

@@ -185,6 +185,8 @@ export async function getFeed(limit = 15): Promise<FeedResponse> {
   throw { _apiError: { code: "TEMPORARY_ERROR", message: "Failed to fetch feed" } };
 }
 
+export const getFeedCandidates = getFeed;
+
 /** GET /v1/feed/daily-compatible */
 export async function getDailyCompatible(): Promise<DailyCompatibleResponse> {
   try {

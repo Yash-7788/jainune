@@ -48,10 +48,15 @@ import {
   blockUser,
   Message,
 } from "../../api/chatApi";
+import { useAuthStore } from "../../store/authStore";
 import { useWebSocket } from "../../hooks/useWebSocket";
 import { getSubscriptionStatus } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { MAX_MESSAGE_LENGTH, validateUuid } from "../../security/inputValidation";
+import {
+  enableScreenCaptureProtection,
+  disableScreenCaptureProtection,
+} from "../../security/antiReversing";
 import ContentModerationSheet, {
   scanMessage,
   DetectedType,
@@ -70,6 +75,17 @@ interface RouteParams {
     momentum_expires_at?: string | null;
   };
   momentumExpiresAt?: string | null;
+}
+
+function generateClientMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof (crypto as any).randomUUID === "function") {
+    return (crypto as any).randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 export default function ChatScreen() {
@@ -92,6 +108,17 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
   const [chatBlocked, setChatBlocked] = useState(false);
+
+  const draftIdRef = useRef<string | null>(null);
+  const lastDraftRef = useRef<string>("");
+
+  // Screen-capture & recording protection for private 1:1 conversation
+  useEffect(() => {
+    enableScreenCaptureProtection();
+    return () => {
+      disableScreenCaptureProtection();
+    };
+  }, []);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [isOnline, setIsOnline] = useState(paramOtherUser.is_online ?? false);
@@ -120,7 +147,7 @@ export default function ChatScreen() {
     const calculateTime = () => {
       const diff = new Date(momentumExpiry).getTime() - Date.now();
       if (diff > 0) {
-        setHoursLeft(Math.max(1, Math.ceil(diff / (1000 * 60 * 60))));
+        setHoursLeft(Math.min(24, Math.max(1, Math.ceil(diff / (1000 * 60 * 60)))));
       } else {
         setHoursLeft(0);
       }
@@ -241,7 +268,7 @@ export default function ChatScreen() {
                   !(
                     m.id.startsWith("temp_") &&
                     m.content === incoming.content &&
-                    m.sender_id === incoming.sender_id
+                    (!m.sender_id || m.sender_id === incoming.sender_id || m.sender_id === myUserId.current)
                   )
               );
               if (withoutTemp.some((m) => m.id === incoming.id)) return withoutTemp;
@@ -328,8 +355,14 @@ export default function ChatScreen() {
     setPendingContent(null);
     setDetectedType(null);
 
-    // Optimistic: add a local pending message
-    const tempId = `temp_${Date.now()}`;
+    if (!myUserId.current) {
+      myUserId.current = useAuthStore.getState().userId;
+    }
+
+    // Client-generated UUID for deduplication and optimistic UI (FINDING-04)
+    const clientMessageId = draftIdRef.current || generateClientMessageId();
+    draftIdRef.current = clientMessageId;
+    const tempId = `temp_${clientMessageId}`;
     const tempMsg: Message = {
       id: tempId,
       match_id: matchId,
@@ -343,11 +376,14 @@ export default function ChatScreen() {
     setMessages((prev) => [tempMsg, ...prev]);
 
     try {
-      const sent = await sendMessage(matchId, content);
+      const sent = await sendMessage(matchId, content, clientMessageId);
+      draftIdRef.current = null;
+      lastDraftRef.current = "";
       setMessages((prev) => prev.map((m) => (m.id === tempId ? sent : m)));
     } catch (err: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setDraft(content);
+      lastDraftRef.current = content;
       const e = err?._apiError;
       if (e?.code === "CHAT_NOT_ALLOWED") {
         setChatBlocked(true);
@@ -610,7 +646,15 @@ export default function ChatScreen() {
         <TextInput
           style={styles.input}
           value={draft}
-          onChangeText={(t) => t.length <= MAX_MESSAGE_LENGTH && setDraft(t)}
+          onChangeText={(t) => {
+            if (t.length <= MAX_MESSAGE_LENGTH) {
+              if (t !== lastDraftRef.current) {
+                draftIdRef.current = null;
+                lastDraftRef.current = t;
+              }
+              setDraft(t);
+            }
+          }}
           placeholder={chatBlocked ? "This conversation is no longer active" : "Type a message..."}
           placeholderTextColor={colors.muted}
           multiline

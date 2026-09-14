@@ -7,8 +7,12 @@ GET  /v1/media/status/{media_id} → poll processing status
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel, Field
@@ -40,7 +44,7 @@ class UploadRequestBody(BaseModel):
     media_type: Literal["photo", "voice"]
     content_type: str = Field(..., max_length=64)
     file_size_bytes: int = Field(..., ge=1, le=_MAX_PHOTO_BYTES)
-    position: int = Field(1, ge=1, le=6)  # photo ordering slot (1–6)
+    position: Optional[int] = Field(None, ge=1, le=6)  # photo ordering slot (1–6); auto-assigned if None
 
 
 class UploadRequestResponse(BaseModel):
@@ -163,7 +167,7 @@ async def request_upload(
                 str(user_id), body.media_type,
             )
             existing_rows = await conn.fetch(
-                "SELECT position, status FROM user_media WHERE user_id = $1 AND media_type = $2",
+                "SELECT position, status, s3_key FROM user_media WHERE user_id = $1 AND media_type = $2",
                 user_id, body.media_type,
             )
             active_count = sum(1 for r in existing_rows if r["status"] != "rejected")
@@ -172,11 +176,11 @@ async def request_upload(
             if body.media_type == "voice":
                 target_position = 1
             else:
-                if 1 <= body.position <= 6:
+                used_pos = {r["position"] for r in existing_rows if r["status"] != "rejected"}
+                free_slots = [p for p in range(1, 7) if p not in used_pos]
+                if body.position is not None and 1 <= body.position <= 6:
                     target_position = body.position
                 else:
-                    used_pos = {r["position"] for r in existing_rows if r["status"] != "rejected"}
-                    free_slots = [p for p in range(1, 7) if p not in used_pos]
                     target_position = free_slots[0] if free_slots else 1
 
             # Prevent replacing slot while previous upload is actively undergoing moderation (Finding 12)
@@ -194,6 +198,9 @@ async def request_upload(
                     detail=f"Maximum {limit} {body.media_type}(s) allowed.",
                 )
 
+            old_row = next((r for r in existing_rows if r["position"] == target_position), None)
+            old_s3_key = old_row["s3_key"] if old_row else None
+
             await conn.execute(
                 """
                 INSERT INTO user_media
@@ -209,6 +216,13 @@ async def request_upload(
                 """,
                 media_id, user_id, body.media_type, s3_key, target_position,
             )
+
+            if old_s3_key and old_s3_key != s3_key and "uploads/" in old_s3_key:
+                try:
+                    from app.services.media_processor import _delete_from_quarantine
+                    await asyncio.to_thread(_delete_from_quarantine, old_s3_key)
+                except Exception as exc:
+                    logger.warning("Failed to delete quarantined S3 key: %s", exc)
 
     return UploadRequestResponse(
         media_id=media_id,
@@ -228,15 +242,18 @@ async def presign_upload_get(
     db: DBDep,
     redis: RedisDep,
     type: str = Query("photo", pattern="^(photo|voice)$"),
+    position: Optional[int] = Query(None, ge=1, le=6),
 ) -> UploadRequestResponse:
     # Compatibility adapter for mobile with full capacity (BUG-055)
-    ct = "image/jpeg" if type == "photo" else "audio/m4a"
-    size = _MAX_PHOTO_BYTES if type == "photo" else _MAX_VOICE_BYTES
+    media_type = type if isinstance(type, str) else "photo"
+    pos = position if isinstance(position, int) else None
+    ct = "image/jpeg" if media_type == "photo" else "audio/m4a"
+    size = _MAX_PHOTO_BYTES if media_type == "photo" else _MAX_VOICE_BYTES
     body = UploadRequestBody(
-        media_type=type,
+        media_type=media_type,
         content_type=ct,
         file_size_bytes=size,
-        position=1,
+        position=pos,
     )
     return await request_upload(body, current_user, db, redis)
 

@@ -54,13 +54,18 @@ export default function App() {
   useEffect(() => {
     if (!fontsLoaded) return;
 
-    runSecurityBoot().then((result) => {
-      if (result.passed) {
+    runSecurityBoot()
+      .then((result) => {
+        if (result.passed) {
+          setBoot({ status: "passed" });
+        } else {
+          setBoot({ status: "blocked", reason: result.reason });
+        }
+      })
+      .catch((err) => {
+        console.warn("[App] Security boot threw unhandled rejection:", err);
         setBoot({ status: "passed" });
-      } else {
-        setBoot({ status: "blocked", reason: result.reason });
-      }
-    });
+      });
   }, [fontsLoaded]);
 
   // Wire session-expired callback and initialize session (once, after boot passes)

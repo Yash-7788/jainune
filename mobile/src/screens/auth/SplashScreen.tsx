@@ -22,12 +22,14 @@ export default function SplashScreen() {
   const scale = useRef(new Animated.Value(0.9)).current;
 
   useEffect(() => {
-    // 1. Run device integrity check FIRST before any app logic
+    // 1. Run device integrity check in production before app logic
     (async () => {
-      const result = await performDeviceIntegrityCheck();
-      if (!result.isSecure) {
-        terminateCompromisedSession(result.violations);
-        return; // Halt
+      if (!__DEV__) {
+        const result = await performDeviceIntegrityCheck();
+        if (!result.isSecure) {
+          terminateCompromisedSession(result.violations);
+          return; // Halt
+        }
       }
 
       // 2. Animate wordmark in

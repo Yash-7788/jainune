@@ -12,7 +12,7 @@ import json
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
@@ -299,19 +299,56 @@ async def send_message(
     current_user: CurrentUser,
     db: DBDep,
     redis: RedisDep,
+    x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
 ) -> ChatMessage:
     """
     Inserts message into DB, then publishes to Redis pub/sub channel
     `chat:{chat_id}` so the WebSocket handler fans it out to both participants.
     Applies Roblox-style chat safety filters and moderation.
+    Enforces idempotency when X-Idempotency-Key or body idempotency_key is provided (FINDING-04).
     """
     user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:chats:msg:{user_id}", 60, 60, redis)
+
+    x_idemp = x_idempotency_key.strip() if isinstance(x_idempotency_key, str) and x_idempotency_key.strip() else None
+    body_idemp = body.idempotency_key.strip() if isinstance(body.idempotency_key, str) and body.idempotency_key.strip() else None
+    client_msg_id = body.client_message_id.strip() if isinstance(body.client_message_id, str) and body.client_message_id.strip() else None
+    idempotency_key = x_idemp or body_idemp or client_msg_id
 
     async with db.acquire() as conn:
         async with conn.transaction():
             chat = await _assert_participant(chat_id, user_id, conn)
             actual_chat_id = chat["id"]
+
+            # Idempotent fast return if already recorded (FINDING-04)
+            if idempotency_key:
+                existing_msg = await conn.fetchrow(
+                    """
+                    SELECT id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                           is_moderated, moderation_type, moderation_disclaimer, idempotency_key
+                    FROM messages
+                    WHERE chat_id = $1 AND sender_id = $2 AND idempotency_key = $3
+                    LIMIT 1
+                    """,
+                    actual_chat_id,
+                    user_id,
+                    idempotency_key,
+                )
+                if existing_msg:
+                    return ChatMessage(
+                        id=existing_msg["id"],
+                        chat_id=existing_msg["chat_id"],
+                        sender_id=existing_msg["sender_id"],
+                        message_type=existing_msg["message_type"],
+                        content=existing_msg["content"],
+                        media_url=existing_msg["media_url"],
+                        is_read=existing_msg["is_read"],
+                        created_at=existing_msg["created_at"],
+                        is_moderated=existing_msg.get("is_moderated", False),
+                        moderation_type=existing_msg.get("moderation_type"),
+                        moderation_disclaimer=existing_msg.get("moderation_disclaimer"),
+                        idempotency_key=existing_msg.get("idempotency_key"),
+                    )
 
             if chat.get("is_unmatched"):
                 raise HTTPException(
@@ -457,25 +494,78 @@ async def send_message(
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GIF must be from an approved source (Giphy or Tenor).")
                 final_media_url = gif_url
 
-            row = await conn.fetchrow(
-                """
-                INSERT INTO messages (
-                    chat_id, sender_id, message_type, content, media_url,
-                    is_moderated, moderation_type, moderation_disclaimer
+            if idempotency_key:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO messages (
+                        chat_id, sender_id, message_type, content, media_url,
+                        is_moderated, moderation_type, moderation_disclaimer,
+                        idempotency_key
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (chat_id, sender_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+                    DO NOTHING
+                    RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                              is_moderated, moderation_type, moderation_disclaimer, idempotency_key
+                    """,
+                    actual_chat_id,
+                    user_id,
+                    body.message_type,
+                    final_content,
+                    final_media_url,
+                    is_moderated,
+                    mod_type,
+                    mod_disclaimer,
+                    idempotency_key,
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
-                          is_moderated, moderation_type, moderation_disclaimer
-                """,
-                actual_chat_id,
-                user_id,
-                body.message_type,
-                final_content,
-                final_media_url,
-                is_moderated,
-                mod_type,
-                mod_disclaimer,
-            )
+                if not row:
+                    # Concurrently inserted by duplicate inflight attempt — return existing without re-broadcasting
+                    existing_race = await conn.fetchrow(
+                        """
+                        SELECT id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                               is_moderated, moderation_type, moderation_disclaimer, idempotency_key
+                        FROM messages
+                        WHERE chat_id = $1 AND sender_id = $2 AND idempotency_key = $3
+                        LIMIT 1
+                        """,
+                        actual_chat_id,
+                        user_id,
+                        idempotency_key,
+                    )
+                    return ChatMessage(
+                        id=existing_race["id"],
+                        chat_id=existing_race["chat_id"],
+                        sender_id=existing_race["sender_id"],
+                        message_type=existing_race["message_type"],
+                        content=existing_race["content"],
+                        media_url=existing_race["media_url"],
+                        is_read=existing_race["is_read"],
+                        created_at=existing_race["created_at"],
+                        is_moderated=existing_race.get("is_moderated", False),
+                        moderation_type=existing_race.get("moderation_type"),
+                        moderation_disclaimer=existing_race.get("moderation_disclaimer"),
+                        idempotency_key=existing_race.get("idempotency_key"),
+                    )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO messages (
+                        chat_id, sender_id, message_type, content, media_url,
+                        is_moderated, moderation_type, moderation_disclaimer
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id, chat_id, sender_id, message_type, content, media_url, is_read, created_at,
+                              is_moderated, moderation_type, moderation_disclaimer, idempotency_key
+                    """,
+                    actual_chat_id,
+                    user_id,
+                    body.message_type,
+                    final_content,
+                    final_media_url,
+                    is_moderated,
+                    mod_type,
+                    mod_disclaimer,
+                )
             await conn.execute(
                 "UPDATE chats SET updated_at = NOW() WHERE id = $1",
                 actual_chat_id,
@@ -505,6 +595,7 @@ async def send_message(
         is_moderated=row["is_moderated"],
         moderation_type=row["moderation_type"],
         moderation_disclaimer=row["moderation_disclaimer"],
+        idempotency_key=row.get("idempotency_key"),
     )
 
     # Publish to Redis pub/sub for WebSocket fan-out (both chat_id and match_id if distinct)

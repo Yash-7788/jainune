@@ -91,5 +91,17 @@ celery_app.conf.update(
             "task": "app.workers.ephemeral_reaper.reap_stale_payment_intents",
             "schedule": crontab(minute=30),  # every hour at :30
         },
+        "reap-stale-processing-media-every-10min": {
+            "task": "app.workers.ephemeral_reaper.reap_stale_processing_media",
+            "schedule": 600.0,
+        },
+        "reap-failed-s3-deletions-hourly": {
+            "task": "app.workers.ephemeral_reaper.reap_failed_s3_deletions",
+            "schedule": crontab(minute=15),
+        },
+        "purge-stale-location-waitlist-daily": {
+            "task": "app.workers.ephemeral_reaper.purge_stale_location_waitlist",
+            "schedule": crontab(hour=4, minute=0),
+        },
     },
 )

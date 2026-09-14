@@ -72,7 +72,7 @@ def run_worker_task(coro: Any) -> Any:
 
 async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
     """Acquires a pooled connection if worker pool is initialized on the current loop,
-    otherwise falls back to a standalone connection.
+    otherwise lazily initializes the pool, falling back to a standalone connection on error.
     """
     global _worker_pool, _worker_loop
     current_loop = None
@@ -81,11 +81,25 @@ async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
     except RuntimeError:
         pass
 
+    # Lazy pool initialization if worker_process_init signal didn't execute
+    if _worker_pool is None or getattr(_worker_pool, "_closed", False):
+        try:
+            target_loop = current_loop or get_worker_loop()
+            _worker_pool = await asyncpg.create_pool(
+                settings.database_url,
+                min_size=settings.database_pool_min_size,
+                max_size=min(settings.database_pool_max_size, 10),
+                timeout=10,
+            )
+            _worker_loop = target_loop
+        except Exception as exc:
+            log.warning("Lazy worker pool init failed, falling back to standalone connection: %s", exc)
+            return await asyncpg.connect(settings.database_url, timeout=10)
+
     if (
         _worker_pool is not None
-        and _worker_loop is not None
-        and not _worker_loop.is_closed()
-        and (current_loop is None or current_loop is _worker_loop)
+        and not getattr(_worker_pool, "_closed", False)
+        and (_worker_loop is None or current_loop is None or current_loop is _worker_loop)
     ):
         conn = await _worker_pool.acquire()
         return PooledConnectionProxy(conn, _worker_pool)

@@ -116,7 +116,9 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
                         'id', m.id,
                         'media_type', m.media_type,
                         'cdn_url', m.cdn_url,
+                        'url', m.cdn_url,
                         'position', m.position,
+                        'order', m.position,
                         'status', m.status,
                         'is_processed', m.is_processed
                     ) ORDER BY m.position
@@ -128,8 +130,11 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
                 SELECT json_agg(
                     json_build_object(
                         'id', p.id,
+                        'prompt_id', p.id,
                         'prompt_key', p.prompt_key,
+                        'prompt_text', p.prompt_key,
                         'response_text', p.response_text,
+                        'response', p.response_text,
                         'position', p.position
                     ) ORDER BY p.position
                 )
@@ -543,14 +548,20 @@ async def get_public_profile(
                 u.dietary_strictness,
                 u.subscription_tier,
                 u.is_photo_verified,
-                ARRAY(
-                    SELECT m.cdn_url
+                COALESCE((
+                    SELECT json_agg(
+                        json_build_object(
+                            'id', m.id,
+                            'url', m.cdn_url,
+                            'cdn_url', m.cdn_url,
+                            'position', m.position
+                        ) ORDER BY m.position
+                    )
                     FROM user_media m
                     WHERE m.user_id = u.id
                       AND m.media_type = 'photo'
                       AND m.status = 'approved'
-                    ORDER BY m.position
-                ) AS photos,
+                ), '[]'::json) AS photos,
                 ARRAY(
                     SELECT json_build_object('key', p.prompt_key, 'response', p.response_text)
                     FROM user_prompts p
@@ -598,7 +609,7 @@ async def get_public_profile(
         "dietary_strictness": row["dietary_strictness"],
         "subscription_tier": row["subscription_tier"],
         "is_photo_verified": row["is_photo_verified"],
-        "photos": row["photos"] or [],
+        "photos": json.loads(row["photos"]) if isinstance(row["photos"], str) else (row["photos"] or []),
         "prompts": [dict(p) for p in (row["prompts"] or [])],
     }
 

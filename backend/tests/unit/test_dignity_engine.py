@@ -79,14 +79,21 @@ class TestDignityEngine(unittest.IsolatedAsyncioTestCase):
         conn.execute.assert_called_once()
         self.assertIn("suspended", conn.execute.call_args[0][1])
 
-        # Case 2: 10 reports -> ban
+        # Case 2: 10 unreviewed reports -> must suspend, NEVER auto-ban without mod confirmation (Finding 1)
         conn.reset_mock()
         conn.fetchval.side_effect = [AUTO_BAN_THRESHOLD, "active"]
         await _evaluate_auto_action(u1, conn)
         conn.execute.assert_called_once()
-        self.assertIn("banned", conn.execute.call_args[0][1])
+        self.assertIn("suspended", conn.execute.call_args[0][1])
 
-        # Case 3: Already banned -> no update
+        # Case 3: Underage report -> expedited suspension
+        conn.reset_mock()
+        conn.fetchval.side_effect = ["active"]
+        await _evaluate_auto_action(u1, conn, is_underage=True)
+        conn.execute.assert_called_once()
+        self.assertIn("suspended", conn.execute.call_args[0][1])
+
+        # Case 4: Already banned -> no update
         conn.reset_mock()
         conn.fetchval.side_effect = [AUTO_BAN_THRESHOLD, "banned"]
         await _evaluate_auto_action(u1, conn)

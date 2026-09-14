@@ -294,6 +294,8 @@ async def suspend_user(
             if res == "UPDATE 0":
                 raise HTTPException(status_code=404, detail="User not found")
 
+            await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+
             await conn.execute(
                 """
                 INSERT INTO admin_audit_log
@@ -309,7 +311,12 @@ async def suspend_user(
 
     try:
         r = get_redis()
-        await r.delete(f"user:session:{user_id}")
+        await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
+        import json as _json
+        await r.publish(
+            f"user:{user_id}:commands",
+            _json.dumps({"type": "force_disconnect", "reason": "Account suspended."}),
+        )
     except Exception:
         pass
 
@@ -475,6 +482,12 @@ async def resolve_report(
         try:
             r = get_redis()
             await r.delete(f"user:session:{report['reported_id']}", f"feed:cache:{report['reported_id']}")
+            import json as _json
+            reason_msg = "Account banned." if body.action_taken == "banned" else "Account suspended."
+            await r.publish(
+                f"user:{report['reported_id']}:commands",
+                _json.dumps({"type": "force_disconnect", "reason": reason_msg}),
+            )
         except Exception:
             pass
 
@@ -493,17 +506,17 @@ async def list_pending_media(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """List media items with status='pending' for manual review."""
+    """List media items with status in ('flagged', 'pending') for manual review."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT
                 m.id, m.user_id, m.media_type, m.cdn_url,
-                m.status, m.created_at,
+                m.status, m.rejection_reason, m.created_at,
                 u.first_name, u.phone_number
             FROM user_media m
             JOIN users u ON u.id = m.user_id
-            WHERE m.status = 'pending'
+            WHERE m.status IN ('flagged', 'pending')
             ORDER BY m.created_at ASC
             LIMIT $1 OFFSET $2
             """,
@@ -526,22 +539,14 @@ async def approve_media(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Manually approve a media item."""
+    """Manually approve a media item, copy to production bucket and generate CDN URL."""
+    from app.services.media_processor import promote_media_to_production
     async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE user_media
-               SET status      = 'approved',
-                   reviewed_by = $1,
-                   reviewed_at = NOW()
-             WHERE id = $2 AND status = 'pending'
-            """,
-            admin["user_id"],
-            media_id,
-        )
-    if result == "UPDATE 0":
-        raise HTTPException(status_code=404, detail="Media not found or not pending")
-    return {"approved": True, "media_id": media_id}
+        try:
+            result = await promote_media_to_production(media_id, admin["user_id"], conn)
+            return result
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/media/{media_id}/reject", status_code=status.HTTP_200_OK)
@@ -554,7 +559,7 @@ async def reject_media(
     """Manually reject a media item with a reason."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id FROM user_media WHERE id = $1",
+            "SELECT user_id, s3_key FROM user_media WHERE id = $1",
             media_id,
         )
         if row is None:
@@ -576,6 +581,14 @@ async def reject_media(
             )
             # Recompute trust score atomically with the rejection
             await recompute_trust_score(row["user_id"], conn)
+
+        if row.get("s3_key"):
+            try:
+                from app.services.media_processor import _delete_from_quarantine
+                import asyncio
+                await asyncio.to_thread(_delete_from_quarantine, row["s3_key"])
+            except Exception:
+                pass
 
     return {"rejected": True, "media_id": media_id, "reason": body.reason}
 
@@ -617,7 +630,7 @@ async def get_dashboard_stats(
                 (SELECT COUNT(*) FROM users WHERE subscription_tier = 'platinum') AS platinum_subscribers,
                 (SELECT COUNT(*) FROM users WHERE subscription_tier != 'free' AND subscription_valid_until > NOW()) AS active_paid_subscribers,
                 (SELECT COUNT(*) FROM reports WHERE resolved = FALSE)          AS open_reports,
-                (SELECT COUNT(*) FROM user_media WHERE status = 'pending')     AS pending_media,
+                (SELECT COUNT(*) FROM user_media WHERE status IN ('flagged', 'pending')) AS pending_media,
                 (SELECT COUNT(*) FROM matches WHERE created_at > NOW() - INTERVAL '24h') AS matches_24h
             """
         )

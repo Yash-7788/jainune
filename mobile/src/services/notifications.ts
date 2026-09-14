@@ -6,12 +6,13 @@
 
 import { Platform } from "react-native";
 import Constants, { ExecutionEnvironment } from "expo-constants";
+import * as SecureStore from "expo-secure-store";
 import { apiPost } from "../api/client";
 
 // Detect if running inside Expo Go app
 const isExpoGo =
   Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
-  Constants.appOwnership === "expo";
+  (Constants as any).appOwnership === "expo";
 
 // Dynamically acquire expo-notifications module to prevent top-level evaluation errors in Expo Go
 function getNotifications(): any {
@@ -20,6 +21,20 @@ function getNotifications(): any {
     return require("expo-notifications");
   } catch {
     return null;
+  }
+}
+
+/** Stable, persistent installation identifier for multi-device push routing (R7-3) */
+export async function getOrCreateDeviceId(): Promise<string> {
+  try {
+    let id = await SecureStore.getItemAsync("jainune_device_id");
+    if (!id) {
+      id = `${Platform.OS}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 10)}`;
+      await SecureStore.setItemAsync("jainune_device_id", id);
+    }
+    return id;
+  } catch {
+    return `${Platform.OS}_${Platform.Version}`;
   }
 }
 
@@ -85,7 +100,13 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     // Send token to backend (non-blocking)
     if (token) {
-      apiPost("/users/me/fcm-token", { fcm_token: token }).catch(() => {});
+      getOrCreateDeviceId().then((deviceId) => {
+        apiPost("/users/me/fcm-token", {
+          fcm_token: token,
+          platform: Platform.OS,
+          device_id: deviceId,
+        }).catch(() => {});
+      });
     }
 
     return token;

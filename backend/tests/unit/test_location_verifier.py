@@ -200,6 +200,76 @@ class TestLocationVerifier(unittest.TestCase):
         allowed, _ = verify_location_zone(26.9124, 75.7873)
         self.assertFalse(allowed)
 
+    def test_origin_secret_enforcement_prevents_direct_origin_bypass(self):
+        """FINDING-07: Origin secret must be enforced when configured even if cf-* headers are omitted."""
+        from app.core.config import settings
+        original_secret = settings.cloudflare_origin_secret
+        try:
+            settings.cloudflare_origin_secret = "super_secret_origin_key"
+
+            # Direct request omitting cf-* headers and omitting origin secret must be rejected
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"user-agent": "direct-client"}
+            )
+            self.assertFalse(valid)
+            self.assertIn("without valid origin secret", err)
+
+            # Request with invalid origin secret must be rejected
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"x-origin-secret": "wrong_key"}
+            )
+            self.assertFalse(valid)
+            self.assertIn("without valid origin secret", err)
+
+            # Request with valid origin secret passes
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"x-origin-secret": "super_secret_origin_key"}
+            )
+            self.assertTrue(valid)
+            self.assertIsNone(err)
+        finally:
+            settings.cloudflare_origin_secret = original_secret
+
+    def test_require_edge_corroboration_fails_closed(self):
+        """FINDING-07: When require_edge_location_corroboration is True, missing headers fail closed."""
+        from app.core.config import settings
+        orig_corrob = settings.require_edge_location_corroboration
+        try:
+            settings.require_edge_location_corroboration = True
+
+            # Missing country header fails closed
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={}
+            )
+            self.assertFalse(valid)
+            self.assertIn("Missing required edge country header", err)
+
+            # Missing coordinates header fails closed
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"cf-ipcountry": "IN"}
+            )
+            self.assertFalse(valid)
+            self.assertIn("Missing required edge coordinate headers", err)
+
+            # Valid edge headers pass
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={
+                    "cf-ipcountry": "IN",
+                    "cf-iplatitude": "19.0760",
+                    "cf-iplongitude": "72.8777",
+                }
+            )
+            self.assertTrue(valid)
+            self.assertIsNone(err)
+        finally:
+            settings.require_edge_location_corroboration = orig_corrob
+
 
 if __name__ == "__main__":
     unittest.main()

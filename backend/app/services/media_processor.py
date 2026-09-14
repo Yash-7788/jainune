@@ -143,7 +143,7 @@ async def _run_moderation(
                     UPDATE user_media
                     SET status = 'rejected',
                         rejection_reason = $1
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     """,
                     size_reason, media_id,
                 )
@@ -151,15 +151,16 @@ async def _run_moderation(
             return
 
         if media_type == "photo":
-            approved, reason = await asyncio.to_thread(
+            mod_status, reason = await asyncio.to_thread(
                 _rekognition_check, s3_key
             )
         else:
-            approved, reason = await asyncio.to_thread(
+            voice_ok, reason = await asyncio.to_thread(
                 _voice_moderation_check, s3_key
             )
+            mod_status = "approved" if voice_ok else "rejected"
 
-        if approved:
+        if mod_status == "approved":
             # Verify media_id is still the active record in 'processing' status before promoting (Finding 12)
             async with db.acquire() as conn:
                 current_status = await conn.fetchval(
@@ -188,7 +189,7 @@ async def _run_moderation(
                         is_processed = TRUE,
                         cdn_url = $1,
                         s3_key = $2
-                    WHERE id = $3
+                    WHERE id = $3 AND status = 'processing'
                     """,
                     cdn_url, prod_key, media_id,
                 )
@@ -204,21 +205,37 @@ async def _run_moderation(
                     )
             # Delete raw upload from quarantine bucket
             await asyncio.to_thread(_delete_from_quarantine, s3_key)
-        else:
+        elif mod_status == "flagged":
+            # Flagged for human moderator review: keep object in quarantine so admin can review
             async with db.acquire() as conn:
                 await conn.execute(
                     """
                     UPDATE user_media
-                    SET status = 'rejected',
+                    SET status = 'flagged',
                         rejection_reason = $1
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     """,
                     reason, media_id,
                 )
+            logger.info("Media %s flagged for manual moderator review: %s", media_id, reason)
+            return
+        else:
+            async with db.acquire() as conn:
+                res = await conn.execute(
+                    """
+                    UPDATE user_media
+                    SET status = 'rejected',
+                        rejection_reason = $1
+                    WHERE id = $2 AND status = 'processing'
+                    """,
+                    reason, media_id,
+                )
+                if res == "UPDATE 0":
+                    return
                 # If no valid photos remain, downgrade user from active to pending_media (BUG-038)
                 if user_id and media_type == "photo":
                     remaining = await conn.fetchval(
-                        "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = 'photo' AND status IN ('approved', 'pending')",
+                        "SELECT COUNT(*) FROM user_media WHERE user_id = $1 AND media_type = 'photo' AND status IN ('approved', 'pending', 'flagged')",
                         user_id,
                     )
                     if not remaining:
@@ -235,20 +252,20 @@ async def _run_moderation(
         try:
             async with db.acquire() as conn:
                 await conn.execute(
-                    "UPDATE user_media SET status = 'rejected', rejection_reason = $1 WHERE id = $2",
+                    "UPDATE user_media SET status = 'rejected', rejection_reason = $1 WHERE id = $2 AND status = 'processing'",
                     "PROCESSING_FAILED", media_id,
                 )
         except Exception:
             pass
 
 
-def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
+def _rekognition_check(s3_key: str) -> tuple[str, str | None]:
     """
     Synchronous Rekognition call (run via asyncio.to_thread).
-    Returns (approved: bool, rejection_reason: str | None).
+    Returns (status: 'approved' | 'rejected' | 'flagged', reason: str | None).
     """
     if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
-        return True, None
+        return "approved", None
     client = boto3.client(
         "rekognition",
         region_name=settings.aws_region,
@@ -262,17 +279,89 @@ def _rekognition_check(s3_key: str) -> tuple[bool, str | None]:
                 "Name": s3_key,
             }
         },
-        MinConfidence=_MODERATION_CONFIDENCE_THRESHOLD,
+        MinConfidence=50.0,
     )
 
     labels = response.get("ModerationLabels", [])
+    flagged_reasons = []
     for label in labels:
         name = label.get("Name", "")
         parent = label.get("ParentName", "")
+        conf = float(label.get("Confidence", 0.0))
         if name in _BLOCKED_LABELS or parent in _BLOCKED_LABELS:
-            return False, f"Content policy violation: {name}"
+            if conf >= _MODERATION_CONFIDENCE_THRESHOLD:
+                return "rejected", f"Content policy violation: {name}"
+            else:
+                flagged_reasons.append(f"{name} ({conf:.1f}%)")
+        elif name in ("Suggestive", "Revealing Clothes", "Partial Nudity") or parent in ("Suggestive", "Revealing Clothes"):
+            flagged_reasons.append(f"{name} ({conf:.1f}%)")
 
-    return True, None
+    if flagged_reasons:
+        return "flagged", f"Flagged for human review: {', '.join(flagged_reasons[:2])}"
+
+    return "approved", None
+
+
+async def promote_media_to_production(
+    media_id: uuid.UUID,
+    admin_id: uuid.UUID,
+    conn: asyncpg.Connection,
+) -> dict[str, Any]:
+    """
+    Manually approves and promotes a media item from quarantine to production.
+    Copies object to production bucket, updates CDN URL and status, and deletes from quarantine.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT id, user_id, s3_key, media_type, status
+        FROM user_media
+        WHERE id = $1 AND status IN ('flagged', 'pending', 'processing')
+        FOR UPDATE
+        """,
+        media_id,
+    )
+    if not row:
+        raise ValueError("Media not found or not in reviewable state")
+
+    s3_key = row["s3_key"]
+    media_type = row["media_type"]
+    user_id = row["user_id"]
+
+    prod_key = s3_key.replace("uploads/", "media/")
+    if media_type == "photo":
+        prod_key = prod_key.rsplit(".", 1)[0] + ".webp"
+    base_cdn = settings.cdn_public_base_url.rstrip("/")
+    cdn_url = f"{base_cdn}/{prod_key}"
+
+    await asyncio.to_thread(_copy_to_production, s3_key, prod_key, media_type)
+
+    await conn.execute(
+        """
+        UPDATE user_media
+        SET status = 'approved',
+            is_processed = TRUE,
+            cdn_url = $1,
+            s3_key = $2,
+            reviewed_by = $3,
+            reviewed_at = NOW(),
+            rejection_reason = NULL
+        WHERE id = $4
+        """,
+        cdn_url, prod_key, admin_id, media_id,
+    )
+
+    if user_id:
+        await conn.execute(
+            """
+            UPDATE users
+            SET account_status = 'active', updated_at = NOW()
+            WHERE id = $1 AND onboarding_step = 22 AND account_status = 'pending_media'
+            """,
+            user_id,
+        )
+
+    await asyncio.to_thread(_delete_from_quarantine, s3_key)
+    return {"approved": True, "media_id": media_id, "cdn_url": cdn_url}
 
 
 def _validate_voice_magic_bytes(data: bytes) -> bool:

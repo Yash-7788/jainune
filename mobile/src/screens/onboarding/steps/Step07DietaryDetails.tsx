@@ -27,7 +27,7 @@ export default function Step07Screen() {
 
   const isDetailStep = dietaryStrictness === "pure_jain" || dietaryStrictness === "vaishnav";
 
-  // For non-detail diets, auto-advance to step 8
+  // For non-detail diets, auto-advance to step 8 and replace in stack
   useEffect(() => {
     if (!isDetailStep) {
       (async () => {
@@ -36,9 +36,9 @@ export default function Step07Screen() {
           await submitStep7(false, false);
           updateData({ eatsRootVeg: false, eatsOnionGarlic: false });
           setStep(8);
-          navigation.navigate("Step08");
+          navigation.replace("Step08");
         } catch {
-          navigation.navigate("Step08");
+          navigation.replace("Step08");
         } finally {
           setLoading(false);
         }

@@ -34,7 +34,10 @@ try {
 }
 
 // Configure Google Sign-In at module level (safeguarded for Expo Go)
+let GoogleSignin: any = null;
 try {
+  const gModule = require("@react-native-google-signin/google-signin");
+  GoogleSignin = gModule?.GoogleSignin || gModule;
   GoogleSignin?.configure?.({
     webClientId:
       process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ||
@@ -65,6 +68,9 @@ export default function AuthMethodScreen() {
     setLoading("google");
     setError(null);
     try {
+      if (!GoogleSignin || typeof GoogleSignin.signIn !== "function") {
+        throw new Error("Google Sign-In requires an Expo Dev Client build and is not supported in standard Expo Go.");
+      }
       await GoogleSignin.hasPlayServices();
       const userInfo: any = await GoogleSignin.signIn();
       const idToken = userInfo?.data?.idToken || userInfo?.idToken;

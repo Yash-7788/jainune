@@ -41,6 +41,16 @@ export function useWebSocket({
   const reconnectAttempts = useRef(0);
   const isMounted = useRef(true);
 
+  // Store callbacks in refs to prevent connection thrashing on callback identity changes
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage;
+  const onTypingRef = useRef(onTyping);
+  onTypingRef.current = onTyping;
+  const onReadReceiptRef = useRef(onReadReceipt);
+  onReadReceiptRef.current = onReadReceipt;
+  const onPermanentFailureRef = useRef(onPermanentFailure);
+  onPermanentFailureRef.current = onPermanentFailure;
+
   // Acquire authentication credentials via single-use ticket (BUG-005, BUG-031)
   const getAuthParam = async (): Promise<string | null> => {
     try {
@@ -104,16 +114,16 @@ export function useWebSocket({
       try {
         const data = JSON.parse(event.data);
         if (data.type === "pong") return;
-        if (data.type === "typing" && onTyping) {
-          onTyping(data.payload?.sender_id);
+        if (data.type === "typing" && onTypingRef.current) {
+          onTypingRef.current(data.payload?.sender_id);
           return;
         }
-        if (data.type === "read_receipt" && onReadReceipt) {
-          onReadReceipt(data.payload?.sender_id, data.payload?.message_id);
+        if (data.type === "read_receipt" && onReadReceiptRef.current) {
+          onReadReceiptRef.current(data.payload?.sender_id, data.payload?.message_id);
           return;
         }
-        if (onMessage) {
-          onMessage(data);
+        if (onMessageRef.current) {
+          onMessageRef.current(data);
         }
       } catch {}
     };
@@ -126,15 +136,18 @@ export function useWebSocket({
         pingTimer.current = null;
       }
 
-      // Do not reconnect on intentional close or permission rejection (4001, 4003)
-      if (event.code === 4001 || event.code === 4003 || event.code === 1000) {
+      // Do not reconnect on intentional close, rate-limit, or permission rejection (4001, 4003, 1008)
+      if (event.code === 4001 || event.code === 4003 || event.code === 1000 || event.code === 1008) {
+        if (event.code === 1008 && onPermanentFailureRef.current) {
+          onPermanentFailureRef.current();
+        }
         return;
       }
 
       // Cap maximum reconnection attempts (BUG-054)
       if (reconnectAttempts.current >= MAX_RECONNECT_ATTEMPTS) {
-        if (onPermanentFailure) {
-          onPermanentFailure();
+        if (onPermanentFailureRef.current) {
+          onPermanentFailureRef.current();
         }
         return;
       }
@@ -152,7 +165,7 @@ export function useWebSocket({
         socket.close();
       }
     };
-  }, [chatId, cleanup, onMessage, onTyping, onReadReceipt, onPermanentFailure]);
+  }, [chatId, cleanup]);
 
   useEffect(() => {
     reconnectAttempts.current = 0;

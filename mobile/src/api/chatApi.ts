@@ -157,15 +157,25 @@ export async function getMessages(matchId: string, cursor?: string): Promise<Mes
 }
 
 /** POST /v1/chats/:match_id/messages — text */
-export async function sendMessage(matchId: string, content: string): Promise<Message> {
+export async function sendMessage(
+  matchId: string,
+  content: string,
+  idempotencyKey?: string
+): Promise<Message> {
   const trimmed = content.trim();
   if (!trimmed || trimmed.length > MAX_MESSAGE_LENGTH) throw new Error("INVALID_MESSAGE_LENGTH");
   try {
-    const res = await apiPost<any>(`/chats/${matchId}/messages`, {
-      message_type: "text",
-      type: "text",
-      content: trimmed,
-    });
+    const res = await apiPost<any>(
+      `/chats/${matchId}/messages`,
+      {
+        message_type: "text",
+        type: "text",
+        content: trimmed,
+        idempotency_key: idempotencyKey,
+        client_message_id: idempotencyKey,
+      },
+      idempotencyKey
+    );
     if (res.success && res.data) {
       const m = res.data;
       return {
@@ -214,15 +224,22 @@ export async function sendMediaMessage(
   matchId: string,
   type: "photo" | "voice",
   mediaUrl: string,
-  mediaId?: string
+  mediaId?: string,
+  idempotencyKey?: string
 ): Promise<Message> {
   try {
-    const res = await apiPost<any>(`/chats/${matchId}/messages`, {
-      message_type: type,
-      type,
-      media_url: mediaUrl,
-      media_id: mediaId || mediaUrl,
-    });
+    const res = await apiPost<any>(
+      `/chats/${matchId}/messages`,
+      {
+        message_type: type,
+        type,
+        media_url: mediaUrl,
+        media_id: mediaId || mediaUrl,
+        idempotency_key: idempotencyKey,
+        client_message_id: idempotencyKey,
+      },
+      idempotencyKey
+    );
     if (res.success && res.data) {
       const m = res.data;
       return {

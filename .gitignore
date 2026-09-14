@@ -21,6 +21,8 @@ build/
 node_modules/
 .expo/
 .expo-shared/
+.gradle/
+mobile/ios/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -64,3 +66,8 @@ credentials/
 
 .code-intelligence/
 .claude/
+.frigg/
+.infigraphignore
+.cursor/
+.kiro/
+.windsurf/
