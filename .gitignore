@@ -21,6 +21,9 @@ build/
 node_modules/
 .expo/
 .expo-shared/
+.eas/
+*.apk
+*.aab
 .gradle/
 mobile/ios/
 npm-debug.log*
