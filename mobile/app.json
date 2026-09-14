@@ -38,7 +38,9 @@
         "ACCESS_COARSE_LOCATION",
         "CAMERA",
         "RECORD_AUDIO",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ],
       "allowBackup": false
     },
@@ -50,6 +52,12 @@
         }
       ],
       "./plugins/withIosSecurity"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "42e4bf1e-e699-40ee-891c-2c351c4bc73a"
+      }
+    },
+    "owner": "yashkothari16s-team"
   }
 }

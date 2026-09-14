@@ -31,7 +31,7 @@ import { setSessionExpiredCallback } from "./src/api/client";
 import { useAuthStore } from "./src/store/authStore";
 import { syncPendingPayment } from "./src/services/billingService";
 
-SplashScreenExpo.preventAutoHideAsync();
+SplashScreenExpo.preventAutoHideAsync().catch(() => {});
 
 type BootState =
   | { status: "pending" }

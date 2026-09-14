@@ -1,41 +1,18 @@
-# ==============================================================================
-# JAINUNE PROGUARD / R8 PRODUCTION SECURITY & CODE OBFUSCATION RULES
-# ==============================================================================
-# Prevents APK decompilation, reverses symbol names, strips logging, protects source.
+# Add project specific ProGuard rules here.
+# By default, the flags in this file are appended to flags specified
+# in /usr/local/Cellar/android-sdk/24.3.3/tools/proguard/proguard-android.txt
+# You can edit the include path and order by changing the proguardFiles
+# directive in build.gradle.
+#
+# For more details, see
+#   http://developer.android.com/guide/developing/tools/proguard.html
 
-# Enable aggressive class and member renaming
--repackageclasses ''
--allowaccessmodification
+# react-native-reanimated
+-keep class com.swmansion.reanimated.** { *; }
+-keep class com.facebook.react.turbomodule.** { *; }
 
-# Obfuscation dictionary — random flat mapping
--overloadaggressively
--useuniqueclassmembernames
-
-# Strip all source file names and line numbers from compiled bytecode
--renamesourcefileattribute SourceFile
--keepattributes !SourceFile,!LineNumberTable
-
-# Strip all Android Log statements in release builds (prevents information leakage)
--assumenosideeffects class android.util.Log {
-    public static boolean isLoggable(java.lang.String, int);
-    public static int v(...);
-    public static int d(...);
-    public static int i(...);
-    public static int w(...);
-    public static int e(...);
-}
-
-# Preserve React Native entry point and bridge
--keep class com.facebook.react.** { *; }
--keep class com.facebook.hermes.** { *; }
--keep interface com.facebook.react.bridge.** { *; }
-
-# Protect Native Security Bridge classes and methods needing React Native reflection (SECOND-007)
--keep class com.jainune.app.MainActivity { *; }
--keep class com.jainune.app.MainApplication { *; }
--keep class com.jainune.app.JainuneSecurityPackage { *; }
--keepclassmembers class com.jainune.app.JainuneSecurityModule {
-    @com.facebook.react.bridge.ReactMethod *;
-    public <init>(...);
-    public java.lang.String getName();
-}
+# Add any project specific keep options here:
+-keep class com.jainune.app.** { *; }
+-keep class com.razorpay.** { *; }
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.razorpay.**
