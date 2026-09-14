@@ -71,7 +71,7 @@ function withIosSecurityPod(config) {
           if (/^.*use_native_modules!.*$/m.test(contents)) {
             contents = contents.replace(
               /^(.*use_native_modules!.*)$/m,
-              `$1\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
+              (match) => `${match}\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
             );
           } else if (contents.includes("post_install")) {
             contents = contents.replace(
