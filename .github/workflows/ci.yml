@@ -105,6 +105,21 @@ jobs:
           cd mobile
           npm run type-check
 
+      - name: Mobile regression tests
+        working-directory: mobile
+        run: npm test
+
+      - name: Mobile lint
+        working-directory: mobile
+        run: npm run lint
+
+      - name: Bundle both mobile platforms
+        working-directory: mobile
+        env:
+          EXPO_PUBLIC_API_URL: https://api.jainune.com/v1
+          EXPO_PUBLIC_WS_URL: wss://api.jainune.com/v1/ws/chat
+        run: npx expo export --platform all
+
       - name: Dependency Vulnerability Audit
         continue-on-error: true
         run: |

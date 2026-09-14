@@ -5,7 +5,7 @@
  * and India User Choice Billing (UCB) / Alternative Billing (Razorpay).
  */
 
-import { Platform, Linking } from "react-native";
+import { Platform } from "react-native";
 let RazorpayCheckout: any = null;
 try {
   const rnrp = require("react-native-razorpay");
@@ -219,6 +219,11 @@ export async function purchaseSubscription(
   }
 
   // Pathway 2: Android (Google Play Billing / User Choice Billing / Razorpay alternative)
+  // A Play-labelled build must never silently route payment through Razorpay.
+  // Native Play purchase + receipt verification is still a release prerequisite.
+  if (ACTIVE_BILLING_PROVIDER !== "razorpay") {
+    throw new Error("PLAY_BILLING_MODULE_UNAVAILABLE");
+  }
   try {
     const order = await createSubscriptionOrder(plan.plan_id);
 
@@ -330,6 +335,9 @@ export async function purchaseArcadeRolls(
   }
 
   // Android Google Play Billing / User Choice Billing
+  if (ACTIVE_BILLING_PROVIDER !== "razorpay") {
+    throw new Error("PLAY_BILLING_MODULE_UNAVAILABLE");
+  }
   try {
     const order = await createArcadeOrder(productId);
 
@@ -368,4 +376,3 @@ export async function purchaseArcadeRolls(
 }
 
 export const initiatePurchase = purchaseSubscription;
-

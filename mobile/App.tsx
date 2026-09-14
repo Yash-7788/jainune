@@ -39,20 +39,21 @@ type BootState =
   | { status: "blocked"; reason: string };
 
 export default function App() {
-  const [fontsLoaded] = useFonts({
+  const [fontsLoaded, fontError] = useFonts({
     Outfit_800ExtraBold,
     Outfit_700Bold,
     Outfit_600SemiBold,
     Inter_400Regular,
     Inter_700Bold,
   });
+  const fontsReady = fontsLoaded || !!fontError;
 
   const [boot, setBoot] = useState<BootState>({ status: "pending" });
   const sessionCallbackSet = useRef(false);
 
   // Run security checks once fonts are loaded
   useEffect(() => {
-    if (!fontsLoaded) return;
+    if (!fontsReady) return;
 
     runSecurityBoot()
       .then((result) => {
@@ -64,9 +65,12 @@ export default function App() {
       })
       .catch((err) => {
         console.warn("[App] Security boot threw unhandled rejection:", err);
-        setBoot({ status: "passed" });
+        setBoot({
+          status: "blocked",
+          reason: "We couldn't complete the security check. Please restart Jainune and contact support if this continues.",
+        });
       });
-  }, [fontsLoaded]);
+  }, [fontsReady]);
 
   // Wire session-expired callback and initialize session (once, after boot passes)
   useEffect(() => {
@@ -86,13 +90,13 @@ export default function App() {
   }, [boot.status]);
 
   const onLayoutRootView = useCallback(async () => {
-    if (fontsLoaded && boot.status !== "pending") {
+    if (fontsReady && boot.status !== "pending") {
       await SplashScreenExpo.hideAsync();
     }
-  }, [fontsLoaded, boot.status]);
+  }, [fontsReady, boot.status]);
 
   // Keep splash visible until fonts AND security boot are done
-  if (!fontsLoaded || boot.status === "pending") return null;
+  if (!fontsReady || boot.status === "pending") return null;
 
   if (boot.status === "blocked") {
     return (

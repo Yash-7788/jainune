@@ -21,8 +21,10 @@ class Settings(BaseSettings):
                 return "development"
             if clean in ("stage", "staging"):
                 return "staging"
-            return clean
-        return "development"
+            if clean in ("test", "testing"):
+                return "testing"
+            raise ValueError("environment must be development, testing, staging, or production")
+        raise ValueError("environment must be a string")
     debug: bool = False
     app_version: str = "1.0.0"
     allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]

@@ -1,6 +1,23 @@
 apply plugin: "com.android.application"
 apply plugin: "com.facebook.react"
 
+def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
+react {
+    entryFile = file(["node", "-e", "require('expo/scripts/resolveAppEntry')", projectRoot, "android", "absolute"].execute(null, rootDir).text.trim())
+    cliFile = new File(["node", "--print", "require.resolve('@expo/cli', { paths: [require.resolve('expo/package.json')] })"].execute(null, rootDir).text.trim())
+    bundleCommand = "export:embed"
+}
+
+def releaseSigningKeys = ["JAINUNE_RELEASE_STORE_FILE", "JAINUNE_RELEASE_STORE_PASSWORD", "JAINUNE_RELEASE_KEY_ALIAS", "JAINUNE_RELEASE_KEY_PASSWORD"]
+def hasReleaseSigning = releaseSigningKeys.every { project.findProperty(it)?.toString()?.trim() }
+def allowUnsignedValidation = project.findProperty("JAINUNE_ALLOW_UNSIGNED_RELEASE") == "true"
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { it.project == project && it.name.toLowerCase().contains("release") }
+            && !hasReleaseSigning && !allowUnsignedValidation) {
+        throw new GradleException("Release signing is incomplete. Configure all JAINUNE_RELEASE_* properties. For compilation only, explicitly pass -PJAINUNE_ALLOW_UNSIGNED_RELEASE=true.")
+    }
+}
+
 /**
  * Jainune Android app build configuration
  *
@@ -17,7 +34,7 @@ android {
     defaultConfig {
         applicationId "com.jainune.app"
         minSdkVersion 24       // Android 7.0 — covers 99%+ of current devices
-        targetSdkVersion 35    // Android 15 (Target API 35/36 compliant)
+        targetSdkVersion 35    // Android 15; recheck Play requirements before submission.
         versionCode 1
         versionName "1.0.0"
         multiDexEnabled true
@@ -40,7 +57,7 @@ android {
             // Set these in ~/.gradle/gradle.properties or CI secrets
             // JAINUNE_RELEASE_STORE_FILE, JAINUNE_RELEASE_KEY_ALIAS,
             // JAINUNE_RELEASE_STORE_PASSWORD, JAINUNE_RELEASE_KEY_PASSWORD
-            if (project.hasProperty("JAINUNE_RELEASE_STORE_FILE")) {
+            if (hasReleaseSigning) {
                 storeFile file(JAINUNE_RELEASE_STORE_FILE)
                 storePassword JAINUNE_RELEASE_STORE_PASSWORD
                 keyAlias JAINUNE_RELEASE_KEY_ALIAS
@@ -63,7 +80,8 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-            signingConfig (project.hasProperty("JAINUNE_RELEASE_STORE_FILE") ? signingConfigs.release : (signingConfigs.debug.storeFile.exists() ? signingConfigs.debug : null))
+            // Compilation artifacts must never masquerade as store-signed releases.
+            signingConfig (hasReleaseSigning ? signingConfigs.release : null)
         }
     }
 
@@ -105,4 +123,3 @@ dependencies {
 
 /* Autolinking — picks up react-native-razorpay, @react-native-google-signin, etc. */
 apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
-

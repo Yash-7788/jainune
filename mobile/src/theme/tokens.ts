@@ -9,6 +9,8 @@ export const colors = {
   saffron: "#FF9C4A",
   saffronMid: "#FFB366",
   saffronLight: "#FFF4EA",
+  // Accessible text on warm/white surfaces; bright saffron remains decorative.
+  saffronText: "#9A4700",
 
   // Accent pink
   pink: "#FFAAC4",

@@ -9,9 +9,14 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Build & Deploy Backend
+    environment: production
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,6 +68,7 @@ jobs:
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
           script: |
+            set -eu
             cd /opt/jainune
 
             TARGET_IMAGE="ghcr.io/${{ env.REPO_LOWER }}/backend:${{ github.sha }}"
@@ -110,7 +116,7 @@ jobs:
             echo "Awaiting API healthcheck verification on loopback..."
             HEALTHY=false
             for i in $(seq 1 30); do
-              if curl -s -f http://127.0.0.1:8000/livez > /dev/null; then
+              if curl --max-time 5 -s -f http://127.0.0.1:8000/readyz > /dev/null; then
                 echo "Deployment successful: API is healthy and accepting connections (attempt $i/30)."
                 HEALTHY=true
                 break
@@ -148,7 +154,7 @@ jobs:
               echo "Verifying rollback container healthcheck..."
               ROLLBACK_HEALTHY=false
               for j in $(seq 1 15); do
-                if curl -s -f http://127.0.0.1:8000/livez > /dev/null; then
+                if curl --max-time 5 -s -f http://127.0.0.1:8000/readyz > /dev/null; then
                   echo "Rollback verified: Previous image is healthy and accepting connections."
                   ROLLBACK_HEALTHY=true
                   break

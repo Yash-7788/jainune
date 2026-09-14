@@ -1,14 +1,16 @@
-name: Mobile Build
+name: Mobile Compilation Validation
 
 on:
   push:
     branches: [main]
     paths:
       - "mobile/**"
+      - ".github/workflows/mobile-build.yml"
   pull_request:
     branches: [main]
     paths:
       - "mobile/**"
+      - ".github/workflows/mobile-build.yml"
   workflow_dispatch:
     inputs:
       platform:
@@ -21,10 +23,13 @@ on:
           - ios
         default: "android"
 
+permissions:
+  contents: read
+
 jobs:
   build-android:
     if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android'
-    name: Build Android Release Bundle (AAB)
+    name: Compile Android (unsigned, not for distribution)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,31 +52,25 @@ jobs:
           cd mobile
           npm ci --legacy-peer-deps
 
-      - name: Ensure debug keystore for compile validation
-        run: |
-          mkdir -p ~/.android
-          if [ ! -f mobile/android/app/debug.keystore ]; then
-            keytool -genkey -v -keystore mobile/android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      - name: Build Android AAB
+      - name: Compile unsigned Android AAB
         env:
+          EXPO_PUBLIC_WS_URL: ${{ vars.EXPO_PUBLIC_WS_URL || 'wss://api.jainune.com/v1/ws/chat' }}
           EXPO_PUBLIC_API_URL: ${{ secrets.EXPO_PUBLIC_API_URL || 'https://api.jainune.com/v1' }}
         run: |
           cd mobile/android
           chmod +x gradlew
-          ./gradlew bundleRelease
+          ./gradlew bundleRelease -PJAINUNE_ALLOW_UNSIGNED_RELEASE=true
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-release-bundle
+          name: android-unsigned-validation-bundle
           path: mobile/android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'ios'
-    name: Build iOS Validation
+    name: Compile iOS (unsigned, not an IPA)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -99,6 +98,7 @@ jobs:
 
       - name: Build iOS Workspace (Compilation Check)
         env:
+          EXPO_PUBLIC_WS_URL: ${{ vars.EXPO_PUBLIC_WS_URL || 'wss://api.jainune.com/v1/ws/chat' }}
           EXPO_PUBLIC_API_URL: ${{ secrets.EXPO_PUBLIC_API_URL || 'https://api.jainune.com/v1' }}
         run: |
           cd mobile/ios

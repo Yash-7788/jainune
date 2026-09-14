@@ -7,7 +7,7 @@
     "sdkVersion": "51.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "light",
     "jsEngine": "hermes",
     "splash": {
       "image": "./assets/splash.png",
@@ -16,6 +16,7 @@
     },
     "ios": {
       "supportsTablet": false,
+      "usesAppleSignIn": true,
       "bundleIdentifier": "com.jainune.app",
       "associatedDomains": [
         "applinks:jainune.com"
@@ -49,6 +50,8 @@
           "locationWhenInUsePermission": "Jainune needs your location to connect you with verified Jain singles in Mumbai MMR, Pune, and Bengaluru."
         }
       ],
+      "expo-apple-authentication",
+      "expo-notifications",
       "./plugins/withIosSecurity"
     ]
   }

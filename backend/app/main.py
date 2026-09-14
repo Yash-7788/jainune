@@ -135,8 +135,12 @@ async def prometheus_metrics_middleware(request: Request, call_next):
     finally:
         duration = time.monotonic() - start_time
         metrics_registry.record_request_end(
-            method=request.method,
-            endpoint=request.url.path,
+            method=request.method if request.method in {
+                "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"
+            } else "OTHER",
+            # Raw paths include user IDs and arbitrary attacker-controlled 404s.
+            # Use the route template after routing to bound metric cardinality.
+            endpoint=getattr(request.scope.get("route"), "path", "unmatched"),
             status=status_code,
             duration_seconds=duration,
         )
@@ -263,4 +267,3 @@ app.include_router(arcade.router)
 app.include_router(admin.router)
 app.include_router(location.router)
 app.include_router(legal.router)
-

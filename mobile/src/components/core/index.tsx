@@ -53,7 +53,7 @@ export function PrimaryButton({ label, onPress, loading, disabled, style }: Prim
         style={styles.primaryGradient}
       >
         {loading ? (
-          <ActivityIndicator color={colors.white} size="small" />
+          <ActivityIndicator color={colors.dark} size="small" />
         ) : (
           <Text style={styles.primaryLabel} maxFontSizeMultiplier={1.35}>{label}</Text>
         )}
@@ -279,7 +279,7 @@ const styles = StyleSheet.create({
   },
   primaryLabel: {
     ...typography.cta,
-    color: colors.white,
+    color: colors.dark,
   },
 
   // GhostButton
@@ -295,7 +295,7 @@ const styles = StyleSheet.create({
   },
   ghostLabel: {
     ...typography.cta,
-    color: colors.saffron,
+    color: colors.saffronText,
   },
 
   // TextInput

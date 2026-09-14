@@ -5,7 +5,7 @@ buildscript {
         compileSdkVersion = 35
         targetSdkVersion = 35
         ndkVersion = "26.1.10909125"
-        kotlinVersion = "1.9.24"
+        kotlinVersion = "1.9.23"
     }
     repositories {
         google()
@@ -22,6 +22,8 @@ apply plugin: "com.facebook.react.rootproject"
 
 allprojects {
     repositories {
+        // expo-camera's SDK 51 native dependency is distributed with the module.
+        maven { url(new File(["node", "--print", "require.resolve('expo-camera/package.json')"].execute(null, rootDir).text.trim(), "../android/maven")) }
         google()
         mavenCentral()
         maven { url "https://www.jitpack.io" }

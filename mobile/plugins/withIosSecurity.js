@@ -1,4 +1,5 @@
-const { withDangerousMod, withInfoPlist, withEntitlementsPlist } = require("@expo/config-plugins");
+const { withDangerousMod, withInfoPlist, withEntitlementsPlist, withPodfile } = require("@expo/config-plugins");
+const { addSecurityPod } = require("./securityPod");
 const fs = require("fs");
 const path = require("path");
 
@@ -64,32 +65,15 @@ function withIosSecurityPod(config) {
         }
       }
 
-      const podfilePath = path.join(iosRoot, "Podfile");
-      if (fs.existsSync(podfilePath)) {
-        let contents = fs.readFileSync(podfilePath, "utf8");
-        if (!contents.includes("JainuneSecurityModule")) {
-          const insertMarker = "use_native_modules!";
-          if (contents.includes(insertMarker)) {
-            contents = contents.replace(
-              insertMarker,
-              `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
-            );
-          } else if (contents.includes("post_install")) {
-            contents = contents.replace(
-              "post_install",
-              `pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'\n\n  post_install`
-            );
-          } else {
-            contents += `\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'\n`;
-          }
-          fs.writeFileSync(podfilePath, contents);
-        }
-      }
       return config;
     },
   ]);
 }
 
 module.exports = function withIosSecurity(config) {
+  config = withPodfile(config, (config) => {
+    config.modResults.contents = addSecurityPod(config.modResults.contents);
+    return config;
+  });
   return withIosSecurityPod(withIosSecurityEntitlements(withIosSecurityInfo(config)));
 };

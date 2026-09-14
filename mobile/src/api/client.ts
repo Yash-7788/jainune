@@ -10,20 +10,12 @@
 
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
 import * as SecureStore from "expo-secure-store";
-import { Platform } from "react-native";
+import { API_BASE_URL } from "../config/endpoints";
 import { ErrorCode, getFriendlyError, ERROR_MAP } from "../utils/errors";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_DEV_URL =
-  Platform.OS === "android"
-    ? "http://10.0.2.2:8000/v1"
-    : "http://localhost:8000/v1";
-
-const PRIMARY_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ||
-  (__DEV__ ? DEFAULT_DEV_URL : "https://api.jainune.com/v1");
-const SERVER_URLS = [PRIMARY_BASE_URL];
+const SERVER_URLS = [API_BASE_URL];
 
 export const SECURE_KEYS = {
   ACCESS_TOKEN: "jainune_access_token",

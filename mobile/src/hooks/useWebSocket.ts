@@ -10,8 +10,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { AppState, AppStateStatus } from "react-native";
 import { getAccessToken, apiPost } from "../api/client";
 
-const WS_BASE_URL =
-  process.env.EXPO_PUBLIC_WS_URL || "wss://api.jainune.com/v1/ws/chat";
+import { WS_BASE_URL } from "../config/endpoints";
 
 export type WebSocketStatus = "connecting" | "connected" | "disconnected";
 

@@ -5,7 +5,7 @@
 
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
-import * as Device from "expo-constants";
+import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { apiPost } from "../api/client";
 
@@ -37,6 +37,15 @@ Notifications.setNotificationHandler({
  */
 export async function registerForPushNotificationsAsync(): Promise<string | null> {
   try {
+    // Android 13 requires a notification channel before requesting permission.
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync("jainune_default", {
+        name: "Jainune Notifications",
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: "#FF9C4A",
+      });
+    }
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
@@ -49,24 +58,19 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
       return null;
     }
 
-    // Android channel configuration
-    if (Platform.OS === "android") {
-      await Notifications.setNotificationChannelAsync("jainune_default", {
-        name: "Jainune Notifications",
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: "#FF6F00",
-      });
-    }
-
     let token: string | null = null;
     try {
-      const expoTokenData = await Notifications.getExpoPushTokenAsync();
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId || Constants.easConfig?.projectId;
+      const expoTokenData = await Notifications.getExpoPushTokenAsync({ projectId });
       token = expoTokenData.data;
     } catch {
       try {
-        const deviceTokenData = await Notifications.getDevicePushTokenAsync();
-        token = deviceTokenData.data;
+        // The backend's native transport is FCM. A raw APNs token cannot be
+        // sent to FCM; iOS must use Expo until a native APNs transport exists.
+        if (Platform.OS === "android") {
+          const deviceTokenData = await Notifications.getDevicePushTokenAsync();
+          token = deviceTokenData.data;
+        }
       } catch {
         token = null;
       }

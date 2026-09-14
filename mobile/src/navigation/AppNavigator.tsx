@@ -10,6 +10,7 @@ import { NavigationContainer, createNavigationContainerRef } from "@react-naviga
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import * as Linking from "expo-linking";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../theme/tokens";
 import { useAuthStore } from "../store/authStore";
 import {
@@ -105,6 +106,7 @@ function AuthNavigator() {
 // ── Main tab navigator ────────────────────────────────────────────────────────
 
 function MainNavigator() {
+  const insets = useSafeAreaInsets();
   return (
     <MainTab.Navigator
       screenOptions={{
@@ -113,11 +115,11 @@ function MainNavigator() {
           backgroundColor: colors.white,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 64,
-          paddingBottom: 8,
+          height: 56 + Math.max(insets.bottom, 8),
+          paddingBottom: Math.max(insets.bottom, 8),
           paddingTop: 8,
         },
-        tabBarActiveTintColor: colors.saffron,
+        tabBarActiveTintColor: colors.saffronText,
         tabBarInactiveTintColor: colors.mid,
         tabBarLabelStyle: {
           fontFamily: "Inter_400Regular",
