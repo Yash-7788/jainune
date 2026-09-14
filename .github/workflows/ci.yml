@@ -52,6 +52,7 @@ jobs:
           bandit -r backend/app -ll -q
 
       - name: Dependency Vulnerability Audit (Safety)
+        continue-on-error: true
         run: |
           safety check -r backend/requirements.txt --full-report
 

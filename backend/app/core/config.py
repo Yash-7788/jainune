@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     debug: bool = False
     app_version: str = "1.0.0"
     allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]
+
+    @field_validator("allowed_origins", mode="after")
+    @classmethod
+    def ensure_required_origins(cls, v: List[str]) -> List[str]:
+        required = ["https://app.jainune.com", "https://jainune.com"]
+        res = list(v)
+        for r in required:
+            if r not in res:
+                res.append(r)
+        return res
     sentry_dsn: str = ""
     metrics_secret_token: str = ""
 
