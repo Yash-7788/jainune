@@ -660,6 +660,16 @@ async def verify_google_play(
     if not is_subscription and not is_arcade and not is_rose and not is_superlike:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unrecognized product SKU: {sku}")
 
+    # Server-to-Server Google Android Publisher API verification (prevents forged receipts)
+    from app.services.google_play_verifier import verify_google_play_purchase
+    pkg = body.packageName or "com.jainune.app"
+    await verify_google_play_purchase(
+        package_name=pkg,
+        product_id=sku,
+        purchase_token=purchase_token,
+        is_subscription=is_subscription,
+    )
+
     async with pool.acquire() as conn:
         # Replay Defense: Check if this original_transaction_id has already been processed
         existing_sub = await conn.fetchrow(

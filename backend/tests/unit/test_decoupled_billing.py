@@ -263,6 +263,42 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res_superlike["success"])
         self.assertEqual(res_superlike["superlikes_added"], 1)
 
+    async def test_google_play_verification_production_unconfigured_raises_503(self):
+        """In production environment without service account credentials, verification MUST reject with 503."""
+        from fastapi import HTTPException
+        from app.core.config import settings
+        from app.routers.subscriptions import verify_google_play, GooglePlayVerifyBody
+
+        current_user = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "gender": "male",
+            "subscription_tier": "free",
+        }
+        mock_pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        body = GooglePlayVerifyBody(
+            orderId="GPA.fake-order-id-12345",
+            packageName="com.jainune.app",
+            productId="jainune_ultra_1499",
+            purchaseTime=1700000000000,
+            purchaseToken="fake_token_exploit",
+        )
+
+        orig_env = settings.environment
+        orig_json = settings.google_play_service_account_json
+        try:
+            settings.environment = "production"
+            settings.google_play_service_account_json = ""
+            with self.assertRaises(HTTPException) as ctx:
+                await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
+            self.assertEqual(ctx.exception.status_code, 503)
+        finally:
+            settings.environment = orig_env
+            settings.google_play_service_account_json = orig_json
+
 
 if __name__ == "__main__":
     unittest.main()
+

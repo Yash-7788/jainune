@@ -50,13 +50,17 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql://postgres:password@localhost:5432/jainune_dev"
-    database_pool_min_size: int = 5
-    database_pool_max_size: int = 50
+    database_pool_min_size: int = 2
+    database_pool_max_size: int = 10
     database_statement_timeout_ms: int = 2000
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
-    redis_pool_max_connections: int = 2000
+    redis_pool_max_connections: int = 20
+    redis_fallback_url: str = ""
+
+    # Google Play Billing Service Account
+    google_play_service_account_json: str = ""
 
     # JWT / Auth
     jwt_algorithm: str = "RS256"

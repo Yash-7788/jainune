@@ -14,7 +14,7 @@
 5. [Database Architecture: Supabase PostgreSQL (500 MB 6-Month Optimization)](#database-architecture-supabase-postgresql-500-mb-6-month-optimization)
 6. [Extreme Image Optimization: 100,000 Images in 1 GB Supabase Storage](#extreme-image-optimization-100000-images-in-1-gb-supabase-storage)
 7. [Platform Dual-Distribution & Payment Architecture](#platform-dual-distribution--payment-architecture)
-8. [Authentication Overhaul: Removal of Apple Sign-In & Streamlining](#authentication-overhaul-removal-of-apple-sign-in--streamlining)
+8. [Authentication Architecture: Retained Apple Sign-In & Multi-Provider Auth](#authentication-architecture-retained-apple-sign-in--multi-provider-auth)
 9. [Telemetry, Crashes & Administration: Firebase Spark](#telemetry-crashes--administration-firebase-spark)
 10. [Product Monetization: Subscriptions, Consumables & Arcade Economics](#product-monetization-subscriptions-consumables--arcade-economics)
 11. [Interaction Redesign: Swipe + Inline Prompt Comment Combo](#interaction-redesign-swipe--inline-prompt-comment-combo)
@@ -71,7 +71,7 @@ The core technical imperative of this project is **Zero Ongoing Server Costs** w
 | **Android Billing** | Google Play Billing (`react-native-iap`) | Native Integration | **15% on base** | Mandatory for Play Store digital goods. Zero risk of account ban. |
 | **iOS / PWA Billing**| Razorpay Hosted Web Checkout | Standard Merchant | **~2% + GST** | 100% compliant on web. Bypasses Apple's 15% fee, keeping ~₹389.50 on ₹399 plan. |
 | **Telemetry & Push** | Firebase Spark Plan | Free Forever | **₹0.00** | Unlimited FCM push notifications, Crashlytics crash traces, Google Analytics funnels. |
-| **Authentication** | Google OAuth + SMS OTP + Email | Free Quotas | **₹0.00** | Apple Sign-In removed to eliminate Apple Developer key verification barriers. |
+| **Authentication** | Google OAuth + Apple Sign-In + SMS OTP + Email | Free Quotas | **₹0.00** | Apple Sign-In retained with zero-cost public JWKS verification (`https://appleid.apple.com/auth/keys`). |
 
 ### 2.2 Financial Comparison: Old AWS/Apple Architecture vs New Zero-Cost Model
 
@@ -594,21 +594,19 @@ export async function purchaseAndroidPlan(sku: string) {
 
 ---
 
-## 8. AUTHENTICATION OVERHAUL: REMOVAL OF APPLE SIGN-IN & STREAMLINING
+## 8. AUTHENTICATION ARCHITECTURE: RETAINED APPLE SIGN-IN & MULTI-PROVIDER AUTH
 
-Apple Sign-In requires active enrollment in the $99/year Apple Developer Program. Without paid developer keys, Apple's backend authentication servers reject token validation requests.
+Apple Sign-In is retained, fully functional, and production-hardened. Backend token verification uses Apple's official public JSON Web Key Set (JWKS) at `https://appleid.apple.com/auth/keys` via `PyJWKClient` (RS256 signature verification), incurring zero Apple Developer API costs or private secret key dependencies for basic identity token decoding.
 
-### 8.1 Removal Directives
-1. Remove all Apple Sign-In buttons and references from `mobile/src/screens/auth/AuthMethodScreen.tsx`.
-2. Remove `@invertase/react-native-apple-authentication` and `expo-apple-authentication` dependencies from `package.json`.
-3. Standardize authentication across all platforms to three rock-solid methods:
-   - **Google OAuth**: Fast, 1-tap sign-in on both Android and Web.
-   - **Phone Number SMS OTP**: Primary identity verification and bot deterrent in India.
-   - **Email / Password**: Universal fallback.
+### 8.1 Multi-Provider Authentication Matrix
+1. **Google OAuth (Android / Web / PWA)**: One-tap sign-in via Google ID tokens verified against Google's public token certs.
+2. **Apple Sign-In (iOS App / PWA / Web)**: Retained with official Apple SVG branding and native/web federated sign-in. Backend decodes and cryptographically verifies RS256 signatures via cached JWKS (`backend/app/routers/auth.py:609`).
+3. **Phone Number SMS OTP (India)**: Primary identity verification and bot deterrent via SMS OTP.
+4. **Email / Password**: Universal fallback authentication for all platforms.
 
-### 8.2 Cleaned Authentication Method Interface (`AuthMethodScreen.tsx`)
+### 8.2 Production Authentication Method Interface (`AuthMethodScreen.tsx`)
 ```tsx
-// Excerpt from redesigned AuthMethodScreen.tsx
+// Excerpt from production AuthMethodScreen.tsx
 <View style={styles.buttonContainer}>
   {/* 1. Primary: Google One-Tap */}
   <PrimaryButton
@@ -618,7 +616,15 @@ Apple Sign-In requires active enrollment in the $99/year Apple Developer Program
     style={styles.googleButton}
   />
 
-  {/* 2. Secondary: Mobile Phone OTP */}
+  {/* 2. Retained: Apple Sign-In (Official SVG & JWKS Backend Verification) */}
+  <SecondaryButton
+    title="Continue with Apple"
+    icon={<AppleIcon />}
+    onPress={handleAppleSignIn}
+    style={styles.appleButton}
+  />
+
+  {/* 3. Mobile Phone OTP */}
   <SecondaryButton
     title="Continue with Phone Number"
     icon={<PhoneIcon />}
@@ -626,7 +632,7 @@ Apple Sign-In requires active enrollment in the $99/year Apple Developer Program
     style={styles.phoneButton}
   />
 
-  {/* 3. Fallback: Email Access */}
+  {/* 4. Fallback: Email Access */}
   <GhostButton
     title="Use Email Address"
     onPress={() => navigation.navigate("Email")}
@@ -751,9 +757,10 @@ This is the exact, phase-by-phase execution checklist for any AI coding assistan
 - [x] In `mobile/src/api/profileApi.ts`, update `uploadAvatar` to route the WebP payload to Supabase Storage.
 - [x] In `mobile/src/screens/main/EditProfileScreen.tsx`, enforce the single-image upload rule.
 
-### PHASE 4: Mobile Authentication & Apple Sign-In Removal
-- [x] In `mobile/src/screens/auth/AuthMethodScreen.tsx`, remove Apple Sign-In button, imports, and handlers.
-- [x] Ensure `Google Sign-In`, `Phone OTP`, and `Email` are styled cleanly with tactile feedback.
+### PHASE 4: Mobile Authentication & Apple Sign-In Retained
+- [x] In `mobile/src/screens/auth/AuthMethodScreen.tsx`, retain Apple Sign-In with official Apple branding and native tactile feedback.
+- [x] In `backend/app/routers/auth.py`, verify Apple ID tokens against official JWKS (`https://appleid.apple.com/auth/keys`).
+- [x] Ensure `Google Sign-In`, `Apple Sign-In`, `Phone OTP`, and `Email` are styled cleanly with tactile feedback.
 - [x] In `mobile/src/navigation/AppNavigator.tsx`, verify unauthenticated routing directs cleanly to `AuthMethod`.
 
 ### PHASE 5: Decoupled Billing Architecture

@@ -38,6 +38,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 max_size=settings.database_pool_max_size,
                 timeout=5.0,
                 command_timeout=settings.database_statement_timeout_ms / 1000,
+                statement_cache_size=0,
                 server_settings={"application_name": "jainune-api-primary"},
             )
             log.info("Primary database connection pool initialized successfully.")
@@ -60,6 +61,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 max_size=settings.database_pool_max_size,
                 timeout=5.0,
                 command_timeout=settings.database_statement_timeout_ms / 1000,
+                statement_cache_size=0,
                 server_settings={"application_name": "jainune-api-fallback"},
             )
             log.info("Fallback database connection pool established.")
