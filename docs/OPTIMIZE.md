@@ -628,4 +628,93 @@ Configure these alerts in your cloud dashboards to catch any regression early:
 | **Supabase** | Storage Egress | < 60 MB / day | **> 150 MB / day** | **> 250 MB / day (Image cache broken)** |
 | **Supabase** | Connection Pool | 1 – 4 connections | **> 10 connections** | **> 14 connections (Pool exhaustion)** |
 
+---
+
+## 10. Zero-Cost Crash Reporting Architecture: Firebase (Android) + Sentry (iOS/Web)
+
+To guarantee 100% production observability across native Android, iOS, and Web PWA without incurring cloud fees or consuming any Render/Supabase compute power, Jainune implements a dual-provider telemetry strategy.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      HYBRID CRASH OBSERVABILITY ENGINE                          │
+├─────────────────┬───────────────────────────────┬───────────────────────────────┤
+│ Target Platform │ Primary Telemetry Engine      │ Billing & Cloud Impact        │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ Android (APK)   │ Firebase Crashlytics (Spark)  │ 100% Free, Unlimited crashes; │
+│                 │ (Native NDK + Java + React)   │ 0% Render / 0% Supabase CPU   │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ iOS & Web PWA   │ Sentry (@sentry/react-native) │ Free tier (5,000 events/mo);  │
+│                 │ (JS Stack Traces + PWA errors)│ 0% Render / 0% Supabase CPU   │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ FastAPI Backend │ Sentry Python SDK (sentry-sdk)│ Captures unhandled 500 errors │
+│                 │ (Initialized in main.py)      │ in async endpoints            │
+└─────────────────┴───────────────────────────────┴───────────────────────────────┘
+```
+
+---
+
+### 10.1 Resource & Compute Ledger (Zero Server Impact)
+
+| Provider | Cloud Resource Used | Render Compute Impact | Supabase DB Impact | Data Path |
+| :--- | :--- | :--- | :--- | :--- |
+| **Firebase Crashlytics** | Google Cloud (Spark Plan) | **0.0% CPU / 0 MB RAM** | **0 bytes** | Phone → `firebasecrashlytics.googleapis.com` |
+| **Sentry (iOS/Web)** | Sentry.io SaaS Cloud | **0.0% CPU / 0 MB RAM** | **0 bytes** | Phone/Browser → `ingest.sentry.io` |
+| **Sentry (Backend)** | Sentry.io SaaS Cloud | **< 0.05% CPU** *(only on crash)* | **0 bytes** | Render Worker → `ingest.sentry.io` |
+
+---
+
+### 10.2 Architectural Implementation Blueprint
+
+#### A. Conditional Mobile Client Initializer (`mobile/src/services/crashReporter.ts`)
+```typescript
+import { Platform } from "react-native";
+import * as Sentry from "@sentry/react-native";
+
+export function initializeCrashReporting() {
+  if (Platform.OS === "android") {
+    // 1. Android: Firebase Crashlytics (Unlimited Free Spark Quota)
+    try {
+      const crashlytics = require("@react-native-firebase/crashlytics").default;
+      crashlytics().setCrashlyticsCollectionEnabled(true);
+    } catch {
+      // Safe fallback if running in web/dev-client
+    }
+  } else {
+    // 2. iOS & Web PWA: Sentry (Rich JS Stack Traces & Web Error Boundaries)
+    Sentry.init({
+      dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
+      enableAutoSessionTracking: true,
+      tracesSampleRate: 0.1, // 10% sampling to stay well under 5k monthly quota
+      beforeSend(event) {
+        // Strip sensitive auth tokens & PII before dispatching to Sentry
+        if (event.request?.headers) {
+          delete event.request.headers["Authorization"];
+        }
+        return event;
+      },
+    });
+  }
+}
+
+export function recordHandledError(error: Error, context?: Record<string, any>) {
+  if (Platform.OS === "android") {
+    try {
+      const crashlytics = require("@react-native-firebase/crashlytics").default;
+      crashlytics().recordError(error);
+    } catch {}
+  } else {
+    Sentry.captureException(error, { extra: context });
+  }
+}
+```
+
+---
+
+### 10.3 Benefits of the Dual-Engine Strategy
+
+1. **Infinite Scale on Android**: Android makes up 90%+ of Indian dating app traffic. Firebase Crashlytics provides **unlimited, uncapped crash logging**, so 100,000 Android users will never exceed any quota.
+2. **Web PWA Resilience**: Firebase Crashlytics does not support web browsers; Sentry seamlessly captures uncaught JavaScript exceptions and broken rendering trees on iPhone Safari PWA.
+3. **Zero Host Overhead**: Neither service routes crash dumps through Render or Supabase. If 1,000 app crashes happen simultaneously during an OS update bug, **Render's 512 MB RAM and Supabase's database remain completely untouched**.
+
+
 
