@@ -528,3 +528,104 @@ A system that requires constant manual intervention (clearing bloated tables, un
 - By combining **24-hour background keep-alive heartbeats** (preventing 7-day auto-pauses), **daily automated 45-day pass pruning** (locking DB disk to < 85 MB), and **4-tier client cache-aside** (cutting network egress by > 90%), Jainune 2.0 achieves operational equilibrium.
 - It operates indefinitely as a free, production-grade dating service, scaling to 100,000 active users without generating cloud infrastructure invoices.
 
+---
+
+## 9. Code Inspection Guide: Anti-Patterns, Red Lines & Warning Protocols
+
+To ensure that future developers or code modifications never accidentally overload Render's fragile **512 MB RAM / 0.1 vCPU** environment, all codebase changes must be audited against this strict inspection protocol.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     THE 4 FATAL BACKEND ANTI-PATTERNS                           │
+├──────────────────────┬─────────────────────────────┬────────────────────────────┤
+│ Forbidden Pattern    │ Fatal Cloud Consequence     │ Verified Safe Architecture │
+├──────────────────────┼─────────────────────────────┼────────────────────────────┤
+│ 1. Media Proxying    │ Render RAM spikes 50MB/img; │ Client downloads directly  │
+│ (StreamingResponse)  │ burns 100GB Render egress   │ from Supabase CDN URL      │
+├──────────────────────┼─────────────────────────────┼────────────────────────────┤
+│ 2. Python In-Memory  │ 33,000 rows in Python list  │ Single SQL statement       │
+│ Pruning (for r in..) │ exhausts 512MB RAM (OOM)    │ executed inside Postgres   │
+├──────────────────────┼─────────────────────────────┼────────────────────────────┤
+│ 3. Server Image      │ Pillow/Sharp locks 0.1 vCPU;│ Transcoding strictly on    │
+│ Transcoding (Pillow) │ 5 concurrent uploads crash  │ client (expo-manipulator)  │
+├──────────────────────┼─────────────────────────────┼────────────────────────────┤
+│ 4. Unbounded SQL     │ Loading 5,000 rows in one   │ Strict B-Tree cursor limit │
+│ (SELECT without lim) │ query consumes 30MB heap    │ clamped to 20-30 rows      │
+└──────────────────────┴─────────────────────────────┴────────────────────────────┘
+```
+
+---
+
+### 9.1 The 4 Fatal Anti-Patterns (Inspection Checklist)
+
+#### Anti-Pattern 1: Media Proxying (Never Serve Media Through FastAPI)
+- **The Violation**: Adding an endpoint like `@router.get("/photos/{id}")` that fetches image bytes from S3/Supabase and streams them via `StreamingResponse` or `FileResponse`.
+- **Why It Is Fatal**: 
+  1. Every photo viewed transfers through Render, burning Render's 100 GB monthly bandwidth in days.
+  2. In-flight file buffers consume 10 MB – 30 MB of Render RAM per simultaneous viewer.
+- **Inspection Rule**:
+  - `backend/app/routers/media.py` must **only** issue presigned S3/Supabase upload URLs or return direct CDN string URLs (`https://xyz.supabase.co/storage/v1/object/public/...`).
+  - Render never touches photo binary bytes.
+
+#### Anti-Pattern 2: In-Memory Row Deletions
+- **The Violation**:
+  ```python
+  # FATAL: Pulls 33,000 records across the network into Python memory
+  rows = await conn.fetch("SELECT id FROM interactions WHERE action_type = 'pass' AND ...")
+  for row in rows:
+      await conn.execute("DELETE FROM interactions WHERE id = $1", row['id'])
+  ```
+- **Why It Is Fatal**: Allocates 33,000 Python dicts in Render RAM, triggering garbage collection thrashing and potential OOM crashes.
+- **Inspection Rule**:
+  - Deletions must execute strictly as a single atomic SQL statement inside Postgres:
+    `DELETE FROM interactions WHERE action_type = 'pass' AND created_at < NOW() - INTERVAL '45 days';`
+  - Render RAM consumption: **< 1 KB**.
+
+#### Anti-Pattern 3: Server-Side Image Manipulation
+- **The Violation**: Installing `Pillow`, `Pillow-SIMD`, `wand`, or `opencv-python` in `backend/requirements.txt` to resize avatars.
+- **Why It Is Fatal**: Decompressing a 4 MB camera JPEG into uncompressed 32-bit RGBA bitmap in Python memory consumes **48 MB RAM per photo**. Ten concurrent uploads will instantly kill the 512 MB container.
+- **Inspection Rule**:
+  - `requirements.txt` must remain completely free of image processing libraries.
+  - Verification: All image optimization is enforced on the mobile client device via `mobile/src/utils/imageOptimizer.ts`.
+
+#### Anti-Pattern 4: Unbounded SQL Queries
+- **The Violation**: Any endpoint executing `SELECT * FROM ...` without an explicit `LIMIT` clause.
+- **Inspection Rule**:
+  - Every feed, chat, interaction, and log query must have an enforced `limit` parameter clamped to `<= 30`.
+
+---
+
+### 9.2 Automated Verification Commands (Pre-Push Audit)
+
+Run these terminal commands to mathematically verify that zero anti-patterns exist in the backend:
+
+```bash
+# 1. Assert zero image processing libraries in backend requirements
+grep -Ei "(pillow|opencv|imageio|wand)" backend/requirements.txt
+# Expected: 0 matches
+
+# 2. Assert zero binary file streaming in FastAPI routers
+grep -rnEi "(FileResponse|StreamingResponse)" backend/app/routers/
+# Expected: 0 matches
+
+# 3. Assert all chat & feed queries contain LIMIT bounds
+grep -rnEi "SELECT .* FROM (messages|interactions|users)" backend/app/ | grep -v "LIMIT"
+# Expected: Only count/aggregate queries or locked single-row lookups
+```
+
+---
+
+### 9.3 Production Observability & Warning Thresholds
+
+Configure these alerts in your cloud dashboards to catch any regression early:
+
+| Dashboard | Metric | Safe Operational Range | Warning Threshold (Investigate) | Critical Threshold (Immediate Fix) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Render** | Memory (RAM) | 60 MB – 140 MB | **> 350 MB (70%)** | **> 450 MB (90% - Risk of OOM)** |
+| **Render** | CPU Usage | 2% – 15% | **> 50% for > 5 min** | **> 85% (Event loop choking)** |
+| **Render** | Outbound Bandwidth | < 150 MB / day | **> 1.5 GB / day** | **> 3 GB / day (Breaching 100GB cap)** |
+| **Supabase** | DB Disk Usage | 60 MB – 120 MB | **> 350 MB (70%)** | **> 450 MB (Auto-prune failed)** |
+| **Supabase** | Storage Egress | < 60 MB / day | **> 150 MB / day** | **> 250 MB / day (Image cache broken)** |
+| **Supabase** | Connection Pool | 1 – 4 connections | **> 10 connections** | **> 14 connections (Pool exhaustion)** |
+
+
