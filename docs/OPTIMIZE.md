@@ -803,6 +803,71 @@ A common developer mistake is confusing which cloud component executes which com
   - Render CPU consumed: **~0.001%**.
   - Supabase database engine executes the deletion and releases index blocks. Even if this operation takes 2–3 seconds on a massive table, it runs asynchronously in the background with zero user disruption.
 
+---
+
+## 13. Progressive Web App (PWA) Security vs Native Mobile Security Architecture
+
+Deploying Jainune as an installable standalone Web PWA for Apple iOS devices requires a fundamentally different security model than native Android `.apk` or native iOS `.ipa` binary distributions.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    PWA SECURITY VS NATIVE MOBILE SECURITY                       │
+├─────────────────┬───────────────────────────────┬───────────────────────────────┤
+│ Security Domain │ Native Mobile (Android APK)   │ Web PWA (Apple WebKit / Safari│
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ Binary Shield   │ ProGuard bytecode obfuscation │ Minification & Terser mangling│
+│                 │ & Gradle R8 compilation       │ (No native binaries exist)    │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ Dynamic Defense │ Frida detection, Root detect  │ CSP headers, HSTS, FrameGuard │
+│                 │ & SafetyNet / Play Integrity  │ & Safari sandbox isolation    │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ DevTools Risk   │ Requires USB ADB / JTAG attach│ Open to Safari Web Inspector  │
+│                 │ to inspect memory             │ via Mac USB debug cable       │
+├─────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ Defense Origin  │ Client + Server cooperation   │ 100% Server Authoritative     │
+└─────────────────┴───────────────────────────────┴───────────────────────────────┘
+```
+
+### 13.1 Does PWA Support Gradle, ProGuard, or Frida?
+- **No, by physical architecture.**
+  - **Gradle & ProGuard / R8** are Android native buildchain compilers. They transform Java/Kotlin bytecode into Dalvik/ART executable formats (`classes.dex`). A PWA on iOS does not contain Java, Kotlin, Dalvik, or Gradle.
+  - **Frida**: Frida is a dynamic binary instrumentation toolkit designed to hook native Objective-C/Swift/C++ machine code symbols in memory. An iOS PWA runs strictly within **Apple WebKit's standalone WebProcess sandbox**. There is no compiled binary image for Frida to hook.
+
+---
+
+### 13.2 What PWA Actually Requires: Modern Web Application Security
+
+Instead of binary obfuscation, PWA security relies on 4 defensive perimeters:
+
+#### 1. Strict HTTP Security Headers (Configured in `mobile/vercel.json`)
+- `Content-Security-Policy (CSP)`: Enforces strict whitelisting of approved scripts, images, and API endpoints. Disallows inline script execution (`unsafe-inline`) and `eval()`, preventing Cross-Site Scripting (XSS).
+- `X-Frame-Options: DENY`: Prohibits iframe embedding, eliminating clickjacking attacks.
+- `Strict-Transport-Security (HSTS)`: `max-age=31536000; includeSubDomains; preload` forces 100% SSL/TLS encryption, defeating SSL stripping and man-in-the-middle attacks.
+- `X-Content-Type-Options: nosniff`: Prevents MIME-confusion attacks.
+- `Referrer-Policy: strict-origin-when-cross-origin`: Strips URL paths and parameters from outgoing referrers, preventing token leakage.
+
+#### 2. DevTools & Source Code Non-Leakage Protocols
+Because any user with a Mac and iPhone can inspect WebKit DevTools:
+- **Disable Production Source Maps**: Production build configurations must emit **zero `.map` files**. Without source maps, the browser DevTools cannot reconstruct the original TypeScript codebase.
+- **Terser Mangling & Minification**: Variable, function, and parameter names are aggressively compressed and scrambled (e.g. `validateCoordinatesIntegrity` becomes `function a(e){...}`).
+- **Console Log Stripping**: `babel-plugin-transform-remove-console` strips all `console.log` and `console.debug` statements in production bundles, preventing sensitive state from leaking into the Safari Web Inspector.
+
+---
+
+### 13.3 The Golden Rule of PWA Security: Zero Client Trust
+
+> [!IMPORTANT]
+> **Assume the client can always open DevTools (`F12` / Web Inspector).**
+
+In a PWA environment:
+1. **Never Put Secret Keys in Frontend Bundles**: Only public identifiers (`EXPO_PUBLIC_API_URL`, public CDN paths) may reside on the client. Database passwords, S3 secret keys, and JWT private keys remain exclusively in server environment variables on Render.
+2. **Never Rely on Client-Side Validation as a Gate**: Frontend form validation is purely for UI/UX ergonomics. The **FastAPI backend is the authoritative fortress**:
+   - Validates every RS256 JWT signature.
+   - Asserts caller ownership of resources (`_assert_participant`).
+   - Re-validates coordinate anti-manipulation checks.
+   - Enforces rate limits and daily swipe quotas on every request.
+
+
 
 
 
