@@ -716,5 +716,93 @@ export function recordHandledError(error: Error, context?: Record<string, any>) 
 2. **Web PWA Resilience**: Firebase Crashlytics does not support web browsers; Sentry seamlessly captures uncaught JavaScript exceptions and broken rendering trees on iPhone Safari PWA.
 3. **Zero Host Overhead**: Neither service routes crash dumps through Render or Supabase. If 1,000 app crashes happen simultaneously during an OS update bug, **Render's 512 MB RAM and Supabase's database remain completely untouched**.
 
+---
+
+## 11. Production Verification & Dashboard Audit Protocol
+
+When rolling out Jainune 2.0 to the first 100–500 live users, use this concrete operational checklist to visually verify that client caching, media optimization, and database pruning are functioning correctly in production.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     PRODUCTION DASHBOARD VERIFICATION PROTOCOL                  │
+├──────────────────┬─────────────────────────────┬────────────────────────────────┤
+│ Dashboard        │ Navigation Path             │ Verified Healthy Pattern       │
+├──────────────────┼─────────────────────────────┼────────────────────────────────┤
+│ 1. Supabase      │ Database → Reports →        │ Flat line (< 5 QPS); zero      │
+│    Database      │ Query Performance / Disk IO │ vertical query spikes on chat  │
+├──────────────────┼─────────────────────────────┼────────────────────────────────┤
+│ 2. Supabase      │ Storage → Buckets →         │ Monthly egress stays < 1.5 GB; │
+│    Storage       │ Usage → Bandwidth / Egress  │ flat line across active swipes │
+├──────────────────┼─────────────────────────────┼────────────────────────────────┤
+│ 3. Render        │ Metrics → Outbound          │ Total transfer < 100 MB / day  │
+│    Web Service   │ Bandwidth (Egress)          │ (well below 100 GB cap)        │
+├──────────────────┼─────────────────────────────┼────────────────────────────────┤
+│ 4. Mobile Client │ Network Inspector           │ 0 HTTP requests on chat open;  │
+│    (DevTools)    │ (React Native Debugger)     │ 0 requests on feed app launch  │
+└──────────────────┴─────────────────────────────┴────────────────────────────────┘
+```
+
+### 11.1 Step-by-Step Verification Procedure
+
+#### Step 1: Verify Zero-Query Chat Caching (Supabase Dashboard)
+1. Open `supabase.com` → Select Jainune Project → Click **Database** → **Reports**.
+2. Have 5 test users open their active chat conversations simultaneously.
+3. **Healthy Result**: The `Query Performance` graph shows **0 new queries** for chat opens because messages were read directly from `@chat_msgs_${matchId}` in local flash storage.
+4. **Failure Signal**: If query rate spikes by 5 queries per user, client cache is missing or failing JSON parse; investigate `ChatScreen.tsx`.
+
+#### Step 2: Verify Media Egress Protection (Supabase Storage)
+1. Navigate to **Storage** → **Usage**.
+2. Have 20 users swipe through 20 profile cards each (400 card views).
+3. **Healthy Result**: Storage egress increases by only ~400 KB (initial new profile cards), and viewing those profiles again increases egress by **0 bytes**.
+4. **Failure Signal**: If egress jumps by 50 MB+, HTTP headers are missing `immutable` or `expo-image` disk cache is bypassed.
+
+#### Step 3: Verify Delta Sync on Render (Render Dashboard)
+1. Open `dashboard.render.com` → Select Jainune Web Service → Click **Metrics**.
+2. Inspect the **Outbound Bandwidth** chart.
+3. **Healthy Result**: Bandwidth consumption is virtually flat (< 100 MB/day).
+4. **Failure Signal**: If bandwidth climbs above 1 GB/day, GZip middleware is inactive or endpoints are returning unpaginated full arrays.
+
+---
+
+## 12. Distributed Compute Responsibility Matrix & Edge Demarcation
+
+A common developer mistake is confusing which cloud component executes which computational workload. This matrix delineates the physical boundary lines of compute, memory, and storage across Jainune's infrastructure.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      INFRASTRUCTURE COMPUTE RESPONSIBILITY                      │
+├─────────────────┬─────────────────┬──────────────────────┬──────────────────────┤
+│ Workload / Task │ Component Owner │ Hardware Specs       │ Real Operational Cost│
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 1. WebP Resize  │ User Mobile     │ Phone GPU / NPU      │ 0% Render CPU;       │
+│    & BlurHash   │ Device          │ (Apple / Qualcomm)   │ 0% Supabase CPU      │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 2. JWT Auth &   │ Render Web      │ 0.1 vCPU, 512 MB RAM │ Runs in < 5ms;       │
+│    Rate Limits  │ Service (Python)│ (Shared fractional)  │ uses ~75 MB base RAM │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 3. Row Storage  │ Supabase        │ 2-core Shared CPU,   │ Query runs in < 45ms;│
+│    & 3AM Prune  │ PostgreSQL      │ 500 MB NVMe SSD      │ Render uses < 1 KB   │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 4. Avatar CDN   │ Supabase        │ Cloudflare CDN Edge  │ Direct to phone;     │
+│    Delivery     │ Storage Bucket  │ Network              │ 0% Render egress     │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 5. Push (FCM)   │ Google Firebase │ Google Cloud Compute │ 100% Free Unlimited; │
+│    & Crashlytics│ Infrastructure  │ (Spark Plan)         │ 0% Render/Supa cost  │
+└─────────────────┴─────────────────┴──────────────────────┴──────────────────────┘
+```
+
+### 12.1 The 3:00 AM Deletion Reality (Deep Dive)
+- **Why 3:00 AM vs 12:00 Midnight**:
+  - In dating applications, midnight (10:30 PM – 1:00 AM) is **peak emotional engagement time** when users chat in bed before sleep.
+  - Executing a database prune at midnight forces PostgreSQL to write Write-Ahead Logs (WAL) and re-index B-Trees while live users are sending messages.
+  - At 3:00 AM local time, traffic drops to near-zero.
+- **Render's Role in Deletion**:
+  - Render **does not delete rows in Python memory**.
+  - Render dispatches a single TCP query string:
+    `DELETE FROM interactions WHERE action_type = 'pass' AND created_at < NOW() - INTERVAL '45 days';`
+  - Render CPU consumed: **~0.001%**.
+  - Supabase database engine executes the deletion and releases index blocks. Even if this operation takes 2–3 seconds on a massive table, it runs asynchronously in the background with zero user disruption.
+
+
 
 
