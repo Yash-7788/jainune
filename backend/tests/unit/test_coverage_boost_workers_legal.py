@@ -685,8 +685,8 @@ class TestCoverageBoost(unittest.TestCase):
         self.assertIsInstance(plans, list)
         self.assertGreater(len(plans), 0)
         plan_ids = [p["plan_id"] for p in plans]
-        self.assertIn("jainune_plus_monthly", plan_ids)
-        self.assertIn("jainune_plus_quarterly", plan_ids)
+        self.assertIn("jainune_base_399", plan_ids)
+        self.assertIn("jainune_premium_799", plan_ids)
 
     def test_payment_verify_signature_empty_inputs(self):
         from app.services.payment_service import verify_payment_signature

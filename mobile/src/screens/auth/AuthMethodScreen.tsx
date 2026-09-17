@@ -20,18 +20,20 @@ import {
   NativeModules,
   Animated,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, RouteProp } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import * as AppleAuthentication from "expo-apple-authentication";
 import * as Haptics from "expo-haptics";
 import Svg, { Path } from "react-native-svg";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import { PrimaryButton, GhostButton, ErrorToast } from "../../components/core";
-import { googleSignIn, appleSignIn } from "../../api/authApi";
+import { googleSignIn } from "../../api/authApi";
 import { useAuthStore } from "../../store/authStore";
 import { extractError } from "../../api/client";
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
 import type { AuthStackParams } from "../../navigation/AppNavigator";
+
+type Nav = NativeStackNavigationProp<AuthStackParams, "AuthMethod">;
+type Route = RouteProp<AuthStackParams, "AuthMethod">;
 
 // Configure Google Sign-In at module level (safeguarded for Expo Go)
 let GoogleSignin: any = null;
@@ -47,8 +49,6 @@ try {
 } catch {
   // Native module unavailable in standard Expo Go
 }
-
-type Nav = NativeStackNavigationProp<AuthStackParams, "AuthMethod">;
 
 // Official Google Multicolor G Logo
 function GoogleLogo({ size = 20 }: { size?: number }) {
@@ -74,22 +74,23 @@ function GoogleLogo({ size = 20 }: { size?: number }) {
   );
 }
 
-// Official Apple Silhouette Logo
-function AppleLogo({ size = 20, color = "#000000" }: { size?: number; color?: string }) {
-  return (
-    <Svg width={size} height={size} viewBox="0 0 170 170">
-      <Path
-        d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.19-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.26 2.13-9.5 3.24-12.74 3.35-4.35.13-9.16-1.9-14.42-6.08-3.69-3.08-7.7-7.94-12.04-14.58-6.19-9.52-11.03-20.4-14.54-32.63-3.5-12.23-5.26-23.75-5.26-34.56 0-14.72 3.65-27.12 10.96-37.21 7.3-10.1 16.5-15.26 27.6-15.48 4.79 0 10.15 1.25 16.08 3.75 5.92 2.5 9.94 3.79 12.05 3.87 1.63 0 5.86-1.39 12.68-4.17 6.82-2.77 12.63-3.99 17.43-3.64 13.06.75 23.36 5.66 30.9 14.73-11.53 7.08-17.15 16.92-16.86 29.5.3 9.92 4.13 18.25 11.51 25 3.48 3.16 7.42 5.56 11.83 7.21-2.5 7.4-5.32 14.56-8.47 21.49zm-38.44-106.87c0-7.39 2.65-14.28 7.95-20.67 5.3-6.4 11.75-10.3 19.34-11.71.22 1.3.33 2.55.33 3.75 0 7.39-2.78 14.41-8.34 21.05-5.56 6.64-12.19 10.42-19.89 11.33-.22-1.31-.34-2.56-.34-3.75z"
-        fill={color}
-      />
-    </Svg>
-  );
-}
+
 
 export default function AuthMethodScreen() {
   const navigation = useNavigation<Nav>();
+  const route = useRoute<Route>();
+  const phone = route.params?.phone;
+  const phoneVerified = route.params?.phoneVerified;
+
+  useEffect(() => {
+    if (!phoneVerified) {
+      // Direct users to verify mobile number first to keep bots out
+      navigation.replace("Phone");
+    }
+  }, [phoneVerified, navigation]);
+
   const setAuthenticated = useAuthStore((s) => s.setAuthenticated);
-  const [loading, setLoading] = React.useState<"google" | "apple" | null>(null);
+  const [loading, setLoading] = React.useState<"google" | null>(null);
   const [error, setError] = React.useState<{ title: string; message: string } | null>(null);
   const [legalDoc, setLegalDoc] = React.useState<LegalDocType | null>(null);
 
@@ -154,42 +155,7 @@ export default function AuthMethodScreen() {
     }
   };
 
-  const handleApple = async () => {
-    setLoading("apple");
-    setError(null);
 
-    if (Platform.OS !== "ios") {
-      setError({
-        title: "Apple Sign-In",
-        message:
-          "Apple Sign-In is only available on Apple iOS devices. Please continue with Phone or Email login on Android.",
-      });
-      setLoading(null);
-      return;
-    }
-
-    try {
-      const credential = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
-      });
-      const idToken = credential.identityToken;
-      if (!idToken) throw new Error("No identity token from Apple");
-
-      const firstName = credential.fullName?.givenName ?? null;
-      const data = await appleSignIn(idToken, firstName);
-      setAuthenticated(data.user_id, data.is_new_user, data.onboarding_completed);
-    } catch (err: unknown) {
-      if ((err as { code?: string }).code === "ERR_CANCELED") {
-        return; // User cancelled — not an error
-      }
-      setError(extractError(err));
-    } finally {
-      setLoading(null);
-    }
-  };
 
   return (
     <View style={styles.container}>
@@ -209,8 +175,11 @@ export default function AuthMethodScreen() {
           },
         ]}
       >
-        <Text style={styles.title}>Sign in or create{"\n"}your account</Text>
-        <Text style={styles.sub}>Choose how you'd like to continue</Text>
+        <Text style={styles.title}>Connect Google{"\n"}or Email</Text>
+        <Text style={styles.sub}>
+          {phone ? `Phone verified (${phone})` : "Phone verified ✅"}
+          {"\n"}Sign in with Google or Email to complete setup.
+        </Text>
       </Animated.View>
 
       {/* Methods Card with 2px Black Bordered Buttons & Micro-Animations */}
@@ -223,17 +192,12 @@ export default function AuthMethodScreen() {
           },
         ]}
       >
-        {/* Phone — primary with thick black border */}
-        <PrimaryButton
-          label="Continue with Phone"
-          onPress={() => navigation.navigate("Phone")}
-        />
-
-        {/* Email with thick black border */}
-        <GhostButton
-          label="Continue with Email"
-          onPress={() => navigation.navigate("Email")}
-          style={{ marginTop: spacing.md }}
+        {/* Google — Official Multicolor G Logo with 2px Black Border */}
+        <SocialButton
+          label="Continue with Google"
+          onPress={handleGoogle}
+          loading={loading === "google"}
+          icon={<GoogleLogo size={20} />}
         />
 
         {/* Tactile Divider */}
@@ -243,31 +207,16 @@ export default function AuthMethodScreen() {
           <View style={styles.dividerLine} />
         </View>
 
-        {/* Google — Official Multicolor G Logo with 2px Black Border */}
-        <SocialButton
-          label="Continue with Google"
-          onPress={handleGoogle}
-          loading={loading === "google"}
-          icon={<GoogleLogo size={20} />}
+        {/* Email with thick black border */}
+        <PrimaryButton
+          label="Continue with Email"
+          onPress={() =>
+            navigation.navigate("Email", {
+              phone: route.params?.phone,
+              phoneVerified: true,
+            })
+          }
         />
-
-        {/* Apple — Official Apple Logo with 2px Black Border */}
-        {Platform.OS === "ios" ? (
-          <AppleAuthentication.AppleAuthenticationButton
-            buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
-            buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
-            cornerRadius={radii.full}
-            style={styles.appleBtn}
-            onPress={handleApple}
-          />
-        ) : (
-          <SocialButton
-            label="Continue with Apple"
-            onPress={handleApple}
-            loading={loading === "apple"}
-            icon={<AppleLogo size={20} color="#1C1C1E" />}
-          />
-        )}
       </Animated.View>
 
       {/* Footer Legal Terms */}
@@ -433,10 +382,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.dark,
   },
-  appleBtn: {
-    height: 52,
-    marginBottom: spacing.md,
-  },
+
   legal: {
     ...typography.bodySmall,
     color: colors.mid,

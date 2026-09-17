@@ -226,8 +226,8 @@ async def record_interaction_action(
                     today_str = get_ist_today_str()
                     like_key = f"daily_likes:{actor_id}:{today_str}"
 
-                    # Quotas: free=10, gold=50, platinum/jainune_plus=unlimited
-                    limit = 10 if tier == "free" else (50 if tier == "gold" else None)
+                    # Quotas: free=10, gold=50, platinum/jainune_plus/base_399/premium_799/ultra_1499=unlimited
+                    limit = 10 if tier in ("free", None) else (50 if tier == "gold" else None)
                     if limit is not None:
                         tomorrow_midnight = (ist_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                         ttl_seconds = max(int((tomorrow_midnight - ist_now).total_seconds()), 60)
@@ -594,7 +594,7 @@ async def get_users_who_liked_me(
             tier = await payment_service.get_effective_user_tier(user_id, conn)
             rows = await conn.fetch(query, user_id, limit)
 
-    is_subscriber = tier in ("jainune_plus", "gold", "platinum")
+    is_subscriber = tier in ("premium_799", "ultra_1499", "jainune_plus", "gold", "platinum")
     today = date.today()
     likes = []
     for idx, r in enumerate(rows):

@@ -17,9 +17,21 @@ class SubscriptionTier(str, Enum):
     gold = "gold"
     platinum = "platinum"
     jainune_plus = "jainune_plus"
+    base_399 = "base_399"
+    premium_799 = "premium_799"
+    ultra_1499 = "ultra_1499"
 
 
 class PlanId(str, Enum):
+    # Phase 5 & 6 Decoupled Subscriptions & Consumables
+    jainune_base_399 = "jainune_base_399"
+    jainune_premium_799 = "jainune_premium_799"
+    jainune_ultra_1499 = "jainune_ultra_1499"
+    arcade_spins_3 = "arcade_spins_3"
+    arcade_spins_10 = "arcade_spins_10"
+    rose_single_49 = "rose_single_49"
+    slingshot_superlike_29 = "slingshot_superlike_29"
+
     # Jainune+ flagship tiers (SUBSCRIPTION_SPEC.md)
     jainune_plus_monthly = "jainune_plus_monthly"
     jainune_plus_quarterly = "jainune_plus_quarterly"

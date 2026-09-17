@@ -50,18 +50,15 @@ import {
 import { purchaseSubscription, syncPendingPayment } from "../../services/billingService";
 
 const FEATURES = [
-  "30 daily intentional likes (vs 10 free)",
-  "Ambient Voice Canvas — hear voice before matching",
-  "60-Second Ephemeral Voice Spark on every match",
-  "Daily Blind Dilemma Duels at 20:00 IST",
-  "In-chat Question Bounties (simultaneous reveal)",
-  "Mutual Chemistry Ticker & 4-phase match moment",
-  "Sunday Bangalore City Drops (curated 4-person table)",
-  "Bangalore Vibe Map orbital filtering",
+  "Unlimited intentional likes & profile rewinds",
+  "City / Travel Passport — connect across India",
+  "Beeline — 'See Who Liked You' with instant reveal",
+  "Weekly Standout Roses (up to 7/week on Ultra)",
+  "Monthly Serendipity Arcade Spins (up to 30/mo)",
+  "In-chat Question Bounties & Read Receipts",
   "Deep Jain dietary filters (sect, root veg, Paryushan)",
-  "1 Monthly Momentum Revival Pass",
-  "Priority compatibility sorting in Liked You tab",
-  "Jainune+ profile badge",
+  "Incognito Browsing & Priority Top Deck placement",
+  "Official Jainune+ verified membership badge",
 ];
 
 export default function SubscriptionsScreen() {
@@ -69,7 +66,7 @@ export default function SubscriptionsScreen() {
   const [status, setStatus] = useState<SubscriptionStatus | null>(null);
   const [plans, setPlans] = useState<SubscriptionPlan[]>(SUBSCRIPTION_PLANS);
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan>(
-    SUBSCRIPTION_PLANS[1] // default to quarterly (recommended)
+    SUBSCRIPTION_PLANS[1] // default to Premium Plan (recommended)
   );
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(false);
@@ -223,7 +220,10 @@ export default function SubscriptionsScreen() {
   }
 
   const isActive =
-    (status?.tier === "jainune_plus" ||
+    (status?.tier === "base_399" ||
+      status?.tier === "premium_799" ||
+      status?.tier === "ultra_1499" ||
+      status?.tier === "jainune_plus" ||
       status?.tier === "plus" ||
       status?.tier === "gold" ||
       status?.tier === "platinum" ||

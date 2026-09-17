@@ -83,12 +83,17 @@ export default function OTPVerifyScreen() {
       let data;
       if (isEmail) {
         // Extract email from masked — we stored the real email in phoneNumber field for email flow
-        data = await verifyEmailOTP(phoneNumber, otp);
+        const data = await verifyEmailOTP(phoneNumber, otp);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setAuthenticated(data.user_id, data.is_new_user, data.onboarding_completed);
       } else {
-        data = await verifyPhoneOTP(phoneNumber, otp);
+        await verifyPhoneOTP(phoneNumber, otp);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        navigation.navigate("AuthMethod", {
+          phone: phoneNumber,
+          phoneVerified: true,
+        });
       }
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setAuthenticated(data.user_id, data.is_new_user, data.onboarding_completed);
     } catch (err) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       shake();

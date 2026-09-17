@@ -44,6 +44,7 @@ import {
   MyProfile,
 } from "../../api/profileApi";
 import { uploadToPresignedUrl, extractError } from "../../api/client";
+import { optimizeProfilePhoto } from "../../utils/imageOptimizer";
 import { validateName } from "../../security/inputValidation";
 import {
   enableScreenCaptureProtection,
@@ -201,24 +202,18 @@ export default function EditProfileScreen() {
   const uploadPickedAsset = useCallback(async (asset: ImagePicker.ImagePickerAsset) => {
     setUploadingPhoto(true);
     try {
-      const mime = asset.type === "image" ? "image/jpeg" : "image/jpeg";
-      const sizeBytes = asset.fileSize || 1024 * 1024;
-      const nextPos = Math.min(6, photos.length + 1);
-      const presign = await presignUpload(mime, sizeBytes, "photo", nextPos);
-      await uploadToPresignedUrl(presign.upload_url, asset.uri, mime, presign.presigned_fields);
+      const optimized = await optimizeProfilePhoto(asset.uri);
+      const presign = await presignUpload("image/webp", optimized.fileSizeBytes, "photo", 1);
+      await uploadToPresignedUrl(presign.upload_url, optimized.uri, "image/webp", presign.presigned_fields);
       await addPhoto(presign.media_id);
-      setPhotos((prev) => [
-        ...prev,
-        { id: presign.media_id, url: asset.uri, order: prev.length },
-      ]);
-    } catch (err) {
+      setPhotos([{ id: presign.media_id, url: optimized.uri, order: 0 }]);
+    } catch (err: any) {
       Alert.alert("Upload Failed", extractError(err).message);
     } finally {
       setUploadingPhoto(false);
     }
-  }, [photos.length]);
+  }, []);
 
-  // Android low-memory Activity recreation recovery
   useEffect(() => {
     if (Platform.OS === "android") {
       ImagePicker.getPendingResultAsync()
@@ -227,7 +222,6 @@ export default function EditProfileScreen() {
             for (const res of results) {
               if ("canceled" in res && !res.canceled && res.assets && res.assets.length > 0) {
                 uploadPickedAsset(res.assets[0]);
-                break;
               }
             }
           }
@@ -237,11 +231,6 @@ export default function EditProfileScreen() {
   }, [uploadPickedAsset]);
 
   const handlePickAndUploadPhoto = async () => {
-    if (photos.length >= 6) {
-      Alert.alert("Maximum Photos", "You can upload up to 6 photos.");
-      return;
-    }
-
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") {
       Alert.alert(
@@ -380,33 +369,35 @@ export default function EditProfileScreen() {
 
       {/* Photos Section */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Profile Photos (Max 6)</Text>
+        <Text style={styles.sectionTitle}>Profile Photo</Text>
         <Text style={styles.sectionHint}>
-          The first photo is your primary card image. Tap a photo to delete.
+          Your primary avatar photo (auto-compressed to WebP ≤15 KB). Tap to delete or replace.
         </Text>
+
         <View style={styles.photosGrid}>
           {photos.map((photo, index) => (
             <TouchableOpacity
               key={photo.id}
               style={styles.photoBox}
               onPress={() => handleDeletePhoto(photo.id)}
+              accessibilityLabel="Delete photo"
             >
               <Image source={{ uri: photo.url }} style={styles.photoImg} />
-              {index === 0 && (
-                <View style={styles.mainBadge}>
-                  <Text style={styles.mainBadgeText}>Main</Text>
-                </View>
-              )}
+              <View style={styles.mainBadge}>
+                <Text style={styles.mainBadgeText}>Main</Text>
+              </View>
               <View style={styles.deleteOverlay}>
                 <Text style={styles.deleteOverlayText}>✕</Text>
               </View>
             </TouchableOpacity>
           ))}
-          {photos.length < 6 && (
+
+          {photos.length === 0 && (
             <TouchableOpacity
               style={styles.addPhotoBox}
               onPress={handlePickAndUploadPhoto}
               disabled={uploadingPhoto}
+              accessibilityLabel="Upload photo"
             >
               {uploadingPhoto ? (
                 <ActivityIndicator color={colors.saffron} />
@@ -468,33 +459,10 @@ export default function EditProfileScreen() {
 
       {/* Voice Snapshot Section */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Voice Snapshot (7 Seconds)</Text>
+        <Text style={styles.sectionTitle}>Voice Snapshot</Text>
         <Text style={styles.sectionHint}>
-          {voiceSnapshotUrl
-            ? "✦ Voice snapshot active on your profile. Tap below to re-record."
-            : "Record a 7-second voice snippet to increase authentic connections."}
+          Voice snapshots are retired in Jainune v2.
         </Text>
-        <TouchableOpacity
-          style={[
-            styles.voiceBtn,
-            isRecording && styles.voiceBtnRecording,
-            uploadingVoice && styles.disabledBtn,
-          ]}
-          onPress={handleToggleVoiceRecording}
-          disabled={uploadingVoice}
-        >
-          {uploadingVoice ? (
-            <ActivityIndicator color={colors.white} />
-          ) : (
-            <Text style={styles.voiceBtnText}>
-              {isRecording
-                ? "⏹ Stop & Save Voice Snapshot"
-                : voiceSnapshotUrl
-                ? "🎙️ Re-record Voice Snapshot"
-                : "🎙️ Record 7s Voice Snapshot"}
-            </Text>
-          )}
-        </TouchableOpacity>
       </View>
 
       {/* Community & Dietary Section */}

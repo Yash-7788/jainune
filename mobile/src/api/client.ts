@@ -20,9 +20,15 @@ const DEFAULT_DEV_URL =
     ? "http://10.0.2.2:8000/v1"
     : "http://localhost:8000/v1";
 
+function normalizeApiUrl(raw?: string): string {
+  if (!raw) return "";
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
 const PRIMARY_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ||
-  (__DEV__ ? DEFAULT_DEV_URL : "https://api.jainune.com/v1");
+  normalizeApiUrl(process.env.EXPO_PUBLIC_API_URL) ||
+  (__DEV__ ? DEFAULT_DEV_URL : "https://jainune-backend-api.onrender.com/v1");
 const SERVER_URLS = [PRIMARY_BASE_URL];
 
 export const SECURE_KEYS = {

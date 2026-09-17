@@ -25,16 +25,6 @@ import asyncio
 import logging
 
 import asyncpg
-try:
-    import boto3
-    from botocore.exceptions import BotoCoreError as _BotoCoreError, ClientError as _ClientError
-    BotoCoreError = _BotoCoreError if isinstance(_BotoCoreError, type) and issubclass(_BotoCoreError, BaseException) else Exception
-    ClientError = _ClientError if isinstance(_ClientError, type) and issubclass(_ClientError, BaseException) else Exception
-except ImportError:
-    boto3 = None
-    BotoCoreError = Exception
-    ClientError = Exception
-
 from app.celery_app import celery_app
 from app.core.config import settings
 from app.workers.worker_pool import get_worker_conn, run_worker_task
@@ -43,6 +33,11 @@ log = logging.getLogger(__name__)
 
 MATCH_EXPIRY_DAYS = 7          # matches auto-expire after 7 days of silence
 EXPIRY_WARN_HOURS = 25         # warn users 25h before expiry (catches the 24h window)
+
+
+def _s3_client():
+    """Legacy AWS S3 client stub; returns None in Supabase mode."""
+    return None
 DELETED_USER_RETENTION_DAYS = 30
 
 
@@ -50,15 +45,18 @@ async def _get_conn() -> asyncpg.Connection:
     return await get_worker_conn()
 
 
-def _s3_client():
-    if not boto3 or not settings.aws_access_key_id or settings.aws_access_key_id.startswith("mock"):
-        return None
-    return boto3.client(
-        "s3",
-        region_name=settings.aws_region,
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-    )
+def _supabase_remove_keys(keys: list[str]) -> list[str]:
+    """Remove files from Supabase Storage avatars bucket. Returns deleted keys."""
+    if not keys or not settings.supabase_url or not settings.supabase_service_role_key:
+        return keys
+    try:
+        from app.services.media_processor import get_supabase_client
+        client = get_supabase_client()
+        client.storage.from_(settings.supabase_storage_bucket).remove(keys)
+        return keys
+    except Exception as exc:
+        log.warning("Supabase storage batch remove failed: %s", exc)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -70,16 +68,12 @@ def _s3_client():
 def reap_ephemeral_media() -> None:
     """
     Find media records in 'rejected' or 'pending' state older than 1 hour.
-    Delete the S3 object from quarantine and mark the DB record purged.
+    Delete objects from Supabase storage and mark the DB record purged.
     """
 
     async def _run():
         conn = await _get_conn()
         try:
-            s3 = _s3_client()
-            if not s3:
-                log.info("reap_ephemeral_media: AWS S3 client unavailable/mock, skipping S3 purge")
-                return
             # Mark stranded processing media as rejected after 30-minute timeout (NEW-020)
             await conn.execute(
                 """
@@ -103,34 +97,12 @@ def reap_ephemeral_media() -> None:
             if not rows:
                 return
 
-            objects_to_delete = [{"Key": r["s3_key"]} for r in rows if r.get("s3_key")]
+            keys_to_delete = [r["s3_key"] for r in rows if r.get("s3_key")]
             deleted_keys: set[str] = set()
-            failed_keys: list[str] = []
 
-            if objects_to_delete:
-                try:
-                    resp = await asyncio.to_thread(
-                        s3.delete_objects,
-                        Bucket=settings.aws_s3_quarantine_bucket,
-                        Delete={"Objects": objects_to_delete, "Quiet": False},
-                    )
-                    if isinstance(resp, dict):
-                        deleted_keys = {d["Key"] for d in resp.get("Deleted", []) if isinstance(d, dict) and "Key" in d}
-                        failed_keys = [e["Key"] for e in resp.get("Errors", []) if isinstance(e, dict) and "Key" in e]
-                    else:
-                        deleted_keys = {obj["Key"] for obj in objects_to_delete}
-                except (BotoCoreError, ClientError, Exception) as exc:
-                    log.warning("Batch S3 delete failed in reap_ephemeral_media: %s", exc)
-                    failed_keys = [obj["Key"] for obj in objects_to_delete]
-
-            if failed_keys:
-                try:
-                    from app.core.redis import get_redis
-                    r_inst = get_redis()
-                    if r_inst:
-                        await r_inst.sadd("s3:failed_deletions", *failed_keys)
-                except Exception as exc:
-                    log.warning("Failed to record reaper S3 deletion failures in Redis: %s", exc)
+            if keys_to_delete:
+                res = await asyncio.to_thread(_supabase_remove_keys, keys_to_delete)
+                deleted_keys = set(res)
 
             purged_row_ids = [
                 r["id"] for r in rows
@@ -384,16 +356,10 @@ def purge_deleted_users() -> None:
             if not archived_ids:
                 return
 
-            # Delete S3 objects first (no cascade for external storage)
-            media_keys = await conn.fetch(
-                "SELECT s3_key FROM user_media WHERE user_id = ANY($1::uuid[])",
-                archived_ids,
-            )
-            from app.services.account_service import _delete_s3_keys_sync
-            failed_keys = await asyncio.to_thread(
-                _delete_s3_keys_sync,
-                [mk["s3_key"] for mk in media_keys if mk.get("s3_key")],
-            )
+            # Delete avatar objects first (no cascade for external storage)
+            avatar_keys = [f"{uid}/avatar.webp" for uid in archived_ids]
+            deleted = await asyncio.to_thread(_supabase_remove_keys, avatar_keys)
+            failed_keys = [k for k in avatar_keys if k not in deleted]
             if failed_keys:
                 try:
                     from app.core.redis import get_redis
@@ -484,13 +450,13 @@ if not hasattr(process_media_moderation_task, "delay"):
 
 
 # ---------------------------------------------------------------------------
-# Task: retry failed S3 deletions (Finding 9)
+# Task: retry failed storage deletions
 # ---------------------------------------------------------------------------
 
 
 @celery_app.task(name="app.workers.ephemeral_reaper.reap_failed_s3_deletions")
 def reap_failed_s3_deletions() -> None:
-    """Retries S3 object deletions persisted in Redis s3:failed_deletions set."""
+    """Retries object deletions persisted in Redis s3:failed_deletions set."""
 
     async def _run():
         try:
@@ -500,9 +466,8 @@ def reap_failed_s3_deletions() -> None:
             if not members:
                 return
             keys = [m.decode("utf-8") if isinstance(m, bytes) else str(m) for m in members]
-            from app.services.account_service import _delete_s3_keys_sync
-            failed = await asyncio.to_thread(_delete_s3_keys_sync, keys)
-            succeeded = [k for k in keys if k not in failed]
+            succeeded = await asyncio.to_thread(_supabase_remove_keys, keys)
+            failed = [k for k in keys if k not in succeeded]
             if succeeded:
                 await r.srem("s3:failed_deletions", *succeeded)
             log.info("reap_failed_s3_deletions: purged %d keys, %d still failed", len(succeeded), len(failed))

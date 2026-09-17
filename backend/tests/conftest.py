@@ -34,6 +34,8 @@ if "celery" not in sys.modules:
     sys.modules["celery"] = celery_mock
     sys.modules["celery.schedules"] = MagicMock()
 
+if "supabase" not in sys.modules:
+    sys.modules["supabase"] = MagicMock()
 if "boto3" not in sys.modules:
     sys.modules["boto3"] = MagicMock()
     sys.modules["botocore"] = MagicMock()

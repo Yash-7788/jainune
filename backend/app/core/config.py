@@ -25,12 +25,21 @@ class Settings(BaseSettings):
         return "development"
     debug: bool = False
     app_version: str = "1.0.0"
-    allowed_origins: List[str] = ["http://localhost:3000", "https://app.jainune.com", "https://jainune.com"]
+    allowed_origins: List[str] = [
+        "http://localhost:3000",
+        "https://app.jainune.com",
+        "https://jainune.com",
+        "https://jainune-backend-api.onrender.com",
+    ]
 
     @field_validator("allowed_origins", mode="after")
     @classmethod
     def ensure_required_origins(cls, v: List[str]) -> List[str]:
-        required = ["https://app.jainune.com", "https://jainune.com"]
+        required = [
+            "https://app.jainune.com",
+            "https://jainune.com",
+            "https://jainune-backend-api.onrender.com",
+        ]
         res = list(v)
         for r in required:
             if r not in res:
@@ -58,15 +67,11 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "default_jwt_hmac_secret_32_bytes_len"
     otp_pepper_secret: str = "default_test_pepper_secret_32_bytes_len"
     google_client_id: str = ""
-    apple_bundle_id: str = "com.jainune.app"
 
-    # AWS S3
-    aws_region: str = "ap-south-1"
-    aws_access_key_id: str = "test_aws_key"
-    aws_secret_access_key: str = "test_aws_secret"
-    aws_s3_quarantine_bucket: str = "jainune-media-quarantine"
-    aws_s3_production_bucket: str = "jainune-media-production"
-    cdn_public_base_url: str = "https://cdn.jainune.com"
+    # Supabase Storage (replaces AWS S3)
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_storage_bucket: str = "avatars"
 
     # MSG91 (SMS & WhatsApp)
     msg91_auth_key: str = "test_msg91_key"
@@ -104,6 +109,10 @@ class Settings(BaseSettings):
     store_webhook_secret: str = ""
     webhook_secret: str = ""
 
+    # Legacy / Deprecated AWS settings for test backwards-compatibility
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+
     @model_validator(mode="after")
     def audit_production_environment(self) -> "Settings":
         if self.environment.lower() == "production":
@@ -116,10 +125,10 @@ class Settings(BaseSettings):
                 errors.append("razorpay_key_id must be a live production key (cannot use test/default key in production)")
             if self.razorpay_key_secret in ("test_rzp_secret", "") or self.razorpay_key_secret.startswith("test_"):
                 errors.append("razorpay_key_secret must be a live production secret (cannot use test/default secret in production)")
-            if self.aws_access_key_id in ("test_aws_key", "") or self.aws_access_key_id.startswith("test_"):
-                errors.append("aws_access_key_id must be configured with a production IAM key")
-            if self.aws_secret_access_key in ("test_aws_secret", "") or self.aws_secret_access_key.startswith("test_"):
-                errors.append("aws_secret_access_key must be configured with a production IAM secret")
+            if not self.supabase_url or self.supabase_url.startswith("test_"):
+                errors.append("supabase_url must be set to a production Supabase project URL")
+            if not self.supabase_service_role_key or self.supabase_service_role_key.startswith("test_"):
+                errors.append("supabase_service_role_key must be set to a production Supabase service role key")
             if self.msg91_auth_key in ("test_msg91_key", "") or self.msg91_auth_key.startswith("test_"):
                 errors.append("msg91_auth_key must be configured with production MSG91 credentials")
             if not self.cloudflare_origin_secret:
@@ -132,8 +141,6 @@ class Settings(BaseSettings):
                 errors.append("metrics_secret_token must be configured with a secure token (>=16 chars) in production")
             if not self.google_client_id or self.google_client_id.startswith("test_") or "mock" in self.google_client_id:
                 errors.append("google_client_id must be set to a valid production OAuth client ID in production")
-            if not self.apple_bundle_id or self.apple_bundle_id.startswith("test_") or "mock" in self.apple_bundle_id:
-                errors.append("apple_bundle_id must be configured with the production bundle ID in production")
             if not self.smtp_host:
                 errors.append("smtp_host must be configured for email OTP delivery in production")
             import os

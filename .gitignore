@@ -74,3 +74,8 @@ credentials/
 .cursor/
 .kiro/
 .windsurf/
+
+# Phase 1 safety protocol
+google-services.json
+.env.local
+

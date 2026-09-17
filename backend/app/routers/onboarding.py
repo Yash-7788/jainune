@@ -653,7 +653,7 @@ async def step19_photos(
 
 
 # ---------------------------------------------------------------------------
-# Step 20 - Voice Snapshot confirmation
+# Step 20 - Voice Snapshot confirmation (Deprecated in v2)
 # ---------------------------------------------------------------------------
 
 
@@ -664,22 +664,14 @@ async def step20_voice_snapshot(
     db: DBDep,
     redis: RedisDep,
 ) -> dict:
+    """
+    Confirms step 20. Voice snapshots are deprecated/retired in Jainune v2,
+    so this endpoint idempotently advances the user to step 20 without requiring
+    an external media file upload.
+    """
     await _guard_rate_limit(current_user.id, redis)
-    await _require_onboarding_not_completed(current_user.id, db)
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT id FROM user_media
-            WHERE user_id = $1 AND media_type = 'voice' AND id = $2
-            """,
-            current_user.id,
-            body.media_id,
-        )
-        if not row:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Voice snapshot not found or does not belong to this user.",
-            )
+        await _require_onboarding_not_completed(current_user.id, conn)
         await conn.execute(
             "UPDATE users SET onboarding_step = 20, updated_at = NOW() WHERE id = $1",
             current_user.id,

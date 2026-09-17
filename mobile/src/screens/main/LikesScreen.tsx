@@ -63,11 +63,12 @@ export default function LikesScreen() {
         const s = subRes.value;
         setIsSubscriber(
           s.can_see_who_liked === true ||
+            s.tier === "premium_799" ||
+            s.tier === "ultra_1499" ||
             s.tier === "jainune_plus" ||
             s.tier === "plus" ||
             s.tier === "gold" ||
-            s.tier === "platinum" ||
-            s.is_active === true
+            s.tier === "platinum"
         );
       }
 
@@ -180,7 +181,7 @@ export default function LikesScreen() {
       {tab === "liked_you" && !isSubscriber && likedMe.length > 0 && (
         <View style={styles.upgradeBanner}>
           <Text style={styles.upgradeBannerText}>
-            🔒 {likedMe.length} profile{likedMe.length > 1 ? "s" : ""} liked you! Upgrade to Gold to see who.
+            🔒 {likedMe.length} profile{likedMe.length > 1 ? "s" : ""} liked you! Upgrade to Premium or Ultra to see who.
           </Text>
           <TouchableOpacity
             style={styles.upgradeBannerBtn}

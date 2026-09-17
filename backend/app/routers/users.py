@@ -97,6 +97,21 @@ _TIER_LIMITS = {
         "super_likes": 10,
         "can_see_who_liked": True,
     },
+    "base_399": {
+        "daily_likes": None,  # unlimited likes
+        "super_likes": 1,
+        "can_see_who_liked": False,
+    },
+    "premium_799": {
+        "daily_likes": None,  # unlimited likes
+        "super_likes": 3,
+        "can_see_who_liked": True,
+    },
+    "ultra_1499": {
+        "daily_likes": None,  # unlimited likes
+        "super_likes": 7,
+        "can_see_who_liked": True,
+    },
 }
 
 

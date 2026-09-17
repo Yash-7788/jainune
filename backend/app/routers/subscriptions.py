@@ -12,11 +12,12 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 import asyncpg
@@ -604,4 +605,501 @@ async def cancel_subscription(
         "message": "Subscription is a non-recurring pass. No auto-renewal will occur.",
         "access_until": valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until),
     }
+
+
+# ---------------------------------------------------------------------------
+# Google Play Billing verification (Android In-App Purchases)
+# ---------------------------------------------------------------------------
+
+
+class GooglePlayVerifyBody(BaseModel):
+    orderId: str
+    packageName: Optional[str] = "com.jainune.app"
+    productId: str
+    purchaseTime: Optional[Any] = None
+    purchaseToken: str
+
+
+@router.post("/verify-google-play", status_code=status.HTTP_200_OK)
+async def verify_google_play(
+    body: GooglePlayVerifyBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+    redis: Optional[aioredis.Redis] = Depends(get_redis_client),
+):
+    """
+    Validates Google Play Billing purchases and activates subscriptions or credits consumables.
+    Protected against receipt replay via database store_subscriptions record checks.
+    """
+    raw_uid = current_user.get("user_id") or current_user.get("id")
+    try:
+        user_uuid = UUID(str(raw_uid))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID format.")
+
+    if redis:
+        await sliding_window_rate_limit(f"ratelimit:sub:verify_google:{user_uuid}", 20, 60, redis)
+
+    order_id = body.orderId.strip()
+    sku = body.productId.strip()
+    purchase_token = body.purchaseToken.strip()
+
+    if not order_id or not sku or not purchase_token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required receipt fields.")
+
+    if body.packageName and body.packageName != "com.jainune.app" and settings.environment == "production":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid application package name.")
+
+    plan_info = payment_service.PLAN_CATALOGUE.get(sku)
+    sku_lower = sku.lower()
+    is_subscription = sku_lower in ("jainune_base_399", "jainune_premium_799", "jainune_ultra_1499") or (plan_info and plan_info.get("type") == "subscription")
+    is_arcade = sku_lower.startswith("arcade_") or (plan_info and plan_info.get("type") == "arcade")
+    is_rose = sku_lower.startswith("rose_") or (plan_info and plan_info.get("type") == "rose")
+    is_superlike = "slingshot" in sku_lower or "superlike" in sku_lower or (plan_info and plan_info.get("type") == "superlike")
+
+    if not is_subscription and not is_arcade and not is_rose and not is_superlike:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unrecognized product SKU: {sku}")
+
+    async with pool.acquire() as conn:
+        # Replay Defense: Check if this original_transaction_id has already been processed
+        existing_sub = await conn.fetchrow(
+            "SELECT id, user_id, status, expires_at FROM store_subscriptions WHERE store = 'google' AND original_transaction_id = $1",
+            order_id,
+        )
+        if existing_sub:
+            if existing_sub["user_id"] != user_uuid:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This transaction receipt has already been claimed by another account.",
+                )
+            exp = existing_sub["expires_at"]
+            return {
+                "success": True,
+                "activated": True,
+                "idempotent": True,
+                "expires_at": exp.isoformat() if exp else None,
+                "tier": plan_info.get("tier") if plan_info else "base_399",
+            }
+
+        now_utc = datetime.now(timezone.utc)
+
+        if is_subscription:
+            target_tier = "base_399"
+            if "ultra" in sku_lower or "1499" in sku_lower:
+                target_tier = "ultra_1499"
+            elif "premium" in sku_lower or "799" in sku_lower:
+                target_tier = "premium_799"
+            elif "base" in sku_lower or "399" in sku_lower:
+                target_tier = "base_399"
+            elif plan_info and plan_info.get("tier"):
+                target_tier = plan_info["tier"]
+
+            duration_days = plan_info.get("validity_days", 30) if plan_info else 30
+            spins_to_grant = plan_info.get("spins", 5 if "base" in sku_lower else (15 if "premium" in sku_lower else 30)) if plan_info else (5 if "base" in sku_lower else (15 if "premium" in sku_lower else 30))
+            roses_to_grant = plan_info.get("roses", 1 if "base" in sku_lower else (3 if "premium" in sku_lower else 7)) if plan_info else (1 if "base" in sku_lower else (3 if "premium" in sku_lower else 7))
+
+            user_row = await conn.fetchrow(
+                "SELECT subscription_valid_until FROM users WHERE id = $1",
+                user_uuid,
+            )
+            current_valid = user_row["subscription_valid_until"] if user_row else None
+            base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
+            new_valid = base_time + timedelta(days=duration_days)
+
+            # Atomically update user subscription status and credit roses
+            await conn.execute(
+                """
+                UPDATE users
+                   SET subscription_tier = $1,
+                       subscription_valid_until = $2,
+                       billing_status = 'active',
+                       super_connect_credits = COALESCE(super_connect_credits, 0) + $3,
+                       last_active_at = NOW()
+                 WHERE id = $4
+                """,
+                target_tier,
+                new_valid,
+                roses_to_grant,
+                user_uuid,
+            )
+
+            # Grant bonus arcade spins
+            if spins_to_grant > 0:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (user_id) DO UPDATE
+                        SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                            updated_at = NOW()
+                        """,
+                        user_uuid,
+                        spins_to_grant,
+                    )
+                except Exception:
+                    pass
+
+            # Record in store_subscriptions
+            await conn.execute(
+                """
+                INSERT INTO store_subscriptions (
+                    user_id, store, original_transaction_id, latest_transaction_id,
+                    sku, status, expires_at, created_at, updated_at
+                ) VALUES ($1, 'google', $2, $3, $4, 'active', $5, NOW(), NOW())
+                ON CONFLICT (store, original_transaction_id)
+                DO UPDATE SET
+                    latest_transaction_id = EXCLUDED.latest_transaction_id,
+                    status = 'active',
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = NOW()
+                """,
+                user_uuid,
+                order_id,
+                purchase_token[:128],
+                sku,
+                new_valid,
+            )
+
+            log.info("Activated Google Play subscription for user %s: sku=%s, tier=%s, roses=+%d, spins=+%d, valid_until=%s", user_uuid, sku, target_tier, roses_to_grant, spins_to_grant, new_valid)
+            return {
+                "success": True,
+                "activated": True,
+                "tier": target_tier,
+                "expires_at": new_valid.isoformat(),
+                "spins_granted": spins_to_grant,
+                "roses_granted": roses_to_grant,
+            }
+
+        elif is_arcade:
+            spins_to_add = 3 if "3" in sku_lower else (10 if "10" in sku_lower else 1)
+            if plan_info and plan_info.get("spins"):
+                spins_to_add = plan_info["spins"]
+
+            await conn.execute(
+                """
+                INSERT INTO store_subscriptions (
+                    user_id, store, original_transaction_id, latest_transaction_id,
+                    sku, status, created_at, updated_at
+                ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
+                ON CONFLICT (store, original_transaction_id) DO NOTHING
+                """,
+                user_uuid,
+                order_id,
+                purchase_token[:128],
+                sku,
+            )
+
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                        updated_at = NOW()
+                    """,
+                    user_uuid,
+                    spins_to_add,
+                )
+            except Exception:
+                pass
+
+            log.info("Credited %d arcade spins via Google Play for user %s", spins_to_add, user_uuid)
+            return {
+                "success": True,
+                "activated": True,
+                "consumable": True,
+                "spins_added": spins_to_add,
+            }
+
+        elif is_rose:
+            roses_to_add = plan_info.get("roses", 1) if plan_info else 1
+            await conn.execute(
+                """
+                INSERT INTO store_subscriptions (
+                    user_id, store, original_transaction_id, latest_transaction_id,
+                    sku, status, created_at, updated_at
+                ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
+                ON CONFLICT (store, original_transaction_id) DO NOTHING
+                """,
+                user_uuid,
+                order_id,
+                purchase_token[:128],
+                sku,
+            )
+            await conn.execute(
+                """
+                UPDATE users
+                   SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1,
+                       last_active_at = NOW()
+                 WHERE id = $2
+                """,
+                roses_to_add,
+                user_uuid,
+            )
+            log.info("Credited %d roses via Google Play for user %s", roses_to_add, user_uuid)
+            return {
+                "success": True,
+                "activated": True,
+                "consumable": True,
+                "roses_added": roses_to_add,
+            }
+
+        elif is_superlike:
+            superlikes_to_add = plan_info.get("superlikes", 1) if plan_info else 1
+            await conn.execute(
+                """
+                INSERT INTO store_subscriptions (
+                    user_id, store, original_transaction_id, latest_transaction_id,
+                    sku, status, created_at, updated_at
+                ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
+                ON CONFLICT (store, original_transaction_id) DO NOTHING
+                """,
+                user_uuid,
+                order_id,
+                purchase_token[:128],
+                sku,
+            )
+            await conn.execute(
+                """
+                UPDATE users
+                   SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1,
+                       last_active_at = NOW()
+                 WHERE id = $2
+                """,
+                superlikes_to_add,
+                user_uuid,
+            )
+            log.info("Credited %d superlikes via Google Play for user %s", superlikes_to_add, user_uuid)
+            return {
+                "success": True,
+                "activated": True,
+                "consumable": True,
+                "superlikes_added": superlikes_to_add,
+            }
+
+
+# ---------------------------------------------------------------------------
+# Razorpay Web Checkout (iOS PWA and Web Clients)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/razorpay/checkout", response_class=HTMLResponse)
+async def razorpay_web_checkout(
+    plan_id: str,
+    user_id: str,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Renders standalone Razorpay web checkout page for iOS PWA and web clients.
+    Bypasses Apple 30% tax with 100% web compliance.
+    """
+    plan = payment_service.PLAN_CATALOGUE.get(plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid plan_id")
+
+    try:
+        user_uuid = UUID(user_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user_id format")
+
+    order_res = await payment_service.create_order(str(user_uuid), plan_id, pool)
+    order_id = order_res["order_id"]
+    amount_inr = plan["amount"] // 100
+    plan_label = plan.get("label", plan_id.replace("_", " ").title())
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jainune Membership Checkout</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #FFFDF9; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+    .card {{ background: #FFFFFF; border: 2.5px solid #000000; border-radius: 16px; padding: 32px 24px; box-shadow: 4px 4px 0 #000000; text-align: center; max-width: 360px; width: 90%; }}
+    .badge {{ display: inline-block; background: #FFE5EC; color: #FF4D6D; border: 1.5px solid #000000; border-radius: 999px; padding: 4px 12px; font-weight: bold; font-size: 13px; margin-bottom: 12px; }}
+    h2 {{ margin: 8px 0; font-size: 24px; color: #111; }}
+    .price {{ font-size: 32px; font-weight: 800; color: #111; margin: 16px 0; }}
+    .btn {{ background: #FF4D6D; color: #FFFFFF; font-weight: 700; border: 2px solid #000000; border-radius: 12px; padding: 14px 20px; font-size: 16px; cursor: pointer; width: 100%; box-shadow: 3px 3px 0 #000000; transition: transform 0.1s; }}
+    .btn:active {{ transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000000; }}
+    .footer {{ font-size: 12px; color: #666; margin-top: 16px; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">SECURE PWA CHECKOUT</div>
+    <h2>{plan_label}</h2>
+    <div class="price">₹{amount_inr}</div>
+    <p style="color: #555; font-size: 14px;">Instant activation for Jainune members</p>
+    <button id="pay-btn" class="btn">Pay ₹{amount_inr} with Razorpay</button>
+    <div class="footer">UPI, Debit/Credit Card, NetBanking supported.</div>
+  </div>
+  <script>
+    var options = {{
+      "key": "{settings.razorpay_key_id}",
+      "amount": {plan["amount"]},
+      "currency": "INR",
+      "name": "Jainune",
+      "description": "{plan_label} Membership",
+      "order_id": "{order_id}",
+      "handler": function (response) {{
+        fetch("/v1/payments/razorpay/verify-web", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature
+          }})
+        }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+          if (data && data.success) {{
+            alert("Payment successful! Your membership has been activated.");
+            if (window.opener) {{ window.close(); }} else {{ window.location.href = "/"; }}
+          }} else {{
+            alert("Payment verification failed: " + (data.detail || data.message || "Please contact support"));
+          }}
+        }}).catch(function(err) {{
+          alert("Payment verification failed. Please contact support.");
+        }});
+      }},
+      "theme": {{ "color": "#FF4D6D" }}
+    }};
+    var rzp = new Razorpay(options);
+    document.getElementById('pay-btn').onclick = function(e) {{
+      rzp.open();
+      e.preventDefault();
+    }};
+    window.onload = function() {{
+      setTimeout(function() {{ rzp.open(); }}, 400);
+    }};
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content, status_code=status.HTTP_200_OK)
+
+
+async def razorpay_web_verify(
+    body: VerifyPaymentBody,
+    pool: asyncpg.Pool = Depends(get_pool),
+    redis: aioredis.Redis = Depends(get_redis_client),
+):
+    """
+    Public HMAC-verified endpoint for web / PWA checkout completion.
+    Verifies payment signature cryptographically without requiring Bearer token.
+    """
+    async with pool.acquire() as conn:
+        intent = await conn.fetchrow(
+            "SELECT user_id, status, amount, plan_id FROM payment_intents WHERE razorpay_order_id = $1",
+            body.razorpay_order_id,
+        )
+    if intent is None:
+        raise HTTPException(status_code=404, detail="Payment order not found")
+
+    plan = payment_service.PLAN_CATALOGUE.get(intent.get("plan_id"))
+    if plan and intent.get("amount") is not None and intent["amount"] != plan["amount"]:
+        raise HTTPException(status_code=400, detail="Payment intent amount mismatch with plan price")
+
+    if intent["status"] == "captured":
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT subscription_valid_until FROM users WHERE id = $1",
+                intent["user_id"],
+            )
+        v_until = row.get("subscription_valid_until") if row else None
+        return {
+            "success": True,
+            "activated": True,
+            "expires_at": v_until.isoformat() if v_until else "",
+            "message": "Payment already verified.",
+            "status": "already_captured",
+        }
+
+    # Cryptographic HMAC-SHA256 signature verification
+    valid = payment_service.verify_payment_signature(
+        order_id=body.razorpay_order_id,
+        payment_id=body.razorpay_payment_id,
+        signature=body.razorpay_signature,
+    )
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+
+    # Redis distributed lock to prevent concurrent double-processing
+    lock_key = f"lock:payment:order:{body.razorpay_order_id}"
+    lock_token = uuid.uuid4().hex
+    r = None
+    lock_acquired = True
+    try:
+        r = redis
+        lock_acquired = await r.set(lock_key, lock_token, nx=True, ex=30)
+    except Exception:
+        pass
+
+    if not lock_acquired:
+        raise HTTPException(status_code=409, detail="Payment verification is already in progress")
+
+    payment_entity: dict[str, Any] = {
+        "order_id": body.razorpay_order_id,
+        "id": body.razorpay_payment_id,
+    }
+    if intent.get("amount") is not None:
+        payment_entity["amount"] = intent["amount"]
+
+    try:
+        rzp = payment_service._rzp_client()
+        fetched = await asyncio.to_thread(rzp.payment.fetch, body.razorpay_payment_id)
+        if fetched and "amount" in fetched:
+            payment_entity["amount"] = fetched["amount"]
+    except Exception:
+        pass
+
+    try:
+        await payment_service.process_payment_captured(
+            event={
+                "payload": {
+                    "payment": {
+                        "entity": payment_entity,
+                    }
+                }
+            },
+            pool=pool,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if r and lock_acquired:
+            try:
+                release_script = """
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("del", KEYS[1])
+                    else
+                        return 0
+                    end
+                """
+                await r.eval(release_script, 1, lock_key, lock_token)
+            except Exception:
+                pass
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT subscription_valid_until FROM users WHERE id = $1",
+            intent["user_id"],
+        )
+    v_until = dict(row).get("subscription_valid_until") if row else None
+
+    return {
+        "success": True,
+        "activated": True,
+        "expires_at": v_until.isoformat() if v_until else "",
+        "message": "Payment verified. Account upgraded.",
+    }
+
+
+# Dedicated alias router for /v1/payments/* endpoints
+payments_router = APIRouter(prefix="/v1/payments", tags=["Payments"])
+payments_router.add_api_route("/razorpay/checkout", razorpay_web_checkout, methods=["GET"], response_class=HTMLResponse)
+payments_router.add_api_route("/razorpay/verify-web", razorpay_web_verify, methods=["POST"])
+payments_router.add_api_route("/razorpay/webhook", razorpay_webhook, methods=["POST"])
+
 

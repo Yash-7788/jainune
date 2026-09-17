@@ -408,7 +408,7 @@ async def send_message(
                 )
 
             effective_tier = await get_effective_user_tier(user_id, conn)
-            is_subscribed = effective_tier in ("jainune_plus", "gold", "platinum")
+            is_subscribed = effective_tier in ("premium_799", "ultra_1499", "jainune_plus", "gold", "platinum")
 
             # Filter content for ALL message types (not just text) — F-016
             final_content = body.content

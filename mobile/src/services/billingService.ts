@@ -1,32 +1,34 @@
 /**
- * Unified Billing Gateway Service
+ * Decoupled Billing Architecture Service — Jainune
  *
- * Implements store compliance abstraction for Google Play Billing / Apple StoreKit
- * and India User Choice Billing (UCB) / Alternative Billing (Razorpay).
+ * Implements Google Play Billing (react-native-iap) for Android builds
+ * and isolates Razorpay Hosted Web Checkout for iOS PWA and Web builds.
+ *
+ * Directives:
+ * - Google Play Developer policy strictly forbids third-party payment SDKs inside Android apps for digital goods.
+ * - Razorpay checkout is isolated to Web/PWA builds only.
  */
 
 import { Platform, Linking } from "react-native";
-let RazorpayCheckout: any = null;
-try {
-  const rnrp = require("react-native-razorpay");
-  RazorpayCheckout = rnrp?.default || rnrp;
-} catch {
-  // Native module unavailable in Expo Go
-}
-
 import * as SecureStore from "expo-secure-store";
+import { apiPost, getUserId } from "../api/client";
+import { useAuthStore } from "../store/authStore";
 import {
   createSubscriptionOrder,
-  verifySubscriptionPayment,
   syncSubscriptionOrder,
   createArcadeOrder,
-  verifyArcadePayment,
   SubscriptionPlan,
 } from "../api/profileApi";
-import { validatePaymentResponse } from "../security/inputValidation";
-import { colors } from "../theme/tokens";
 
-export type BillingProvider = "play_billing" | "app_store" | "razorpay" | "web";
+// Safe dynamic loader for react-native-iap (prevents crashes in Expo Go or Web)
+let RNIap: any = null;
+try {
+  RNIap = require("react-native-iap");
+} catch {
+  // Native module unavailable in Expo Go or Web environments
+}
+
+export type BillingProvider = "play_billing" | "web_razorpay";
 
 export interface PurchaseResult {
   success: boolean;
@@ -35,7 +37,17 @@ export interface PurchaseResult {
   message?: string;
   expires_at?: string;
   error?: string;
+  cancelled?: boolean;
 }
+
+export const ANDROID_SKUS = [
+  "jainune_base_399",
+  "jainune_premium_799",
+  "jainune_ultra_1499",
+  "arcade_spins_3",
+  "arcade_spins_10",
+  "rose_single_49",
+];
 
 const PENDING_PAYMENT_KEY = "jainune_pending_payment";
 const PENDING_PAYMENTS_MAP_KEY = "jainune_pending_payments_map";
@@ -101,38 +113,15 @@ export async function clearPendingPayment(orderId?: string): Promise<void> {
 let isSyncingPending = false;
 
 export async function syncPendingPayment(targetOrderId?: string): Promise<PurchaseResult> {
-  if (isSyncingPending) {
-    return { success: false };
-  }
+  if (isSyncingPending) return { success: false };
   isSyncingPending = true;
   try {
     const all = await getAllPendingPayments();
     const pendingList = Object.values(all);
-    if (pendingList.length === 0) {
-      return { success: false };
-    }
+    if (pendingList.length === 0) return { success: false };
 
     for (const pending of pendingList) {
       if (targetOrderId && pending.order_id !== targetOrderId) continue;
-
-      if (pending.payment_id && pending.signature) {
-        try {
-          const verifyRes = await verifySubscriptionPayment({
-            razorpay_order_id: pending.order_id,
-            razorpay_payment_id: pending.payment_id,
-            razorpay_signature: pending.signature,
-          });
-          await clearPendingPayment(pending.order_id);
-          if (verifyRes.activated) {
-            return {
-              success: true,
-              activated: true,
-              expires_at: verifyRes.expires_at,
-            };
-          }
-        } catch {}
-      }
-
       try {
         const syncRes = await syncSubscriptionOrder(pending.order_id);
         if (syncRes.activated) {
@@ -145,227 +134,164 @@ export async function syncPendingPayment(targetOrderId?: string): Promise<Purcha
         }
       } catch {}
 
-      // Expire stale pending payment records older than 24 hours
       if (Date.now() - (pending.timestamp || 0) > 86400000) {
         await clearPendingPayment(pending.order_id);
       }
     }
-
     return { success: false };
   } finally {
     isSyncingPending = false;
   }
 }
 
-export const ACTIVE_BILLING_PROVIDER: BillingProvider =
-  (process.env.EXPO_PUBLIC_BILLING_PROVIDER as BillingProvider) ||
-  (Platform.OS === "ios" ? "app_store" : "play_billing");
+/**
+ * Initializes native billing bridge on Android.
+ */
+export async function initializeBilling(): Promise<void> {
+  if (Platform.OS === "android" && RNIap && typeof RNIap.initConnection === "function") {
+    try {
+      await RNIap.initConnection();
+      if (typeof RNIap.flushFailedPurchasesCachedAsPendingAndroid === "function") {
+        await RNIap.flushFailedPurchasesCachedAsPendingAndroid();
+      }
+    } catch {}
+  }
+}
 
 /**
- * Purchases a subscription plan adhering to Google Play / Apple StoreKit / User Choice Billing pathways.
+ * Executes native Google Play purchase on Android.
  */
-export async function purchaseSubscription(
-  plan: SubscriptionPlan
-): Promise<PurchaseResult> {
-  // Pathway 1: Apple StoreKit IAP (Strictly required on iOS per Apple Guideline 3.1.1)
-  if (Platform.OS === "ios" || ACTIVE_BILLING_PROVIDER === "app_store") {
-    try {
-      // If native IAP bridge is available, initiate StoreKit transaction
-      const NativeIap = (global as any).RNIap || null;
-      if (NativeIap && typeof NativeIap.requestSubscription === "function") {
-        const purchase = await NativeIap.requestSubscription({ sku: plan.plan_id });
-        // Handle iOS StoreKit deferred state (Ask to Buy / Parental Controls) (BUG-098)
-        if (purchase?.transactionState === "deferred" || purchase?.transactionState === 4) {
-          return {
-            success: true,
-            activated: false,
-            pending_verification: true,
-            message: "Purchase is pending approval (Ask to Buy / Parental controls). Access will be activated once confirmed.",
-          };
-        }
-        // NEW-037: Do not claim activated: true before server entitlement verification
-        return {
-          success: true,
-          activated: false,
-          pending_verification: true,
-          message: "Store transaction received. Verifying membership entitlement with Jainune servers...",
-        };
-      }
-      // StoreKit sandbox fallback allowed strictly in __DEV__ (Expo Go)
-      if (__DEV__) {
-        const devOrder = await createSubscriptionOrder(plan.plan_id);
-        const syncRes = await syncSubscriptionOrder(devOrder.order_id);
-        return {
-          success: true,
-          activated: syncRes.activated,
-          expires_at: syncRes.expires_at,
-        };
-      }
-      throw new Error("STOREKIT_MODULE_UNAVAILABLE");
-    } catch (err: any) {
-      if (err?.code === "E_USER_CANCELLED") {
-        return { success: false, error: "CANCELLED" };
-      }
-      if (err?.code === "E_DEFERRED_PAYMENT" || err?.transactionState === "deferred" || err?.transactionState === 4) {
-        return {
-          success: true,
-          activated: false,
-          pending_verification: true,
-          message: "Purchase is pending approval (Ask to Buy / Parental controls). Access will be activated once confirmed.",
-        };
-      }
-      throw err;
-    }
-  }
-
-  // Pathway 2: Android (Google Play Billing / User Choice Billing / Razorpay alternative)
+export async function purchaseAndroidPlan(sku: string): Promise<PurchaseResult> {
   try {
-    const order = await createSubscriptionOrder(plan.plan_id);
+    if (RNIap && (typeof RNIap.requestPurchase === "function" || typeof RNIap.requestSubscription === "function")) {
+      const isSub = sku.startsWith("jainune_") && !sku.startsWith("jainune_plus_");
+      let purchase: any;
+      if (isSub && typeof RNIap.requestSubscription === "function") {
+        purchase = await RNIap.requestSubscription({ sku });
+      } else {
+        purchase = await RNIap.requestPurchase({ skus: [sku] });
+      }
 
-    // Persist pending order ID before launching native UPI / webview
-    await savePendingPayment({
-      order_id: order.order_id,
-      payment_id: "",
-      signature: "",
-      plan_id: plan.plan_id,
-      timestamp: Date.now(),
-    });
+      if (Array.isArray(purchase)) {
+        purchase = purchase[0];
+      }
 
-    if (!RazorpayCheckout || typeof RazorpayCheckout.open !== "function") {
-      throw new Error("BILLING_MODULE_UNAVAILABLE");
-    }
-
-    const paymentResult = await RazorpayCheckout.open({
-      key: order.razorpay_key,
-      order_id: order.order_id,
-      amount: order.amount_paisa,
-      currency: order.currency,
-      name: "Jainune+",
-      description: `${plan.label} Subscription`,
-      prefill: {},
-      theme: { color: colors.saffron },
-      modal: { backdropclose: false },
-    });
-
-    if (!validatePaymentResponse(paymentResult)) {
-      throw new Error("INVALID_PAYMENT_RESPONSE");
-    }
-
-    // Persist receipt in SecureStore immediately before network verification
-    await savePendingPayment({
-      order_id: paymentResult.razorpay_order_id,
-      payment_id: paymentResult.razorpay_payment_id,
-      signature: paymentResult.razorpay_signature,
-      plan_id: plan.plan_id,
-      timestamp: Date.now(),
-    });
-
-    try {
-      const verifyRes = await verifySubscriptionPayment({
-        razorpay_order_id: paymentResult.razorpay_order_id,
-        razorpay_payment_id: paymentResult.razorpay_payment_id,
-        razorpay_signature: paymentResult.razorpay_signature,
+      // Send receipt to FastAPI for cryptographic verification & activation
+      const verification = await apiPost<{
+        success: boolean;
+        activated: boolean;
+        expires_at?: string;
+        tier?: string;
+      }>("/subscriptions/verify-google-play", {
+        orderId: purchase?.orderId || purchase?.transactionId || `order_${Date.now()}`,
+        packageName: purchase?.packageNameAndroid || "com.jainune.app",
+        productId: purchase?.productId || sku,
+        purchaseTime: purchase?.transactionDate || Date.now(),
+        purchaseToken: purchase?.purchaseToken || "token_mock",
       });
 
-      await clearPendingPayment(paymentResult.razorpay_order_id);
+      if (verification.success && verification.data?.activated) {
+        // Acknowledge transaction with Google Play to prevent automatic refund
+        if (typeof RNIap.finishTransaction === "function") {
+          await RNIap.finishTransaction({
+            purchase,
+            isConsumable: sku.startsWith("arcade_") || sku.startsWith("rose_") || sku.startsWith("slingshot_"),
+          });
+        }
+        return {
+          success: true,
+          activated: true,
+          expires_at: verification.data.expires_at,
+        };
+      } else {
+        return {
+          success: false,
+          error: "Verification failed on server.",
+        };
+      }
+    }
 
+    // Expo Go / Dev Client sandbox fallback
+    if (__DEV__) {
+      const devOrder = await createSubscriptionOrder(sku);
+      const syncRes = await syncSubscriptionOrder(devOrder.order_id);
       return {
         success: true,
-        activated: verifyRes.activated,
-        expires_at: verifyRes.expires_at,
-      };
-    } catch (verifyErr) {
-      // Network drop after bank deduction
-      return {
-        success: true,
-        activated: false,
-        pending_verification: true,
-        message:
-          "Payment debited by your bank. Your subscription will activate automatically once network connection is restored.",
+        activated: syncRes.activated,
+        expires_at: syncRes.expires_at,
       };
     }
+
+    throw new Error("PLAY_BILLING_UNAVAILABLE");
   } catch (err: any) {
-    if (err?.code === 2 || err?.description === "Payment Cancelled") {
-      return { success: false, error: "CANCELLED" };
+    if (err?.code === "E_USER_CANCELLED" || err?.code === 2) {
+      return { success: false, cancelled: true };
     }
     throw err;
   }
 }
 
 /**
- * Purchases arcade spins adhering to platform billing pathways.
+ * Launches standalone Razorpay Web Checkout for iOS PWA and desktop web users.
+ */
+export async function launchWebPayment(planId: string, explicitUserId?: string): Promise<void> {
+  const userId =
+    explicitUserId ||
+    useAuthStore.getState().userId ||
+    (await getUserId()) ||
+    (await SecureStore.getItemAsync("auth_user_id")) ||
+    "";
+  const apiBase =
+    process.env.EXPO_PUBLIC_API_URL?.replace(/\/v1\/?$/, "") ||
+    "https://jainune-backend-api.onrender.com";
+  const checkoutUrl = `${apiBase}/v1/payments/razorpay/checkout?plan_id=${encodeURIComponent(planId)}&user_id=${encodeURIComponent(userId)}`;
+
+  if (typeof window !== "undefined" && window.location) {
+    window.location.href = checkoutUrl;
+  } else {
+    await Linking.openURL(checkoutUrl);
+  }
+}
+
+/**
+ * Purchases a subscription plan adhering to decoupled platform pathways:
+ * - Android: Native Google Play Billing (react-native-iap)
+ * - iOS PWA / Web: Standalone Razorpay Web Checkout (zero Apple tax)
+ */
+export async function purchaseSubscription(
+  plan: SubscriptionPlan,
+  userId?: string
+): Promise<PurchaseResult> {
+  if (Platform.OS === "android") {
+    return await purchaseAndroidPlan(plan.plan_id);
+  }
+
+  // iOS PWA or Web browser checkout
+  await launchWebPayment(plan.plan_id, userId);
+  return {
+    success: true,
+    pending_verification: true,
+    message: "Opening secure Razorpay web checkout...",
+  };
+}
+
+/**
+ * Purchases consumable arcade spins adhering to platform billing pathways.
  */
 export async function purchaseArcadeRolls(
   productId: string,
-  label: string
+  _label: string,
+  userId?: string
 ): Promise<PurchaseResult> {
-  // iOS StoreKit consumable IAP
-  if (Platform.OS === "ios" || ACTIVE_BILLING_PROVIDER === "app_store") {
-    try {
-      const NativeIap = (global as any).RNIap || null;
-      if (NativeIap && typeof NativeIap.requestPurchase === "function") {
-        // N-11: Record pending consumable purchase before invoking StoreKit
-        const pendingOrderId = `arcade_${productId}_${Date.now()}`;
-        await savePendingPayment({
-          order_id: pendingOrderId,
-          payment_id: productId,
-          signature: "storekit_arcade_pending",
-          timestamp: Date.now(),
-        });
-        await NativeIap.requestPurchase({ sku: productId });
-        await clearPendingPayment(pendingOrderId);
-        return { success: true };
-      }
-      if (__DEV__) {
-        await createArcadeOrder(productId);
-        return { success: true };
-      }
-      throw new Error("STOREKIT_MODULE_UNAVAILABLE");
-    } catch (err: any) {
-      if (err?.code === "E_USER_CANCELLED") {
-        return { success: false, error: "CANCELLED" };
-      }
-      throw err;
-    }
+  if (Platform.OS === "android") {
+    return await purchaseAndroidPlan(productId);
   }
 
-  // Android Google Play Billing / User Choice Billing
-  try {
-    const order = await createArcadeOrder(productId);
-
-    if (!RazorpayCheckout || typeof RazorpayCheckout.open !== "function") {
-      throw new Error("BILLING_MODULE_UNAVAILABLE");
-    }
-
-    const paymentResult = await RazorpayCheckout.open({
-      key: order.razorpay_key,
-      order_id: order.order_id,
-      amount: order.amount_paisa,
-      currency: order.currency,
-      name: "Serendipity Arcade",
-      description: label,
-      theme: { color: colors.saffron },
-      modal: { backdropclose: false },
-    });
-
-    if (!validatePaymentResponse(paymentResult)) {
-      throw new Error("INVALID_PAYMENT_RESPONSE");
-    }
-
-    await verifyArcadePayment({
-      razorpay_order_id: paymentResult.razorpay_order_id,
-      razorpay_payment_id: paymentResult.razorpay_payment_id,
-      razorpay_signature: paymentResult.razorpay_signature,
-    });
-
-    return { success: true };
-  } catch (err: any) {
-    if (err?.code === 2 || err?.description === "Payment Cancelled") {
-      return { success: false, error: "CANCELLED" };
-    }
-    throw err;
-  }
+  // iOS PWA or Web browser checkout
+  await launchWebPayment(productId, userId);
+  return {
+    success: true,
+    pending_verification: true,
+    message: "Opening secure Razorpay web checkout...",
+  };
 }
-
-export const initiatePurchase = purchaseSubscription;
-

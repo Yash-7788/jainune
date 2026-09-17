@@ -350,6 +350,20 @@ async def verify_otp_endpoint(
         return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
 
 
+async def _extract_phone_verified_user_id(request: Request, redis: RedisDep) -> uuid.UUID | None:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        from fastapi.security import HTTPAuthorizationCredentials
+        from app.core.security import validate_access_token
+        payload = await validate_access_token(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token), redis)
+        return uuid.UUID(str(payload["sub"]))
+    except Exception:
+        return None
+
+
 # ── POST /v1/auth/email/otp/request ──────────────────────────────────────────
 
 @router.post("/email/otp/request")
@@ -383,6 +397,27 @@ async def request_email_otp(request: Request, body: EmailOTPRequestBody, redis: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Registration is restricted to supported email providers (Gmail, Outlook, Yahoo, Apple, etc.).",
         )
+
+    # Mandatory Phone Verification Check: Phone number must be verified before email can be linked/used
+    phone_user_id = await _extract_phone_verified_user_id(request, redis)
+    if not phone_user_id:
+        chk_pool = db
+        if chk_pool is None:
+            try:
+                chk_pool = get_pool()
+            except RuntimeError:
+                chk_pool = None
+        if chk_pool is not None:
+            async with chk_pool.acquire() as chk_conn:
+                existing_user = await chk_conn.fetchrow(
+                    "SELECT phone_number FROM users WHERE email = $1 OR email = $2",
+                    canonical_email, clean_email,
+                )
+                if not existing_user or not existing_user.get("phone_number"):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Phone verification required: You must verify your mobile number first before using email sign in.",
+                    )
 
     # Check account status before dispatching email OTP (BUG-062)
     pool = db
@@ -490,50 +525,45 @@ async def verify_email_otp(
 
     await redis.delete(rate_key)
 
+    phone_user_id = await _extract_phone_verified_user_id(request, redis)
+
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
-            canonical_email,
-            clean_email,
-        )
-        is_new_user = row is None
-        if is_new_user:
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO users (email, is_email_verified, auth_provider)
-                VALUES ($1, TRUE, 'email')
-                ON CONFLICT (email) DO NOTHING
-                RETURNING id
-                """,
-                canonical_email,
+        if phone_user_id:
+            # Phone verified in step 1 — link verified email to this phone account
+            user_row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                phone_user_id,
             )
-            if user_id is None:
-                existing = await conn.fetchrow(
-                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
-                    canonical_email,
-                    clean_email,
+            if not user_row or not user_row.get("phone_number"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number first.",
                 )
-                if not existing:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account not found after conflict resolution")
-                _assert_account_active(existing)
-                user_id = existing["id"]
-                is_new_user = False
-                onboarding_completed = _row_val(existing, "onboarding_completed", False) or False
-            else:
-                row = await conn.fetchrow(
-                    "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                    user_id,
-                )
-                if not row:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Account not found after insert")
-                _assert_account_active(row)
-                onboarding_completed = False
+            _assert_account_active(user_row)
+            await conn.execute(
+                "UPDATE users SET email = $1, is_email_verified = TRUE, last_active_at = NOW() WHERE id = $2",
+                canonical_email,
+                phone_user_id,
+            )
+            onboarding_completed = _row_val(user_row, "onboarding_completed", False) or False
+            log.info("Linked email to phone user %s: %s", phone_user_id, mask_email(canonical_email))
+            return await _issue_token_response(phone_user_id, False, onboarding_completed, conn)
         else:
+            # Standalone email verification: only allowed if account already has a verified phone number
+            row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE email = $1 OR email = $2",
+                canonical_email,
+                clean_email,
+            )
+            if not row or not row.get("phone_number"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number before using email sign in.",
+                )
             _assert_account_active(row)
             user_id = row["id"]
             onboarding_completed = _row_val(row, "onboarding_completed", False) or False
-
-        return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
+            return await _issue_token_response(user_id, False, onboarding_completed, conn)
 
 
 import jwt as pyjwt
@@ -653,60 +683,58 @@ async def google_auth(request: Request, body: GoogleAuthBody, db: DBDep, redis: 
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(google_sub), verified_email,
-        )
-        is_new_user = row is None
-        if is_new_user:
-            try:
-                if verified_email:
-                    user_id = await conn.fetchval(
-                        """
-                        INSERT INTO users (google_id, email, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, $3, TRUE, 'google')
-                        ON CONFLICT (email) DO UPDATE SET google_id = EXCLUDED.google_id, last_active_at = NOW()
-                        RETURNING id
-                        """,
-                        str(google_sub), verified_email, name,
-                    )
-                else:
-                    user_id = await conn.fetchval(
-                        """
-                        INSERT INTO users (google_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, FALSE, 'google')
-                        ON CONFLICT (google_id) DO UPDATE SET last_active_at = NOW()
-                        RETURNING id
-                        """,
-                        str(google_sub), name,
-                    )
-            except Exception:
-                # Concurrent login or existing google_id under different email
-                user_id = await conn.fetchval(
-                    "SELECT id FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(google_sub), verified_email,
-                )
-                if not user_id:
-                    raise
-                is_new_user = False
-            row = await conn.fetchrow(
-                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                user_id,
-            )
-            if row:
-                _assert_account_active(row)
-                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
-            else:
-                onboarding_completed = False
-        else:
-            _assert_account_active(row)
-            user_id = row["id"]
-            onboarding_completed = _row_val(row, "onboarding_completed", False) or False
-            await conn.execute("UPDATE users SET google_id = $1 WHERE id = $2 AND google_id IS NULL", str(google_sub), user_id)
+    phone_user_id = await _extract_phone_verified_user_id(request, redis)
 
-        log.info("User authenticated via Google: %s", mask_email(email) if email else "sub_only")
-        return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
+    async with db.acquire() as conn:
+        if phone_user_id:
+            # Phone verified in step 1 — link Google account to this phone user
+            user_row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                phone_user_id,
+            )
+            if not user_row or not user_row.get("phone_number"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number first.",
+                )
+            _assert_account_active(user_row)
+            await conn.execute(
+                """
+                UPDATE users
+                   SET google_id = $1,
+                       email = COALESCE(email, $2),
+                       first_name = COALESCE(first_name, $3),
+                       is_email_verified = TRUE,
+                       last_active_at = NOW()
+                 WHERE id = $4
+                """,
+                str(google_sub),
+                verified_email,
+                name,
+                phone_user_id,
+            )
+            onboarding_completed = _row_val(user_row, "onboarding_completed", False) or False
+            log.info("Linked Google to phone user %s: %s", phone_user_id, mask_email(email) if email else "sub_only")
+            return await _issue_token_response(phone_user_id, False, onboarding_completed, conn)
+        else:
+            # Standalone Google sign-in without active phone-verified session
+            # MUST check that user exists AND already has a verified phone_number
+            user_row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE google_id = $1 OR (email IS NOT NULL AND email = $2)",
+                str(google_sub), verified_email,
+            )
+            if not user_row or not user_row.get("phone_number"):
+                # Reject bot or unverified user attempting to bypass phone verification
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number before signing in with Google.",
+                )
+            _assert_account_active(user_row)
+            user_id = user_row["id"]
+            onboarding_completed = _row_val(user_row, "onboarding_completed", False) or False
+            await conn.execute("UPDATE users SET google_id = $1, last_active_at = NOW() WHERE id = $2 AND google_id IS NULL", str(google_sub), user_id)
+            log.info("User authenticated via Google (phone verified): %s", mask_email(email) if email else "sub_only")
+            return await _issue_token_response(user_id, False, onboarding_completed, conn)
 
 
 # ── POST /v1/auth/apple ───────────────────────────────────────────────────────
@@ -752,60 +780,56 @@ async def apple_auth(request: Request, body: AppleAuthBody, db: DBDep, redis: Re
         if is_disp:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
+    phone_user_id = await _extract_phone_verified_user_id(request, redis)
+
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-            str(apple_sub), verified_email,
-        )
-        is_new_user = row is None
-        if is_new_user:
-            try:
-                if verified_email:
-                    user_id = await conn.fetchval(
-                        """
-                        INSERT INTO users (apple_id, email, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, $3, TRUE, 'apple')
-                        ON CONFLICT (email) DO UPDATE SET apple_id = EXCLUDED.apple_id, last_active_at = NOW()
-                        RETURNING id
-                        """,
-                        str(apple_sub), verified_email, first_name,
-                    )
-                else:
-                    user_id = await conn.fetchval(
-                        """
-                        INSERT INTO users (apple_id, first_name, is_email_verified, auth_provider)
-                        VALUES ($1, $2, FALSE, 'apple')
-                        ON CONFLICT (apple_id) DO UPDATE SET last_active_at = NOW()
-                        RETURNING id
-                        """,
-                        str(apple_sub), first_name,
-                    )
-            except Exception:
-                # Concurrent login or existing apple_id under different email
-                user_id = await conn.fetchval(
-                    "SELECT id FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
-                    str(apple_sub), verified_email,
-                )
-                if not user_id:
-                    raise
-                is_new_user = False
-            row = await conn.fetchrow(
-                "SELECT id, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
-                user_id,
+        if phone_user_id:
+            # Phone verified in step 1 — link Apple account to this phone user
+            user_row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE id = $1",
+                phone_user_id,
             )
-            if row:
-                _assert_account_active(row)
-                onboarding_completed = _row_val(row, "onboarding_completed", False) or False
-            else:
-                onboarding_completed = False
+            if not user_row or not user_row.get("phone_number"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number first.",
+                )
+            _assert_account_active(user_row)
+            await conn.execute(
+                """
+                UPDATE users
+                   SET apple_id = $1,
+                       email = COALESCE(email, $2),
+                       first_name = COALESCE(first_name, $3),
+                       is_email_verified = TRUE,
+                       last_active_at = NOW()
+                 WHERE id = $4
+                """,
+                str(apple_sub),
+                verified_email,
+                first_name,
+                phone_user_id,
+            )
+            onboarding_completed = _row_val(user_row, "onboarding_completed", False) or False
+            log.info("Linked Apple to phone user %s: %s", phone_user_id, mask_email(email) if email else "sub_only")
+            return await _issue_token_response(phone_user_id, False, onboarding_completed, conn)
         else:
+            # Standalone Apple sign-in: require that user exists AND has verified phone_number
+            row = await conn.fetchrow(
+                "SELECT id, phone_number, onboarding_completed, account_status, deleted_at, suspend_until FROM users WHERE apple_id = $1 OR (email IS NOT NULL AND email = $2)",
+                str(apple_sub), verified_email,
+            )
+            if not row or not row.get("phone_number"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Phone verification required: You must verify your mobile number before signing in with Apple.",
+                )
             _assert_account_active(row)
             user_id = row["id"]
             onboarding_completed = _row_val(row, "onboarding_completed", False) or False
-            await conn.execute("UPDATE users SET apple_id = $1 WHERE id = $2 AND apple_id IS NULL", str(apple_sub), user_id)
-
-        log.info("User authenticated via Apple: %s", mask_email(email) if email else "sub_only")
-        return await _issue_token_response(user_id, is_new_user, onboarding_completed, conn)
+            await conn.execute("UPDATE users SET apple_id = $1, last_active_at = NOW() WHERE id = $2 AND apple_id IS NULL", str(apple_sub), user_id)
+            log.info("User authenticated via Apple (phone verified): %s", mask_email(email) if email else "sub_only")
+            return await _issue_token_response(user_id, False, onboarding_completed, conn)
 
 
 def _pack_grace_payload(resp_data: dict) -> str:

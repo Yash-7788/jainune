@@ -96,59 +96,17 @@ export default function Step20Screen() {
 
   return (
     <OnboardingStep
-      title="Your voice snapshot"
-      subtitle="Record 7 seconds of your authentic self. Laugh, talk, hum — anything real."
-      onNext={status === "done" ? uploadAndContinue : startRecording}
-      nextLabel={
-        status === "idle" ? "Start Recording"
-        : status === "recording" ? "Stop"
-        : status === "uploading" ? "Uploading..."
-        : "Use This Clip"
-      }
-      loading={loading}
-      disabled={status === "uploading"}
-      skipLabel="Skip for now"
+      title="Voice Snapshot"
+      subtitle="Voice snapshots have been retired in Jainune v2."
+      onNext={handleSkip}
+      disabled={false}
+      nextLabel="Continue"
+      skipLabel="Skip"
       onSkip={handleSkip}
-      error={error}
     >
-      {/* Record button visual */}
       <View style={styles.center}>
-        <TouchableOpacity
-          onPress={
-            status === "recording"
-              ? () => stopRecording()
-              : status === "idle"
-              ? startRecording
-              : undefined
-          }
-          style={[
-            styles.recordBtn,
-            status === "recording" && styles.recordBtnActive,
-          ]}
-          activeOpacity={0.8}
-        >
-          <VoiceIcon
-            color={status === "recording" ? colors.white : colors.saffron}
-            size={40}
-          />
-        </TouchableOpacity>
-
-        {/* Progress arc */}
-        {status === "recording" && (
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
-          </View>
-        )}
-
-        {status === "done" && (
-          <Text style={styles.done}>
-            Clip recorded! ({(durationMs / 1000).toFixed(1)}s)
-          </Text>
-        )}
-
         <Text style={styles.hint}>
-          {status === "idle" && "Tap to start your 7-second recording"}
-          {status === "recording" && `${((MAX_DURATION - durationMs) / 1000).toFixed(1)}s remaining`}
+          Voice intro is no longer required. Tap Continue to proceed to the final consent step.
         </Text>
       </View>
     </OnboardingStep>

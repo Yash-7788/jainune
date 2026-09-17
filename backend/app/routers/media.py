@@ -1,39 +1,38 @@
 """
-Media upload router — presigned S3 URL generation + quarantine flow.
+Media router — single WebP avatar upload via Supabase Storage signed URLs.
 
-POST /v1/media/upload/request   → get presigned PUT URL (quarantine bucket)
-POST /v1/media/upload/confirm   → client confirms upload done → trigger moderation
+POST /v1/media/upload/request   → get signed Supabase upload URL (60s)
+POST /v1/media/upload/confirm   → verify upload landed, store cdn_url in DB
 GET  /v1/media/status/{media_id} → poll processing status
+
+Single-image policy: each user has exactly one avatar at
+    {user_id}/avatar.webp in the 'avatars' Supabase bucket.
+Voice notes: REMOVED from product scope.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.core.config import settings
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
-from app.models.schemas.user import ReorderMediaBody
-from app.services.media_processor import enqueue_moderation
+from app.services.media_processor import (
+    generate_supabase_upload_signed_url,
+    verify_avatar_uploaded,
+    avatar_public_url,
+)
 
 router = APIRouter(prefix="/v1/media", tags=["media"])
 
-# Max file size enforced by presigned policy (bytes)
-_MAX_PHOTO_BYTES = 10 * 1024 * 1024   # 10 MB
-_MAX_VOICE_BYTES = 5 * 1024 * 1024    # 5 MB
-
+# Only photos accepted — voice deprecated
 _ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
-_ALLOWED_VOICE_CT = {
-    "audio/mp4", "audio/mpeg", "audio/ogg", "audio/webm",
-    "audio/m4a", "audio/x-m4a", "audio/aac", "audio/wav",
-}
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024  # 10 MB (client compresses to ~10KB WebP before upload)
 
 
 # ---------------------------------------------------------------------------
@@ -41,18 +40,17 @@ _ALLOWED_VOICE_CT = {
 # ---------------------------------------------------------------------------
 
 class UploadRequestBody(BaseModel):
-    media_type: Literal["photo", "voice"]
+    media_type: Literal["photo"] = "photo"
     content_type: str = Field(..., max_length=64)
     file_size_bytes: int = Field(..., ge=1, le=_MAX_PHOTO_BYTES)
-    position: Optional[int] = Field(None, ge=1, le=6)  # photo ordering slot (1–6); auto-assigned if None
 
 
 class UploadRequestResponse(BaseModel):
     media_id: uuid.UUID
-    presigned_url: str
-    s3_key: str
-    presigned_fields: Optional[dict] = None  # populated for POST multipart uploads (F-011)
-    expires_in_seconds: int = 60
+    signed_url: str
+    path: str
+    cdn_url: str
+    expires_in_seconds: int = 300
 
 
 class ConfirmUploadBody(BaseModel):
@@ -61,20 +59,19 @@ class ConfirmUploadBody(BaseModel):
 
 class MediaStatusResponse(BaseModel):
     media_id: uuid.UUID
-    status: str        # "pending" | "processing" | "approved" | "rejected"
+    status: str  # "pending" | "approved"
     cdn_url: Optional[str] = None
-    rejection_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# POST /v1/media/upload/request
 # ---------------------------------------------------------------------------
 
 @router.post(
     "/upload/request",
     response_model=UploadRequestResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Request a presigned S3 upload URL",
+    summary="Request a signed Supabase Storage upload URL for avatar WebP",
 )
 async def request_upload(
     body: UploadRequestBody,
@@ -83,368 +80,211 @@ async def request_upload(
     redis: RedisDep,
 ) -> UploadRequestResponse:
     """
-    Returns a presigned S3 PUT URL for the quarantine bucket.
-
-    The client uploads the file directly to S3 (no proxy through API server).
-    After upload, the client calls `/upload/confirm` to trigger moderation.
-
-    Content-type and size constraints are enforced via S3 presigned policy conditions.
+    Returns a Supabase signed upload URL for the user's single avatar slot.
+    Client resizes/compresses to WebP (480×600, ≤15KB) before uploading.
+    Uploading overwrites any existing avatar (single-image policy).
     """
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-    await sliding_window_rate_limit(f"ratelimit:media:upload:{user_id}", 20, 60, redis)
+    await sliding_window_rate_limit(
+        f"ratelimit:media:upload:{current_user['user_id']}", 10, 60, redis
+    )
 
-    # Validate content type
-    if body.media_type == "photo":
-        if body.content_type not in _ALLOWED_PHOTO_CT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported photo content type. Allowed: {_ALLOWED_PHOTO_CT}",
-            )
-        if body.file_size_bytes > _MAX_PHOTO_BYTES:
-            raise HTTPException(status_code=400, detail="Photo must be under 10 MB.")
-    else:
-        if body.content_type not in _ALLOWED_VOICE_CT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported voice content type. Allowed: {_ALLOWED_VOICE_CT}",
-            )
-        if body.file_size_bytes > _MAX_VOICE_BYTES:
-            raise HTTPException(status_code=400, detail="Voice clip must be under 5 MB.")
+    if body.content_type not in _ALLOWED_PHOTO_CT:
+        raise HTTPException(status_code=400, detail=f"Unsupported content type: {body.content_type}")
 
-    # Generate S3 key and media_id
+    user_id = current_user["user_id"]
+
+    # Create DB record for the upload intent
     media_id = uuid.uuid4()
-    ext_map = {
-        "image/jpeg": "jpg", "image/png": "png",
-        "image/webp": "webp", "image/heic": "heic",
-        "audio/mp4": "m4a", "audio/m4a": "m4a", "audio/x-m4a": "m4a",
-        "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/webm": "webm",
-        "audio/aac": "aac",
-    }
-    ext = ext_map.get(body.content_type, "bin")
-    s3_key = f"uploads/{user_id}/{body.media_type}/{media_id}.{ext}"
-
-    # Generate presigned POST URL with enforced content-length-range (F-011)
-    presigned_url: str = ""
-    presigned_fields: Optional[dict] = None
-    try:
-        import boto3
-        from botocore.config import Config
-        s3 = boto3.client(
-            "s3",
-            region_name=settings.aws_region,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            config=Config(signature_version="s3v4"),
-        )
-        max_bytes = _MAX_PHOTO_BYTES if body.media_type == "photo" else _MAX_VOICE_BYTES
-        post_response = s3.generate_presigned_post(
-            Bucket=settings.aws_s3_quarantine_bucket,
-            Key=s3_key,
-            Fields={"Content-Type": body.content_type},
-            Conditions=[
-                {"Content-Type": body.content_type},
-                ["content-length-range", 1, max_bytes],
-            ],
-            ExpiresIn=60,
-        )
-        if isinstance(post_response, dict):
-            presigned_url = str(post_response.get("url") or "")
-            presigned_fields = post_response.get("fields") if isinstance(post_response.get("fields"), dict) else None
-        else:
-            presigned_url = "https://s3.quarantine/test"
-            presigned_fields = None
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Could not generate upload URL: {e}",
-        )
-
-    # Limit: 6 photos, 1 voice per user (serialized via advisory xact lock per user/media_type)
     async with db.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))",
-                str(user_id), body.media_type,
-            )
-            existing_rows = await conn.fetch(
-                "SELECT position, status, s3_key FROM user_media WHERE user_id = $1 AND media_type = $2",
-                user_id, body.media_type,
-            )
-            active_count = sum(1 for r in existing_rows if r["status"] != "rejected")
-            limit = 6 if body.media_type == "photo" else 1
+        await conn.execute(
+            """
+            INSERT INTO user_photos (id, user_id, media_type, status, s3_key, position)
+            VALUES ($1, $2, 'photo', 'pending', $3, 1)
+            ON CONFLICT (user_id, position) DO UPDATE
+                SET id = $1, status = 'pending', s3_key = $3, cdn_url = NULL, updated_at = NOW()
+            """,
+            media_id,
+            uuid.UUID(str(user_id)),
+            f"{user_id}/avatar.webp",
+        )
 
-            if body.media_type == "voice":
-                target_position = 1
-            else:
-                used_pos = {r["position"] for r in existing_rows if r["status"] != "rejected"}
-                free_slots = [p for p in range(1, 7) if p not in used_pos]
-                if body.position is not None and 1 <= body.position <= 6:
-                    target_position = body.position
-                else:
-                    target_position = free_slots[0] if free_slots else 1
-
-            # Prevent replacing slot while previous upload is actively undergoing moderation (Finding 12)
-            for r in existing_rows:
-                if r["position"] == target_position and r["status"] == "processing":
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="Previous upload for this slot is currently being processed. Please wait.",
-                    )
-
-            slot_is_new = not any(r["position"] == target_position and r["status"] != "rejected" for r in existing_rows)
-            if slot_is_new and active_count >= limit:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Maximum {limit} {body.media_type}(s) allowed.",
-                )
-
-            old_row = next((r for r in existing_rows if r["position"] == target_position), None)
-            old_s3_key = old_row["s3_key"] if old_row else None
-
-            await conn.execute(
-                """
-                INSERT INTO user_media
-                    (id, user_id, media_type, s3_key, position, status, is_processed)
-                VALUES ($1, $2, $3, $4, $5, 'pending', FALSE)
-                ON CONFLICT (user_id, media_type, position) DO UPDATE
-                SET id = EXCLUDED.id,
-                    s3_key = EXCLUDED.s3_key,
-                    status = 'pending',
-                    is_processed = FALSE,
-                    cdn_url = NULL,
-                    created_at = NOW()
-                """,
-                media_id, user_id, body.media_type, s3_key, target_position,
-            )
-
-            if old_s3_key and old_s3_key != s3_key and "uploads/" in old_s3_key:
-                try:
-                    from app.services.media_processor import _delete_from_quarantine
-                    await asyncio.to_thread(_delete_from_quarantine, old_s3_key)
-                except Exception as exc:
-                    logger.warning("Failed to delete quarantined S3 key: %s", exc)
+    # Generate Supabase signed upload URL
+    res = await generate_supabase_upload_signed_url(user_id)
 
     return UploadRequestResponse(
         media_id=media_id,
-        presigned_url=presigned_url,
-        s3_key=s3_key,
-        presigned_fields=presigned_fields,
+        signed_url=res["signed_url"],
+        path=res["path"],
+        cdn_url=res["cdn_url"],
+        expires_in_seconds=300,
     )
 
 
-@router.get(
-    "/presign-upload",
-    response_model=UploadRequestResponse,
-    summary="Presign upload GET adapter for mobile compatibility",
-)
-async def presign_upload_get(
-    current_user: CurrentUser,
-    db: DBDep,
-    redis: RedisDep,
-    type: str = Query("photo", pattern="^(photo|voice)$"),
-    position: Optional[int] = Query(None, ge=1, le=6),
-) -> UploadRequestResponse:
-    # Compatibility adapter for mobile with full capacity (BUG-055)
-    media_type = type if isinstance(type, str) else "photo"
-    pos = position if isinstance(position, int) else None
-    ct = "image/jpeg" if media_type == "photo" else "audio/m4a"
-    size = _MAX_PHOTO_BYTES if media_type == "photo" else _MAX_VOICE_BYTES
-    body = UploadRequestBody(
-        media_type=media_type,
-        content_type=ct,
-        file_size_bytes=size,
-        position=pos,
-    )
-    return await request_upload(body, current_user, db, redis)
-
+# ---------------------------------------------------------------------------
+# POST /v1/media/upload/confirm
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/upload/confirm",
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Confirm upload completed — triggers moderation",
+    status_code=status.HTTP_200_OK,
+    summary="Confirm client upload completed; verify object in Supabase Storage",
 )
 async def confirm_upload(
     body: ConfirmUploadBody,
     current_user: CurrentUser,
     db: DBDep,
     redis: RedisDep,
-) -> dict:
-    """
-    Client calls this after the direct-to-S3 PUT succeeds.
-    Sets media status to 'processing' and enqueues AWS Rekognition moderation.
-    CDN URL is populated once moderation passes.
-    """
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-    await sliding_window_rate_limit(f"ratelimit:media:confirm:{user_id}", 30, 60, redis)
-
-    # Atomic: only transition pending → processing; ignore if already in another state
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE user_media SET status = 'processing'
-            WHERE id = $1 AND user_id = $2 AND status = 'pending'
-            RETURNING id, s3_key, media_type
-            """,
-            body.media_id, user_id,
-        )
-
-    if not row:
-        # Check whether it exists at all (404) or already transitioned (409)
-        async with db.acquire() as conn:
-            exists = await conn.fetchval(
-                "SELECT status FROM user_media WHERE id = $1 AND user_id = $2",
-                body.media_id, user_id,
-            )
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Media record not found.")
-        raise HTTPException(status_code=409, detail=f"Media already in state: {exists}")
-
-    # Enqueue moderation job (non-blocking)
-    await enqueue_moderation(
-        media_id=body.media_id,
-        s3_key=row["s3_key"],
-        media_type=row["media_type"],
-        user_id=user_id,
+):
+    await sliding_window_rate_limit(
+        f"ratelimit:media:confirm:{current_user['user_id']}", 10, 60, redis
     )
 
-    return {"media_id": str(body.media_id), "status": "processing"}
+    user_id = current_user["user_id"]
 
+    # Verify the object actually landed in Supabase
+    uploaded = await verify_avatar_uploaded(user_id)
+    if not uploaded:
+        raise HTTPException(
+            status_code=422,
+            detail="Avatar not found in storage. Ensure upload completed before calling confirm.",
+        )
+
+    cdn_url = avatar_public_url(user_id)
+
+    # Mark approved and store CDN URL
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE user_photos
+               SET status = 'approved', cdn_url = $1, updated_at = NOW()
+             WHERE id = $2 AND user_id = $3
+            """,
+            cdn_url,
+            body.media_id,
+            uuid.UUID(str(user_id)),
+        )
+        # Keep users.avatar_url in sync
+        await conn.execute(
+            "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+            cdn_url,
+            uuid.UUID(str(user_id)),
+        )
+
+    return {"success": True, "cdn_url": cdn_url}
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/media/status/{media_id}
+# ---------------------------------------------------------------------------
 
 @router.get(
     "/status/{media_id}",
     response_model=MediaStatusResponse,
-    summary="Poll media processing status",
+    summary="Poll avatar upload status",
 )
 async def get_media_status(
     media_id: uuid.UUID,
     current_user: CurrentUser,
     db: DBDep,
-) -> MediaStatusResponse:
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-
+):
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, status, cdn_url, rejection_reason FROM user_media WHERE id = $1 AND user_id = $2",
-            media_id, user_id,
+            "SELECT id, status, cdn_url FROM user_photos WHERE id = $1 AND user_id = $2",
+            media_id,
+            uuid.UUID(str(current_user["user_id"])),
         )
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Media not found.")
-
-    raw_reason = row["rejection_reason"]
-    # Sanitize rejection reason to prevent leaking stack traces or internal exception details (NEW-030)
-    safe_reason = raw_reason
-    if raw_reason and ("Traceback" in raw_reason or raw_reason.startswith("Processing error:") or "{" in raw_reason):
-        safe_reason = "PROCESSING_FAILED"
+    if row is None:
+        raise HTTPException(status_code=404, detail="Media record not found")
 
     return MediaStatusResponse(
         media_id=row["id"],
         status=row["status"],
         cdn_url=row["cdn_url"],
-        rejection_reason=safe_reason,
     )
 
 
+# ---------------------------------------------------------------------------
+# DELETE /v1/media/{media_id}
+# ---------------------------------------------------------------------------
+
 @router.delete(
     "/{media_id}",
-    summary="Delete a single photo or voice note",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a photo",
 )
 async def delete_media(
     media_id: uuid.UUID,
     current_user: CurrentUser,
     db: DBDep,
-    redis: RedisDep = None,
 ) -> dict:
-    from app.services.account_service import _delete_s3_keys_sync
-    import asyncio
-
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-    if redis is not None:
-        await sliding_window_rate_limit(f"ratelimit:media:delete:{user_id}", 30, 60, redis)
-
+    user_id = current_user["user_id"]
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, s3_key, status FROM user_media WHERE id = $1 AND user_id = $2",
-            media_id, user_id,
+            "SELECT id, s3_key FROM user_photos WHERE id = $1 AND user_id = $2",
+            media_id,
+            uuid.UUID(str(user_id)),
         )
         if not row:
-            raise HTTPException(status_code=404, detail="Media item not found.")
+            row = await conn.fetchrow(
+                "SELECT id, s3_key FROM user_media WHERE id = $1 AND user_id = $2",
+                media_id,
+                uuid.UUID(str(user_id)),
+            )
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-        s3_key = row["s3_key"]
-        if s3_key:
-            failed_keys = []
-            try:
-                failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, [s3_key])
-            except Exception:
-                failed_keys = [s3_key]
+        from app.services.media_processor import delete_user_avatar
+        await delete_user_avatar(user_id)
 
-            if failed_keys:
-                r = redis
-                if r is None:
-                    try:
-                        from app.core.redis import get_redis
-                        r = get_redis()
-                    except Exception:
-                        r = None
-                if r is not None:
-                    try:
-                        await r.sadd("s3:failed_deletions", *failed_keys)
-                    except Exception as exc:
-                        log.warning("Failed to record failed S3 deletion in retry set: %s", exc)
+        await conn.execute(
+            "DELETE FROM user_photos WHERE id = $1 AND user_id = $2",
+            media_id,
+            uuid.UUID(str(user_id)),
+        )
+        await conn.execute(
+            "DELETE FROM user_media WHERE id = $1 AND user_id = $2",
+            media_id,
+            uuid.UUID(str(user_id)),
+        )
+        await conn.execute(
+            "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+            uuid.UUID(str(user_id)),
+        )
+    return {"success": True}
 
-        await conn.execute("DELETE FROM user_media WHERE id = $1 AND user_id = $2", media_id, user_id)
 
-    return {"success": True, "message": "Media item deleted successfully."}
+# ---------------------------------------------------------------------------
+# PATCH /v1/media/reorder
+# ---------------------------------------------------------------------------
+
+from app.models.schemas.user import ReorderMediaBody, MediaPositionItem
+
+ReorderMediaItem = MediaPositionItem
 
 
 @router.patch(
     "/reorder",
-    summary="Reorder user profile photos",
+    status_code=status.HTTP_200_OK,
+    summary="Reorder photos",
 )
 async def reorder_media(
     body: ReorderMediaBody,
     current_user: CurrentUser,
     db: DBDep,
-    redis: RedisDep = None,
 ) -> dict:
-    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
-    if redis is not None:
-        await sliding_window_rate_limit(f"ratelimit:media:reorder:{user_id}", 30, 60, redis)
-
-    if not body.positions:
-        return {"success": True, "message": "Photos reordered successfully."}
-
-    positions = [item.position for item in body.positions]
-    media_ids = [item.media_id for item in body.positions]
-    if len(positions) != len(set(positions)):
-        raise HTTPException(status_code=400, detail="Duplicate positions in reorder request.")
-    if len(media_ids) != len(set(media_ids)):
-        raise HTTPException(status_code=400, detail="Duplicate media IDs in reorder request.")
-
+    user_id = current_user["user_id"]
     async with db.acquire() as conn:
-        async with conn.transaction():
-            if hasattr(conn, "fetchval"):
-                owned_count = await conn.fetchval(
-                    "SELECT COUNT(*) FROM user_media WHERE id = ANY($1::uuid[]) AND user_id = $2 AND media_type = 'photo'",
-                    media_ids, user_id,
-                )
-                if isinstance(owned_count, int) and owned_count != len(media_ids):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="One or more photos not found or do not belong to you.",
-                    )
-
-            case_clauses = []
-            params = []
-            idx = 1
-            for item in body.positions:
-                case_clauses.append(f"WHEN id = ${idx} THEN ${idx + 1}")
-                params.extend([item.media_id, item.position])
-                idx += 2
-            params.extend([media_ids, user_id])
-            query = f"""
-                UPDATE user_media SET position = CASE {' '.join(case_clauses)} END
-                WHERE id = ANY(${idx}::uuid[]) AND user_id = ${idx + 1} AND media_type = 'photo'
-            """  # nosec B608
-            await conn.execute(query, *params)
-    return {"success": True, "message": "Photos reordered successfully."}
+        for item in body.positions:
+            await conn.execute(
+                "UPDATE user_photos SET position = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3",
+                item.position,
+                item.media_id,
+                uuid.UUID(str(user_id)),
+            )
+            await conn.execute(
+                "UPDATE user_media SET position = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3 AND media_type = 'photo'",
+                item.position,
+                item.media_id,
+                uuid.UUID(str(user_id)),
+            )
+    return {"success": True}

@@ -79,7 +79,8 @@ async def get_dilemma_feed(
     Already-voted dilemmas appear at the end with user_choice populated.
     Supports cursor pagination via ISO timestamp or fallback offset.
     """
-    await sliding_window_rate_limit(f"ratelimit:arcade:feed:{current_user['user_id']}", 60, 60, redis)
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:arcade:feed:{user_id}", 60, 60, redis)
     cursor_dt = None
     if cursor:
         try:
@@ -108,7 +109,7 @@ async def get_dilemma_feed(
                 ORDER BY (dv.choice IS NULL) DESC, d.created_at DESC
                 LIMIT $3
                 """,
-                current_user["user_id"],
+                user_id,
                 cursor_dt,
                 limit,
             )
@@ -131,7 +132,7 @@ async def get_dilemma_feed(
                 ORDER BY (dv.choice IS NULL) DESC, d.created_at DESC
                 LIMIT $2 OFFSET $3
                 """,
-                current_user["user_id"],
+                user_id,
                 limit,
                 offset,
             )
@@ -172,7 +173,8 @@ async def vote_on_dilemma(
     Cast a vote on a dilemma. One vote per user per dilemma (idempotent).
     Increments the appropriate counter on the dilemmas table atomically.
     """
-    await sliding_window_rate_limit(f"ratelimit:arcade:vote:{current_user['user_id']}", 60, 60, redis)
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:arcade:vote:{user_id}", 60, 60, redis)
     async with pool.acquire() as conn:
         # Check dilemma exists
         exists = await conn.fetchval(
@@ -186,7 +188,7 @@ async def vote_on_dilemma(
         existing = await conn.fetchval(
             "SELECT choice FROM dilemma_votes WHERE dilemma_id = $1 AND user_id = $2",
             dilemma_id,
-            current_user["user_id"],
+            user_id,
         )
         if existing:
             return {"already_voted": True, "choice": existing}
@@ -200,14 +202,14 @@ async def vote_on_dilemma(
                 RETURNING id
                 """,
                 dilemma_id,
-                current_user["user_id"],
+                user_id,
                 body.choice,
             )
             if inserted is None:
                 existing_choice = await conn.fetchval(
                     "SELECT choice FROM dilemma_votes WHERE dilemma_id = $1 AND user_id = $2",
                     dilemma_id,
-                    current_user["user_id"],
+                    user_id,
                 )
                 return {"already_voted": True, "choice": existing_choice or body.choice}
 
@@ -242,7 +244,8 @@ async def get_dilemma_results(
     Returns aggregate vote breakdown.
     User must have voted to see results (prevents anchoring bias).
     """
-    await sliding_window_rate_limit(f"ratelimit:arcade:results:{current_user['user_id']}", 60, 60, redis)
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:arcade:results:{user_id}", 60, 60, redis)
     async with pool.acquire() as conn:
         dilemma = await conn.fetchrow(
             """
@@ -253,7 +256,7 @@ async def get_dilemma_results(
             WHERE d.id = $1
             """,
             dilemma_id,
-            current_user["user_id"],
+            user_id,
         )
 
     if dilemma is None:
@@ -334,7 +337,8 @@ async def get_arcade_wallet(
     redis: aioredis.Redis = Depends(get_redis_client),
 ):
     """Fetch current user's arcade token balance (spins and dice rolls)."""
-    await sliding_window_rate_limit(f"ratelimit:arcade:wallet:{current_user['user_id']}", 60, 60, redis)
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:arcade:wallet:{user_id}", 60, 60, redis)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -342,13 +346,18 @@ async def get_arcade_wallet(
             FROM user_arcade_wallet
             WHERE user_id = $1
             """,
-            current_user["user_id"],
+            user_id,
         )
     return {
-        "user_id": current_user["user_id"],
+        "user_id": user_id,
         "available_spins": row["available_spins"] if row else 0,
         "available_dice_rolls": row["available_dice_rolls"] if row else 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Serendipity Arcade Action Endpoints
+# ---------------------------------------------------------------------------
 
 
 @router.post("/spin", status_code=status.HTTP_200_OK)
@@ -361,13 +370,14 @@ async def spin_serendipity_wheel(
     Consume 1 spin credit from wallet and trigger instantaneous random Bangalore pairing.
     (SUBSCRIPTION_SPEC.md §4.2: Kinetic Wheel Spin)
     """
-    await sliding_window_rate_limit(f"ratelimit:arcade:spin:{current_user['user_id']}", 30, 60, redis)
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:arcade:spin:{user_id}", 30, 60, redis)
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Concurrency lock on user arcade wallet to serialize burst requests
             await conn.execute(
                 "SELECT available_spins FROM user_arcade_wallet WHERE user_id = $1 FOR UPDATE",
-                current_user["user_id"],
+                user_id,
             )
             # Atomic deduction
             remaining = await conn.fetchval(
@@ -378,7 +388,7 @@ async def spin_serendipity_wheel(
                  WHERE user_id = $1 AND available_spins > 0
                 RETURNING available_spins
                 """,
-                current_user["user_id"],
+                user_id,
             )
             if remaining is None:
                 raise HTTPException(
@@ -393,11 +403,10 @@ async def spin_serendipity_wheel(
                     (user_id, action_type, spins_delta, status)
                 VALUES ($1, 'spend_spin', -1, 'spent')
                 """,
-                current_user["user_id"],
+                user_id,
             )
 
             # Find active candidate with safety, blocklist, and preference filters
-            user_id = current_user.get("user_id") or current_user.get("id")
             show_me = current_user.get("show_me")
             target_gender = "man" if show_me in ("men", "man") else ("woman" if show_me in ("women", "woman") else None)
 
@@ -441,7 +450,7 @@ async def spin_serendipity_wheel(
                            updated_at = NOW()
                      WHERE user_id = $1
                     """,
-                    current_user["user_id"],
+                    user_id,
                 )
                 await conn.execute(
                     """
@@ -449,7 +458,7 @@ async def spin_serendipity_wheel(
                         (user_id, action_type, spins_delta, status)
                     VALUES ($1, 'refund_spin_no_candidate', 1, 'refunded')
                     """,
-                    current_user["user_id"],
+                    user_id,
                 )
                 return {
                     "success": False,
@@ -492,6 +501,29 @@ async def spin_serendipity_wheel(
             chat_id = chat_row["id"]
             await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
 
+            # Record mutual interactions so candidate is excluded from swipe feed
+            await conn.execute(
+                """
+                INSERT INTO interactions (actor_id, target_id, action_type, interaction_type)
+                VALUES ($1, $2, 'like', 'like'), ($2, $1, 'like', 'like')
+                ON CONFLICT (actor_id, target_id) DO NOTHING
+                """,
+                user_id, cand_id,
+            )
+
+    # Async side effects outside DB transaction
+    if candidate and match_row and match_row.get("id"):
+        try:
+            from app.workers.notification_worker import notify_new_match
+            notify_new_match.delay(str(match_row["id"]))
+        except Exception:
+            pass
+
+        try:
+            await redis.delete(f"feed:{user_id}", f"feed:{candidate['id']}")
+        except Exception:
+            pass
+
     return {
         "success": True,
         "action": "spin",
@@ -516,7 +548,7 @@ async def roll_lucky_dice(
     Consume 1 dice roll credit from wallet and generate lucky match pairing.
     (SUBSCRIPTION_SPEC.md §4.3: Lucky Match Dice Roll)
     """
-    user_id = current_user.get("user_id") or current_user.get("id")
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     await sliding_window_rate_limit(f"ratelimit:arcade:roll:{user_id}", 30, 60, redis)
     import secrets
     sys_rand = secrets.SystemRandom()
@@ -652,6 +684,29 @@ async def roll_lucky_dice(
             )
             chat_id = chat_row["id"]
             await conn.execute("UPDATE matches SET chat_id = $1 WHERE id = $2", chat_id, match_row["id"])
+
+            # Record mutual interactions so candidate is excluded from swipe feed
+            await conn.execute(
+                """
+                INSERT INTO interactions (actor_id, target_id, action_type, interaction_type)
+                VALUES ($1, $2, 'like', 'like'), ($2, $1, 'like', 'like')
+                ON CONFLICT (actor_id, target_id) DO NOTHING
+                """,
+                user_id, cand_id,
+            )
+
+    # Async side effects outside DB transaction
+    if candidate and match_row and match_row.get("id"):
+        try:
+            from app.workers.notification_worker import notify_new_match
+            notify_new_match.delay(str(match_row["id"]))
+        except Exception:
+            pass
+
+        try:
+            await redis.delete(f"feed:{user_id}", f"feed:{candidate['id']}")
+        except Exception:
+            pass
 
     # Register in Redis active dice pool with 30m TTL
     try:

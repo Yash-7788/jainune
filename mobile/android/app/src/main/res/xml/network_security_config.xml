@@ -46,10 +46,9 @@
     </trust-anchors>
   </domain-config>
 
-  <!-- AWS S3 presigned upload — no pinning needed, short-lived URLs -->
+  <!-- Supabase Storage signed upload — system certificates -->
   <domain-config cleartextTrafficPermitted="false">
-    <domain includeSubdomains="true">s3.ap-south-1.amazonaws.com</domain>
-    <domain includeSubdomains="true">jainune-media-quarantine.s3.ap-south-1.amazonaws.com</domain>
+    <domain includeSubdomains="true">supabase.co</domain>
     <trust-anchors>
       <certificates src="system" />
     </trust-anchors>

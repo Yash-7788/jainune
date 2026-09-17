@@ -48,10 +48,10 @@ import { OrbitIcon, HeartIcon, ChatIcon, PersonIcon } from "../components/core/I
 export type AuthStackParams = {
   Splash: undefined;
   Welcome: undefined;
-  AuthMethod: undefined;
+  AuthMethod: { phone?: string; phoneVerified?: boolean } | undefined;
   Phone: undefined;
   OTPVerify: { phoneNumber: string; masked: string; mode?: "phone" | "email" };
-  Email: undefined;
+  Email: { phone?: string; phoneVerified?: boolean } | undefined;
   EmailOTPVerify: { email: string; masked: string };
 };
 

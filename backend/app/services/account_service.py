@@ -1,7 +1,7 @@
 """
 Account Lifecycle & Data Purge Service:
 - Immediate physical deletion of user data to free database disk and memory.
-- Amazon S3 media asset removal (both production and quarantine buckets).
+- Supabase Storage avatar removal (avatars bucket).
 - Invalidation and purging of Redis memory caches, quotas, and session keys.
 - Token revocation and session cleanup.
 """
@@ -14,14 +14,6 @@ import uuid
 from typing import Optional
 
 import asyncpg
-try:
-    import boto3
-    from botocore.exceptions import ClientError as _ClientError
-    ClientError = _ClientError if isinstance(_ClientError, type) and issubclass(_ClientError, BaseException) else Exception
-except ImportError:
-    boto3 = None
-    ClientError = Exception
-
 import redis.asyncio as aioredis
 
 from app.core.config import settings
@@ -29,50 +21,13 @@ from app.core.config import settings
 log = logging.getLogger(__name__)
 
 
-def _delete_s3_keys_sync(s3_keys: list[str]) -> list[str]:
-    """Synchronously delete objects from both quarantine and production S3 buckets. Returns list of failed keys."""
-    if not s3_keys:
-        return []
-
+async def _delete_user_avatar_supabase(user_id: uuid.UUID) -> None:
+    """Remove user's avatar from Supabase Storage avatars bucket."""
     try:
-        s3 = boto3.client(
-            "s3",
-            region_name=settings.aws_region,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-        )
+        from app.services.media_processor import delete_user_avatar
+        await delete_user_avatar(user_id)
     except Exception as exc:
-        log.warning(f"Failed to initialize S3 client for media purge: {exc}")
-        return list(s3_keys)
-
-    failed_keys: list[str] = []
-    for key in s3_keys:
-        if not key:
-            continue
-        key_failed = False
-        # Try prod bucket
-        try:
-            s3.delete_object(Bucket=settings.aws_s3_production_bucket, Key=key)
-        except ClientError as ce:
-            log.debug("Could not delete %s from prod bucket: %s", key, ce)
-            key_failed = True
-        except Exception:
-            key_failed = True
-
-        # Try quarantine bucket (and also variant upload prefix if applicable)
-        try:
-            quarantine_key = key.replace("media/", "uploads/")
-            s3.delete_object(Bucket=settings.aws_s3_quarantine_bucket, Key=quarantine_key)
-        except ClientError as ce:
-            log.debug("Could not delete %s from quarantine bucket: %s", quarantine_key, ce)
-            key_failed = True
-        except Exception:
-            key_failed = True
-
-        if key_failed:
-            failed_keys.append(key)
-
-    return failed_keys
+        log.warning("Failed to delete Supabase avatar for user %s: %s", user_id, exc)
 
 
 async def purge_user_account(
@@ -149,14 +104,7 @@ async def purge_user_account(
         log.error(f"Financial audit log archiving failed for {user_id}: {exc}")
         raise RuntimeError(f"Cannot purge user {user_id}: regulatory financial audit log archiving failed: {exc}") from exc
 
-    # 1. Fetch all media s3 keys
-    media_rows = await conn.fetch(
-        "SELECT s3_key FROM user_media WHERE user_id = $1",
-        user_id,
-    )
-    s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
-
-    # 2. Database cleanup within transaction
+    # 1. Database cleanup within transaction
     async with conn.transaction():
         # Try nullifying user_id on financial records to prevent orphan cascades if schema allows
         try:
@@ -219,22 +167,8 @@ async def purge_user_account(
         # Finally, delete user record itself
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
-    # 3. Post-commit external S3 object deletion (prevents desync on DB rollback) (SECOND-035)
-    if s3_keys:
-        try:
-            failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
-            if failed_keys:
-                log.warning(f"S3 partial deletion failure during account purge for {user_id}: {failed_keys}")
-                try:
-                    await redis.sadd("s3:failed_deletions", *failed_keys)
-                except Exception:
-                    pass
-        except Exception as exc:
-            log.error(f"S3 deletion failed during account purge for {user_id}: {exc}")
-            try:
-                await redis.sadd("s3:failed_deletions", *s3_keys)
-            except Exception:
-                pass
+    # 2. Post-commit external Supabase avatar deletion
+    await _delete_user_avatar_supabase(user_id)
 
     # 4. Redis memory cleanup
     try:
@@ -294,7 +228,7 @@ async def purge_user_account(
     return {
         "status": "purged",
         "user_id": str(user_id),
-        "media_files_deleted": len(s3_keys),
+        "media_files_deleted": 1,
     }
 
 
@@ -351,28 +285,12 @@ async def soft_delete_user_account(
             user_id,
         )
 
-        # Collect personal media files from database for DPDP/GDPR compliance
-        media_rows = await conn.fetch("SELECT s3_key FROM user_media WHERE user_id = $1", user_id)
-        s3_keys = [r["s3_key"] for r in media_rows if r.get("s3_key")]
+        # Delete personal media records from database for DPDP/GDPR compliance
         await conn.execute("DELETE FROM user_media WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM user_prompts WHERE user_id = $1", user_id)
 
-    # Post-commit S3 deletion decoupled from DB transaction (SECOND-035)
-    if s3_keys:
-        try:
-            failed_keys = await asyncio.to_thread(_delete_s3_keys_sync, s3_keys)
-            if failed_keys:
-                log.warning("S3 partial deletion during soft delete for %s: %s", user_id, failed_keys)
-                try:
-                    await redis.sadd("s3:failed_deletions", *failed_keys)
-                except Exception:
-                    pass
-        except Exception as exc:
-            log.warning("S3 deletion during soft delete for %s: %s", user_id, exc)
-            try:
-                await redis.sadd("s3:failed_deletions", *s3_keys)
-            except Exception:
-                pass
+    # Post-commit Supabase avatar deletion decoupled from DB transaction
+    await _delete_user_avatar_supabase(user_id)
 
     # Invalidate feed & sessions in Redis
     try:

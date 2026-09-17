@@ -85,7 +85,7 @@ export default function WelcomeScreen() {
     if (currentIndex < SLIDES.length - 1) {
       flatRef.current?.scrollToIndex({ index: currentIndex + 1, animated: true });
     } else {
-      navigation.navigate("AuthMethod");
+      navigation.navigate("Phone");
     }
   };
 
@@ -219,7 +219,7 @@ export default function WelcomeScreen() {
 
         <GhostButton
           label="Already have an account? Sign In"
-          onPress={() => navigation.navigate("AuthMethod")}
+          onPress={() => navigation.navigate("Phone")}
           style={{ marginTop: spacing.md }}
         />
       </View>

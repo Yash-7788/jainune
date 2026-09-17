@@ -237,24 +237,34 @@ export async function submitStep22(): Promise<OnboardingStatus> {
   return res.data;
 }
 
-// GET /v1/media/presign-upload?type=photo|voice
-export async function getPresignedUploadUrl(type: "photo" | "voice", position?: number): Promise<PresignData> {
+// POST /v1/media/upload/request (Supabase signed URL)
+export async function getPresignedUploadUrl(
+  type: "photo" | "voice",
+  position?: number,
+  fileSizeBytes: number = 15360,
+  contentType: string = "image/webp"
+): Promise<PresignData> {
   const res = await apiPost<{
     media_id: string;
-    presigned_url: string;
-    s3_key: string;
+    signed_url?: string;
+    presigned_url?: string;
+    cdn_url?: string;
+    path?: string;
+    s3_key?: string;
     presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
-    media_type: type,
-    content_type: type === "photo" ? "image/jpeg" : "audio/m4a",
-    file_size_bytes: type === "photo" ? 2 * 1024 * 1024 : 1024 * 1024,
-    ...(position !== undefined ? { position } : {}),
+    media_type: "photo",
+    content_type: contentType,
+    file_size_bytes: fileSizeBytes,
+    position,
   });
-  if (!res.success) throw { _apiError: res.error };
+  if (!res.data) {
+    throw { _apiError: res.error };
+  }
   return {
     media_id: res.data.media_id,
-    upload_url: res.data.presigned_url,
-    cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
+    upload_url: res.data.signed_url || res.data.presigned_url || "",
+    cdn_url: res.data.cdn_url || (res.data.s3_key ? `https://cdn.jainune.com/${res.data.s3_key}` : ""),
     presigned_fields: res.data.presigned_fields,
   };
 }

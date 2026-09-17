@@ -1145,7 +1145,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         mock_conn.fetchrow.return_value = None
         with patch("app.routers.media.sliding_window_rate_limit", new_callable=AsyncMock):
             with self.assertRaises(HTTPException) as ctx:
-                await delete_media(media_id=media_id, current_user={"id": str(user_a)}, db=mock_db, redis=mock_redis)
+                await delete_media(media_id=media_id, current_user={"user_id": user_a}, db=mock_db)
             self.assertEqual(ctx.exception.status_code, 404)
 
         # 2. Chat IDOR: unauthorized participant access returns 404
@@ -1758,8 +1758,8 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             razorpay_key_id="rzp_live_k8a92j1h829",
             razorpay_key_secret="live_rzp_secret_key_89218291",
             razorpay_webhook_secret="live_rzp_webhook_secret_prod_99182918",  # F-02/R-02
-            aws_access_key_id="AKIA_PROD_LIVE_KEY_992",
-            aws_secret_access_key="prod_live_aws_secret_value_39182918",
+            supabase_url="https://xyzproject.supabase.co",
+            supabase_service_role_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.prod_service_role_secret",
             msg91_auth_key="msg91_live_auth_token_88291",
             cloudflare_origin_secret="cf_live_origin_tunnel_secret_9918",
             turnstile_secret_key="0x4AAAAAA_live_turnstile_secret_8819",

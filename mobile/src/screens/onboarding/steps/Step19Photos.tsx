@@ -23,6 +23,7 @@ import { colors, spacing, typography, radii } from "../../../theme/tokens";
 import { useOnboardingStore } from "../../../store/onboardingStore";
 import { submitStep19, getPresignedUploadUrl, uploadToS3, confirmUpload } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
+import { optimizeProfilePhoto } from "../../../utils/imageOptimizer";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
 
 type Nav = NativeStackNavigationProp<OnboardingStackParams, "Step19">;
@@ -45,17 +46,22 @@ export default function Step19Screen() {
     setUploading(true);
     setError(null);
     try {
-      const nextPosition = Math.min(6, photos.length + 1);
-      const { media_id, upload_url, cdn_url, presigned_fields } = await getPresignedUploadUrl("photo", nextPosition);
-      await uploadToS3(upload_url, asset.uri, asset.mimeType ?? "image/jpeg", presigned_fields);
+      const optimized = await optimizeProfilePhoto(asset.uri);
+      const { media_id, upload_url, cdn_url, presigned_fields } = await getPresignedUploadUrl(
+        "photo",
+        1,
+        optimized.fileSizeBytes,
+        "image/webp"
+      );
+      await uploadToS3(upload_url, optimized.uri, "image/webp", presigned_fields);
       await confirmUpload(media_id);
-      setPhotos((prev) => [...prev, { mediaId: media_id, localUri: asset.uri, cdnUrl: cdn_url }]);
-    } catch (err) {
+      setPhotos([{ mediaId: media_id, localUri: optimized.uri, cdnUrl: cdn_url }]);
+    } catch (err: any) {
       setError(extractError(err));
     } finally {
       setUploading(false);
     }
-  }, [photos.length]);
+  }, []);
 
   // Android Activity destruction recovery (budget devices / low memory)
   useEffect(() => {
@@ -121,39 +127,38 @@ export default function Step19Screen() {
 
   return (
     <OnboardingStep
-      title="Add your photos"
-      subtitle="Upload 1–6 photos. First photo is your main profile picture."
+      title="Add your profile photo"
+      subtitle="Upload a clear photo (auto-compressed to WebP ≤15 KB)."
       onNext={handleNext}
       loading={loading}
       disabled={photos.length === 0 || loading}
       error={error}
-      scrollable
     >
       <View style={styles.grid}>
-        {/* Existing photos */}
-        {photos.map((photo, idx) => (
+        {/* Existing photo */}
+        {photos.map((photo) => (
           <View key={photo.mediaId} style={styles.slot}>
             <Image source={{ uri: photo.localUri }} style={styles.slotImage} />
-            {idx === 0 && (
-              <View style={styles.mainBadge}>
-                <Text style={styles.mainText}>Main</Text>
-              </View>
-            )}
+            <View style={styles.mainBadge}>
+              <Text style={styles.mainText}>Main</Text>
+            </View>
             <TouchableOpacity
               style={styles.removeBtn}
               onPress={() => removePhoto(photo.mediaId)}
+              accessibilityLabel="Remove photo"
             >
               <Text style={styles.removeBtnText}>×</Text>
             </TouchableOpacity>
           </View>
         ))}
 
-        {/* Add slot */}
-        {photos.length < 6 && (
+        {/* Upload slot */}
+        {photos.length === 0 && (
           <TouchableOpacity
             style={[styles.slot, styles.addSlot]}
             onPress={pickAndUpload}
             disabled={uploading}
+            accessibilityLabel="Add profile photo"
           >
             {uploading ? (
               <ActivityIndicator color={colors.saffron} />
@@ -161,13 +166,6 @@ export default function Step19Screen() {
               <Text style={styles.addSlotText}>+</Text>
             )}
           </TouchableOpacity>
-        )}
-
-        {/* Empty slots */}
-        {Array.from({ length: Math.max(0, 6 - photos.length - (photos.length < 6 ? 1 : 0)) }).map(
-          (_, i) => (
-            <View key={`empty-${i}`} style={[styles.slot, styles.emptySlot]} />
-          )
         )}
       </View>
 

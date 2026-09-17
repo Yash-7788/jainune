@@ -47,7 +47,7 @@ export interface MyProfile {
 }
 
 export interface SubscriptionStatus {
-  tier: "free" | "plus" | "gold" | "platinum" | "jainune_plus";
+  tier: "free" | "plus" | "gold" | "platinum" | "jainune_plus" | "base_399" | "premium_799" | "ultra_1499";
   is_active?: boolean;
   status?: "active" | "halted" | "cancelled" | "expired" | null;
   plan_id?: string | null;
@@ -215,32 +215,39 @@ export async function updateVoiceSnapshot(media_id: string): Promise<{ voice_sna
 export interface PresignUploadResponse {
   upload_url: string;
   media_id: string;
-  cdn_url: string;
+  cdn_url?: string;
+  path?: string;
   presigned_fields?: Record<string, string> | null;
 }
 
 export async function presignUpload(
-  contentType: string,
+  mimeType: string,
   fileSizeBytes: number,
   mediaType: "photo" | "voice" = "photo",
   position?: number
 ): Promise<PresignUploadResponse> {
   const res = await apiPost<{
     media_id: string;
-    presigned_url: string;
-    s3_key: string;
+    signed_url?: string;
+    presigned_url?: string;
+    cdn_url?: string;
+    path?: string;
+    s3_key?: string;
     presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
     media_type: mediaType,
-    content_type: contentType,
+    content_type: mimeType,
     file_size_bytes: fileSizeBytes,
-    ...(position !== undefined ? { position } : {}),
+    position,
   });
-  if (!res.success) throw { _apiError: res.error };
+  if (!res.data) {
+    throw { _apiError: res.error };
+  }
   return {
-    upload_url: res.data.presigned_url,
+    upload_url: res.data.signed_url || res.data.presigned_url || "",
     media_id: res.data.media_id,
-    cdn_url: `https://cdn.jainune.com/${res.data.s3_key}`,
+    cdn_url: res.data.cdn_url || (res.data.s3_key ? `https://cdn.jainune.com/${res.data.s3_key}` : undefined),
+    path: res.data.path,
     presigned_fields: res.data.presigned_fields,
   };
 }
@@ -281,39 +288,30 @@ export async function requestAccountDeletion(reason?: string): Promise<void> {
 
 export const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
   {
-    plan_id: "jainune_plus_monthly",
-    label: "1 Month",
+    plan_id: "jainune_base_399",
+    label: "Base Plan",
     duration_months: 1,
-    amount_inr: 499,
-    per_month_inr: 499,
+    amount_inr: 399,
+    per_month_inr: 399,
     savings_pct: 0,
     is_recommended: false,
   },
   {
-    plan_id: "jainune_plus_quarterly",
-    label: "3 Months",
-    duration_months: 3,
-    amount_inr: 999,
-    per_month_inr: 333,
-    savings_pct: 33,
+    plan_id: "jainune_premium_799",
+    label: "Premium Plan",
+    duration_months: 1,
+    amount_inr: 799,
+    per_month_inr: 799,
+    savings_pct: 0,
     is_recommended: true,
   },
   {
-    plan_id: "jainune_plus_semiannual",
-    label: "6 Months",
-    duration_months: 6,
-    amount_inr: 1699,
-    per_month_inr: 283,
-    savings_pct: 43,
-    is_recommended: false,
-  },
-  {
-    plan_id: "jainune_plus_annual",
-    label: "1 Year",
-    duration_months: 12,
-    amount_inr: 2799,
-    per_month_inr: 233,
-    savings_pct: 53,
+    plan_id: "jainune_ultra_1499",
+    label: "Ultra Plan",
+    duration_months: 1,
+    amount_inr: 1499,
+    per_month_inr: 1499,
+    savings_pct: 0,
     is_recommended: false,
   },
 ];
@@ -427,6 +425,8 @@ export async function requestSubscriptionRefund(
 // ── Serendipity Arcade ───────────────────────────────────────────────────────
 
 export const ARCADE_PRODUCTS: ArcadeProduct[] = [
+  { product_id: "arcade_spins_3", label: "3 Spins Pack", spins: 3, amount_inr: 79 },
+  { product_id: "arcade_spins_10", label: "10 Spins Pack", spins: 10, amount_inr: 199 },
   { product_id: "arcade_wheel_spin", label: "1 Wheel Spin", spins: 1, amount_inr: 29 },
   { product_id: "arcade_dice_roll", label: "1 Dice Roll", rolls: 1, amount_inr: 19 },
   { product_id: "arcade_3_pack", label: "3-Spin Pass", spins: 3, amount_inr: 49 },
@@ -460,16 +460,24 @@ export async function spinArcadeWheel(): Promise<{
 
 export async function rollArcadeDice(): Promise<{
   success: boolean;
+  action?: string;
   remaining_dice_rolls: number;
   roll_outcome?: number[];
   dice?: number[];
+  total?: number;
+  chat_id?: string | null;
+  paired_user: { id: string; first_name: string; city: string } | null;
   message: string;
 }> {
   const res = await apiPost<{
     success: boolean;
+    action?: string;
     remaining_dice_rolls: number;
     roll_outcome?: number[];
     dice?: number[];
+    total?: number;
+    chat_id?: string | null;
+    paired_user: { id: string; first_name: string; city: string } | null;
     message: string;
   }>("/arcade/roll");
   if (!res.success) throw { _apiError: res.error };

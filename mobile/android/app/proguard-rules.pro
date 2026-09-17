@@ -39,6 +39,6 @@
     @com.facebook.react.bridge.ReactMethod *;
     public *;
 }
--keep class com.razorpay.** { *; }
+-keep class com.dooboolab.rniap.** { *; }
 -keep class com.google.android.gms.** { *; }
--dontwarn com.razorpay.**
+-dontwarn com.dooboolab.rniap.**

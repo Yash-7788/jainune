@@ -42,6 +42,70 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PLAN_CATALOGUE: dict[str, dict[str, Any]] = {
+    # Phase 5 Decoupled Subscription Plans & SKUs (ARCHITECTURE_SPEC_AND_ROADMAP.md §10.1)
+    "jainune_base_399": {
+        "tier": "base_399",
+        "amount": 39900,
+        "currency": "INR",
+        "validity_days": 30,
+        "type": "subscription",
+        "label": "Base Plan",
+        "spins": 5,
+        "roses": 1,
+    },
+    "jainune_premium_799": {
+        "tier": "premium_799",
+        "amount": 79900,
+        "currency": "INR",
+        "validity_days": 30,
+        "type": "subscription",
+        "label": "Premium Plan",
+        "spins": 15,
+        "roses": 3,
+    },
+    "jainune_ultra_1499": {
+        "tier": "ultra_1499",
+        "amount": 149900,
+        "currency": "INR",
+        "validity_days": 30,
+        "type": "subscription",
+        "label": "Ultra Plan",
+        "spins": 30,
+        "roses": 7,
+    },
+    # Phase 5 Consumables & Arcade Bundles (ARCHITECTURE_SPEC_AND_ROADMAP.md §10.2)
+    "arcade_spins_3": {
+        "tier": None,
+        "amount": 7900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "arcade",
+        "spins": 3,
+    },
+    "arcade_spins_10": {
+        "tier": None,
+        "amount": 19900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "arcade",
+        "spins": 10,
+    },
+    "rose_single_49": {
+        "tier": None,
+        "amount": 4900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "rose",
+        "roses": 1,
+    },
+    "slingshot_superlike_29": {
+        "tier": None,
+        "amount": 2900,
+        "currency": "INR",
+        "validity_days": 0,
+        "type": "superlike",
+        "superlikes": 1,
+    },
     # Jainune+ flagship passes (SUBSCRIPTION_SPEC.md §3.1)
     "jainune_plus_monthly": {
         "tier": "jainune_plus",
@@ -209,42 +273,33 @@ async def create_order(
 
 
 def get_active_subscription_plans() -> list[dict[str, Any]]:
-    """Returns active Jainune+ subscription tiers for client pricing display."""
+    """Returns active Jainune subscription tiers for client pricing display."""
     return [
         {
-            "plan_id": "jainune_plus_monthly",
-            "label": "1 Month",
+            "plan_id": "jainune_base_399",
+            "label": "Base Plan",
             "duration_months": 1,
-            "amount_inr": 499,
-            "per_month_inr": 499,
+            "amount_inr": 399,
+            "per_month_inr": 399,
             "savings_pct": 0,
             "is_recommended": False,
         },
         {
-            "plan_id": "jainune_plus_quarterly",
-            "label": "3 Months",
-            "duration_months": 3,
-            "amount_inr": 999,
-            "per_month_inr": 333,
-            "savings_pct": 33,
+            "plan_id": "jainune_premium_799",
+            "label": "Premium Plan",
+            "duration_months": 1,
+            "amount_inr": 799,
+            "per_month_inr": 799,
+            "savings_pct": 0,
             "is_recommended": True,
         },
         {
-            "plan_id": "jainune_plus_semiannual",
-            "label": "6 Months",
-            "duration_months": 6,
-            "amount_inr": 1699,
-            "per_month_inr": 283,
-            "savings_pct": 43,
-            "is_recommended": False,
-        },
-        {
-            "plan_id": "jainune_plus_annual",
-            "label": "1 Year",
-            "duration_months": 12,
-            "amount_inr": 2799,
-            "per_month_inr": 233,
-            "savings_pct": 53,
+            "plan_id": "jainune_ultra_1499",
+            "label": "Ultra Plan",
+            "duration_months": 1,
+            "amount_inr": 1499,
+            "per_month_inr": 1499,
+            "savings_pct": 0,
             "is_recommended": False,
         },
     ]
@@ -354,7 +409,7 @@ async def process_payment_captured(
                 current_valid = current_user_row["subscription_valid_until"] if current_user_row else None
                 base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
                 valid_until = base_time + timedelta(days=plan["validity_days"])
-                credits_to_add = plan.get("super_connect_credits", 5)
+                credits_to_add = plan.get("roses", plan.get("super_connect_credits", 5))
                 await conn.execute(
                     """
                     UPDATE users
@@ -369,11 +424,28 @@ async def process_payment_captured(
                     credits_to_add,
                     intent["user_id"],
                 )
+                spins_to_add = plan.get("spins", 0)
+                if spins_to_add > 0:
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                            VALUES ($1, $2, NOW())
+                            ON CONFLICT (user_id) DO UPDATE
+                               SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                                   updated_at      = NOW()
+                            """,
+                            intent["user_id"],
+                            spins_to_add,
+                        )
+                    except Exception:
+                        pass
                 log.info(
-                    "Subscription upgraded: user=%s tier=%s credits=+%s until=%s",
+                    "Subscription upgraded: user=%s tier=%s credits=+%s spins=+%s until=%s",
                     intent["user_id"],
                     plan["tier"],
                     credits_to_add,
+                    spins_to_add,
                     valid_until,
                 )
             elif plan_type == "arcade":
@@ -412,6 +484,24 @@ async def process_payment_captured(
                     intent["user_id"],
                     spins,
                     dice_rolls,
+                )
+            elif plan_type in ("rose", "superlike"):
+                roses_to_add = plan.get("roses", plan.get("superlikes", 1))
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1,
+                           updated_at            = NOW()
+                     WHERE id = $2
+                    """,
+                    roses_to_add,
+                    intent["user_id"],
+                )
+                log.info(
+                    "Roses/Superlikes credited: user=%s type=%s count=+%d",
+                    intent["user_id"],
+                    plan_type,
+                    roses_to_add,
                 )
 
             # Mark intent captured
@@ -736,6 +826,9 @@ async def process_store_subscription_event(
 
     # 2. Map plan SKU to canonical duration (NEW-006)
     sku_durations = {
+        "jainune_base_399": 30,
+        "jainune_premium_799": 30,
+        "jainune_ultra_1499": 30,
         "jainune_plus_1m": 30,
         "jainune_plus_3m": 90,
         "jainune_plus_6m": 180,
@@ -826,9 +919,9 @@ async def process_store_subscription_event(
                     # Each plan grants a specific number of super_connect_credits at purchase;
                     # revocation must deduct exactly that many (not a hardcoded 5).
                     sku_credits_map = {
-                        plan_id: plan.get("super_connect_credits", 0)
+                        plan_id: plan.get("roses", plan.get("super_connect_credits", 0))
                         for plan_id, plan in PLAN_CATALOGUE.items()
-                        if plan.get("super_connect_credits", 0) > 0
+                        if plan.get("roses", plan.get("super_connect_credits", 0)) > 0
                     }
                     # Also map store SKU aliases to credit amounts
                     sku_credits_map.update({
@@ -879,32 +972,57 @@ async def process_store_subscription_event(
 
             elif event_type in ("renewed", "active"):
                 sub_status = "active"
-                target_tier = "jainune_plus"
+                target_tier = "base_399"
                 if sku:
                     s_lower = sku.lower()
-                    if "gold" in s_lower:
+                    if "ultra" in s_lower or "1499" in s_lower:
+                        target_tier = "ultra_1499"
+                    elif "premium" in s_lower or "799" in s_lower:
+                        target_tier = "premium_799"
+                    elif "base" in s_lower or "399" in s_lower:
+                        target_tier = "base_399"
+                    elif "gold" in s_lower:
                         target_tier = "jainune_gold"
                     elif "plus" in s_lower:
                         target_tier = "jainune_plus"
-                elif user_row.get("subscription_tier") in ("jainune_plus", "jainune_gold"):
+                elif user_row.get("subscription_tier") in ("base_399", "premium_799", "ultra_1499", "jainune_plus", "jainune_gold"):
                     target_tier = user_row["subscription_tier"]
 
                 current_valid = user_row["subscription_valid_until"]
                 base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
                 new_valid = base_time + timedelta(days=actual_validity_days)
+                credits_to_grant = 1 if target_tier == "base_399" else (3 if target_tier == "premium_799" else (7 if target_tier == "ultra_1499" else 5))
+                spins_to_grant = 5 if target_tier == "base_399" else (15 if target_tier == "premium_799" else (30 if target_tier == "ultra_1499" else 0))
                 await conn.execute(
                     """
                     UPDATE users
                        SET subscription_tier        = $1,
                            subscription_valid_until = $2,
                            billing_status           = 'active',
+                           super_connect_credits    = COALESCE(super_connect_credits, 0) + $4,
                            updated_at               = NOW()
                      WHERE id = $3
                     """,
                     target_tier,
                     new_valid,
                     target_uid,
+                    credits_to_grant,
                 )
+                if spins_to_grant > 0:
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                            VALUES ($1, $2, NOW())
+                            ON CONFLICT (user_id) DO UPDATE
+                               SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                                   updated_at      = NOW()
+                            """,
+                            target_uid,
+                            spins_to_grant,
+                        )
+                    except Exception:
+                        pass
                 log.info("Store subscription renewed: user=%s store=%s tier=%s valid_until=%s (days=%d)", target_uid, store, target_tier, new_valid, actual_validity_days)
                 result = {"status": "active", "tier": target_tier, "valid_until": new_valid.isoformat()}
 

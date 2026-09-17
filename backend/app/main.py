@@ -4,7 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -46,7 +46,10 @@ async def lifespan(app: FastAPI):
             traces_sample_rate=0.1,
         )
     await create_pool()
-    await create_redis()
+    try:
+        await create_redis()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Redis startup connection deferred/failed: %s", exc)
     yield
     # Shutdown
     try:
@@ -173,6 +176,34 @@ async def liveness():
     )
 
 
+# ── Root & Liveness Probes (Zero-DB Ping for Render / AWS / UptimeRobot) ─────
+
+@app.get("/", tags=["Health"], include_in_schema=False)
+async def root():
+    return {
+        "status": "online",
+        "service": "jainune-api",
+        "version": "2.0.0",
+        "health": "/health",
+    }
+
+
+@app.get("/health", status_code=status.HTTP_200_OK, tags=["Health"])
+async def health_check():
+    """
+    Lightweight keep-alive endpoint for UptimeRobot daemon.
+    Zero DB queries, zero Redis calls. Responds in <5ms.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "status": "online",
+            "service": "jainune-api",
+            "version": "2.0.0",
+        },
+    )
+
+
 # ── Health (Deep Connectivity Check / Readiness) ────────────────────────────
 
 @app.get("/v1/health", tags=["Health"])
@@ -259,6 +290,7 @@ app.include_router(websockets.router)
 app.include_router(media.router)
 app.include_router(users.router)
 app.include_router(subscriptions.router)
+app.include_router(subscriptions.payments_router)
 app.include_router(arcade.router)
 app.include_router(admin.router)
 app.include_router(location.router)

@@ -267,9 +267,9 @@ class Step19PhotosBody(BaseModel):
 
 
 class Step20VoiceSnapshotBody(BaseModel):
-    """Step 20: confirm 7-second voice snapshot uploaded."""
+    """Step 20: confirm 7-second voice snapshot uploaded (Deprecated in v2)."""
 
-    media_id: UUID
+    media_id: Optional[UUID] = None
 
 
 class Step21ConsentBody(BaseModel):

@@ -150,21 +150,6 @@ export async function googleSignIn(idToken: string): Promise<TokenData> {
   return res.data;
 }
 
-/** POST /v1/auth/apple — id_token from expo-apple-authentication */
-export async function appleSignIn(
-  idToken: string,
-  firstName?: string | null
-): Promise<TokenData> {
-  const clean = sanitizeOAuthToken(idToken);
-  const res = await apiPost<TokenData>("/auth/apple", {
-    id_token: clean,
-    first_name: firstName ? sanitizeName(firstName) : null,
-  });
-  if (!res.success) throw { _apiError: res.error };
-  await saveTokens(res.data.access_token, res.data.refresh_token, res.data.user_id);
-  return res.data;
-}
-
 /** POST /v1/auth/token/refresh */
 export async function refreshAccessToken(refreshToken: string): Promise<RefreshData> {
   const res = await apiPost<RefreshData>("/auth/token/refresh", {

@@ -26,6 +26,7 @@ import * as SplashScreenExpo from "expo-splash-screen";
 import AppNavigator from "./src/navigation/AppNavigator";
 import SecurityBlockScreen from "./src/screens/security/SecurityBlockScreen";
 import ErrorBoundary from "./src/components/core/ErrorBoundary";
+import InstallPromptBanner from "./src/components/InstallPromptBanner";
 import { runSecurityBoot } from "./src/security/securityBoot";
 import { setSessionExpiredCallback } from "./src/api/client";
 import { useAuthStore } from "./src/store/authStore";
@@ -111,6 +112,7 @@ export default function App() {
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
           <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
+            <InstallPromptBanner />
             <AppNavigator />
           </View>
         </SafeAreaProvider>

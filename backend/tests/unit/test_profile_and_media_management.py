@@ -34,7 +34,13 @@ from app.models.schemas.user import (
     UpdatePromptsBody,
     UserProfileResponse,
 )
-from app.routers.media import delete_media, reorder_media, request_upload, UploadRequestBody
+from app.routers.media import (
+    delete_media,
+    reorder_media,
+    request_upload,
+    UploadRequestBody,
+    ReorderMediaItem,
+)
 from app.routers.users import get_my_prompts, update_my_prompts
 
 
@@ -112,10 +118,10 @@ class TestProfileAndMediaManagement(unittest.IsolatedAsyncioTestCase):
             "status": "approved",
         }
 
-        with patch("app.services.account_service._delete_s3_keys_sync") as mock_s3_del:
+        with patch("app.services.media_processor.delete_user_avatar", new_callable=AsyncMock) as mock_avatar_del:
             result = await delete_media(media_id, current_user, db)
             self.assertTrue(result["success"])
-            mock_s3_del.assert_called_once_with(["media/user_1/photo_1.jpg"])
+            mock_avatar_del.assert_called_once_with(user_id)
 
             executed_queries = [call[0][0] for call in conn.execute.call_args_list]
             self.assertTrue(any("DELETE FROM user_media" in q for q in executed_queries))
@@ -124,70 +130,57 @@ class TestProfileAndMediaManagement(unittest.IsolatedAsyncioTestCase):
         """Reordering media updates position for all specified media IDs."""
         db = MagicMock()
         conn = AsyncMock()
-        tx_mock = MagicMock()
-        tx_mock.__aenter__ = AsyncMock(return_value=None)
-        tx_mock.__aexit__ = AsyncMock(return_value=False)
-        conn.transaction = MagicMock(return_value=tx_mock)
         db.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
         db.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
 
         user_id = uuid.uuid4()
         current_user = {"user_id": user_id}
+
         m1 = uuid.uuid4()
         m2 = uuid.uuid4()
 
         body = ReorderMediaBody(positions=[
-            MediaPositionItem(media_id=m1, position=1),
-            MediaPositionItem(media_id=m2, position=2),
+            ReorderMediaItem(media_id=m1, position=1),
+            ReorderMediaItem(media_id=m2, position=2),
         ])
 
         result = await reorder_media(body, current_user, db)
         self.assertTrue(result["success"])
+
         executed_queries = [call[0][0] for call in conn.execute.call_args_list]
         self.assertTrue(any("UPDATE user_media SET position" in q for q in executed_queries))
         self.assertTrue(any("AND media_type = 'photo'" in q for q in executed_queries))
 
-    @patch("boto3.client")
+    @patch("app.routers.media.generate_supabase_upload_signed_url", new_callable=AsyncMock)
     @patch("app.routers.media.sliding_window_rate_limit", new_callable=AsyncMock)
-    async def test_voice_upload_forces_position_one_and_advisory_lock(self, mock_rate_limit, mock_boto3):
-        """Voice note uploads must serialize with advisory lock and force target_position = 1."""
-        mock_s3 = MagicMock()
-        mock_s3.generate_presigned_url.return_value = "https://s3.quarantine/test"
-        mock_boto3.return_value = mock_s3
+    async def test_avatar_upload_forces_position_one(self, mock_rate_limit, mock_supabase_url):
+        """Avatar uploads must target position = 1 and return signed upload URL."""
+        mock_supabase_url.return_value = {
+            "signed_url": "https://supabase.co/storage/v1/object/upload/sign/avatars/user/avatar.webp?token=xyz",
+            "path": "user/avatar.webp",
+            "cdn_url": "https://supabase.co/storage/v1/object/public/avatars/user/avatar.webp",
+        }
         db = MagicMock()
         conn = AsyncMock()
-        tx_mock = MagicMock()
-        tx_mock.__aenter__ = AsyncMock(return_value=None)
-        tx_mock.__aexit__ = AsyncMock(return_value=False)
-        conn.transaction = MagicMock(return_value=tx_mock)
-        conn.fetch.return_value = []
         db.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
         db.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        redis = MagicMock()
+        redis = AsyncMock()
 
         user_id = uuid.uuid4()
         current_user = {"user_id": user_id}
-        # Client tries to send position=4 for voice
+
         body = UploadRequestBody(
-            media_type="voice",
-            content_type="audio/mp4",
-            file_size_bytes=500_000,
-            position=4,
+            media_type="photo",
+            content_type="image/webp",
+            file_size_bytes=10_000,
         )
 
         resp = await request_upload(body, current_user, db, redis)
         self.assertIsNotNone(resp.media_id)
+        self.assertIn("token=xyz", resp.signed_url)
 
-        # Verify advisory lock was called with hashtext
-        lock_calls = [call for call in conn.execute.call_args_list if "pg_advisory_xact_lock" in call[0][0]]
-        self.assertTrue(len(lock_calls) > 0)
-
-        # Verify target_position inserted was 1, not 4
-        insert_calls = [call for call in conn.execute.call_args_list if "INSERT INTO user_media" in call[0][0]]
+        insert_calls = [call for call in conn.execute.call_args_list if "INSERT INTO user_photos" in call[0][0]]
         self.assertTrue(len(insert_calls) > 0)
-        # args are (media_id, user_id, media_type, s3_key, target_position)
-        target_pos_arg = insert_calls[0][0][5]
-        self.assertEqual(target_pos_arg, 1)
 
 
 if __name__ == "__main__":

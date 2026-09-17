@@ -8,7 +8,7 @@
  * - Compliant anti-enumeration behavior
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -19,7 +19,7 @@ import {
   TextInput,
   TouchableOpacity,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, RouteProp } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import * as Haptics from "expo-haptics";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
@@ -38,10 +38,19 @@ const EMAIL_REGEX = /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$/;
 const QUICK_DOMAINS = ["@gmail.com", "@yahoo.com", "@outlook.com", "@icloud.com"];
 
 type Nav = NativeStackNavigationProp<AuthStackParams, "Email">;
+type Route = RouteProp<AuthStackParams, "Email">;
 
 export default function EmailScreen() {
   const navigation = useNavigation<Nav>();
+  const route = useRoute<Route>();
   const [email, setEmail] = useState("");
+
+  useEffect(() => {
+    // Phone verification is strictly required before Email step
+    if (!route.params?.phoneVerified) {
+      navigation.replace("Phone");
+    }
+  }, [route.params?.phoneVerified, navigation]);
   const [isFocused, setIsFocused] = useState(false);
   const [loading, setLoading] = useState(false);
   const [inlineError, setInlineError] = useState<string | undefined>();

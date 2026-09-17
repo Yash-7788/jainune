@@ -127,14 +127,11 @@ class TestAccountPurgeAndMemoryFreeing(unittest.IsolatedAsyncioTestCase):
             {"s3_key": "media/user_1/voice_1.m4a"},
         ]
 
-        with patch("app.services.account_service._delete_s3_keys_sync") as mock_s3_del:
+        with patch("app.services.account_service._delete_user_avatar_supabase") as mock_avatar_del:
             result = await purge_user_account(user_id, conn, redis)
 
-            # Assert S3 deletion called for both files
-            mock_s3_del.assert_called_once_with([
-                "media/user_1/photo_1.jpg",
-                "media/user_1/voice_1.m4a",
-            ])
+            # Assert Supabase avatar deletion called
+            mock_avatar_del.assert_called_once_with(user_id)
 
             # Assert DB deletion executed
             executed_queries = [call[0][0] for call in conn.execute.call_args_list]
@@ -147,7 +144,7 @@ class TestAccountPurgeAndMemoryFreeing(unittest.IsolatedAsyncioTestCase):
             redis.delete.assert_called()
 
             self.assertEqual(result["status"], "purged")
-            self.assertEqual(result["media_files_deleted"], 2)
+            self.assertEqual(result["media_files_deleted"], 1)
 
     async def test_soft_delete_user_account_anonymizes_pii(self):
         """Soft delete must anonymize PII and revoke active session."""

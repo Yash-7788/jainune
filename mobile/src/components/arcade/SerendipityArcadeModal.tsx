@@ -58,8 +58,8 @@ interface Props {
 
 export default function SerendipityArcadeModal({ visible, onClose, onNavigateToChat }: Props) {
   const [activeTab, setActiveTab] = useState<"wheel" | "dice">("wheel");
-  const [spins, setSpins] = useState(1);
-  const [rolls, setRolls] = useState(1);
+  const [spins, setSpins] = useState(0);
+  const [rolls, setRolls] = useState(0);
   const [isSpinning, setIsSpinning] = useState(false);
   const [isRolling, setIsRolling] = useState(false);
   const [lastWon, setLastWon] = useState<string | null>(null);
@@ -163,6 +163,23 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
         setDiceNumber(rolled);
         setRolls(res.remaining_dice_rolls);
         setLastWon(`🎲 Rolled ${rolled}: ${DICE_REWARDS[rolled - 1]}`);
+
+        if (res.chat_id && res.paired_user) {
+          Alert.alert(
+            "Lucky Match! 🎲",
+            `You've been paired with ${res.paired_user.first_name} from ${res.paired_user.city}! 30-minute momentum window active.`,
+            [
+              { text: "Later", style: "cancel" },
+              {
+                text: "Chat Now",
+                onPress: () => {
+                  onClose();
+                  onNavigateToChat?.(res.chat_id!);
+                },
+              },
+            ]
+          );
+        }
       });
     } catch (err: any) {
       setIsRolling(false);
@@ -257,7 +274,7 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
                 disabled={isSpinning}
               >
                 <Text style={styles.actionBtnText}>
-                  {isSpinning ? "Spinning..." : `Spin Wheel (${spins} Left)`}
+                  {isSpinning ? "Spinning..." : spins > 0 ? `Spin Wheel (${spins} Left)` : "Get Spins to Play"}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -272,7 +289,7 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
                 disabled={isRolling}
               >
                 <Text style={styles.actionBtnText}>
-                  {isRolling ? "Rolling..." : `Roll Dice (${rolls} Left)`}
+                  {isRolling ? "Rolling..." : rolls > 0 ? `Roll Dice (${rolls} Left)` : "Get Rolls to Play"}
                 </Text>
               </TouchableOpacity>
             </View>

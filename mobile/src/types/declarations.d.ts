@@ -1,47 +1,11 @@
-declare module "react-native-razorpay" {
-  export interface RazorpayCheckoutOptions {
-    description?: string;
-    image?: string;
-    currency: string;
-    key: string;
-    amount: string | number;
-    name: string;
-    order_id: string;
-    prefill?: {
-      email?: string;
-      contact?: string;
-      name?: string;
-    };
-    theme?: {
-      color?: string;
-    };
-    modal?: {
-      backdropclose?: boolean;
-      [key: string]: any;
-    };
-    [key: string]: any;
-  }
-
-  export interface RazorpaySuccessData {
-    razorpay_payment_id: string;
-    razorpay_order_id: string;
-    razorpay_signature: string;
-  }
-
-  export interface RazorpayErrorData {
-    code: number;
-    description: string;
-    source?: string;
-    step?: string;
-    reason?: string;
-    metadata?: Record<string, any>;
-  }
-
-  export default class RazorpayCheckout {
-    static open(
-      options: RazorpayCheckoutOptions
-    ): Promise<RazorpaySuccessData>;
-  }
+declare module "react-native-iap" {
+  export function initConnection(): Promise<boolean>;
+  export function endConnection(): Promise<void>;
+  export function getSubscriptions(skus: { skus: string[] }): Promise<any[]>;
+  export function requestSubscription(params: { sku: string }): Promise<any>;
+  export function getProducts(skus: { skus: string[] }): Promise<any[]>;
+  export function requestPurchase(params: { sku: string }): Promise<any>;
+  export function finishTransaction(params: { purchase: any; isConsumable?: boolean }): Promise<void>;
 }
 
 declare module "expo-splash-screen" {
@@ -85,3 +49,44 @@ declare module "@react-native-community/slider" {
 
   export default class Slider extends Component<SliderProps> {}
 }
+
+declare module "expo-image-manipulator" {
+  export enum SaveFormat {
+    JPEG = "jpeg",
+    PNG = "png",
+    WEBP = "webp",
+  }
+
+  export interface ActionResize {
+    resize: {
+      width?: number;
+      height?: number;
+    };
+  }
+
+  export type Action =
+    | ActionResize
+    | { rotate: number }
+    | { flip: { vertical?: boolean; horizontal?: boolean } }
+    | { crop: { originX: number; originY: number; width: number; height: number } };
+
+  export interface SaveOptions {
+    base64?: boolean;
+    compress?: number;
+    format?: SaveFormat;
+  }
+
+  export interface ImageResult {
+    uri: string;
+    width: number;
+    height: number;
+    base64?: string;
+  }
+
+  export function manipulateAsync(
+    uri: string,
+    actions?: Action[],
+    saveOptions?: SaveOptions
+  ): Promise<ImageResult>;
+}
+

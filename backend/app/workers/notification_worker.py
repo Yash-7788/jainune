@@ -261,8 +261,9 @@ def notify_new_like(self, liked_user_id: str, liker_name: str, liker_id: str = "
             if row is None:
                 await _commit_dedup(dedup_key, token, ttl=120)
                 return
-            if row["subscription_tier"] not in ("gold", "platinum", "jainune_plus", "jainune_gold"):
+            if row["subscription_tier"] not in ("gold", "platinum", "jainune_plus", "jainune_gold", "premium_799", "ultra_1499"):
                 await _commit_dedup(dedup_key, token, ttl=120)
+                log.debug("User %s is on free/base tier — skipping like push notification", liked_user_id)
                 return  # free users don't get like notifications
 
             tokens = await get_user_device_tokens(row["id"], conn) or ([row["fcm_token"]] if row.get("fcm_token") else [])
@@ -407,7 +408,7 @@ def send_daily_digest() -> None:
                     AND (i.action_type = 'like' OR i.interaction_type = 'like')
                     AND i.created_at > NOW() - INTERVAL '24 hours'
                 WHERE u.account_status = 'active'
-                  AND u.subscription_tier IN ('gold', 'platinum', 'jainune_plus')
+                  AND u.subscription_tier IN ('gold', 'platinum', 'jainune_plus', 'premium_799', 'ultra_1499')
                   AND u.fcm_token IS NOT NULL
                   AND u.fcm_token != ''
                 GROUP BY u.fcm_token
