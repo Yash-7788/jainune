@@ -525,14 +525,26 @@ async def list_pending_media(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT
-                m.id, m.user_id, m.media_type, m.cdn_url,
-                m.status, m.rejection_reason, m.created_at,
-                u.first_name, u.phone_number
-            FROM user_media m
-            JOIN users u ON u.id = m.user_id
-            WHERE m.status IN ('flagged', 'pending')
-            ORDER BY m.created_at ASC
+            WITH combined AS (
+                SELECT
+                    p.id, p.user_id, p.media_type, p.cdn_url,
+                    p.status, p.rejection_reason, p.created_at,
+                    u.first_name, u.phone_number
+                FROM user_photos p
+                JOIN users u ON u.id = p.user_id
+                WHERE p.status IN ('flagged', 'pending')
+                UNION ALL
+                SELECT
+                    m.id, m.user_id, m.media_type, m.cdn_url,
+                    m.status, m.rejection_reason, m.created_at,
+                    u.first_name, u.phone_number
+                FROM user_media m
+                JOIN users u ON u.id = m.user_id
+                WHERE m.status IN ('flagged', 'pending')
+                  AND NOT EXISTS (SELECT 1 FROM user_photos up WHERE up.id = m.id)
+            )
+            SELECT * FROM combined
+            ORDER BY created_at ASC
             LIMIT $1 OFFSET $2
             """,
             limit,
@@ -554,14 +566,80 @@ async def approve_media(
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Manually approve a media item, copy to production bucket and generate CDN URL."""
-    from app.services.media_processor import promote_media_to_production
+    """Manually approve a media item, set approved status, and publish avatar CDN URL."""
+    from app.services.media_processor import avatar_public_url
+
     async with pool.acquire() as conn:
-        try:
-            result = await promote_media_to_production(media_id, admin["user_id"], conn)
-            return result
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+        photo = await conn.fetchrow(
+            "SELECT id, user_id, cdn_url, s3_key FROM user_photos WHERE id = $1",
+            media_id,
+        )
+        if photo:
+            user_id = photo["user_id"]
+            cdn_url = photo["cdn_url"] or avatar_public_url(user_id)
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE user_photos
+                       SET status = 'approved',
+                           cdn_url = $1,
+                           reviewed_by = $2,
+                           reviewed_at = NOW(),
+                           updated_at = NOW()
+                     WHERE id = $3
+                    """,
+                    cdn_url,
+                    admin["user_id"],
+                    media_id,
+                )
+                await conn.execute(
+                    "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                    cdn_url,
+                    user_id,
+                )
+                await recompute_trust_score(user_id, conn)
+
+            return {
+                "media_id": str(media_id),
+                "status": "approved",
+                "cdn_url": cdn_url,
+            }
+
+        row = await conn.fetchrow(
+            "SELECT id, user_id, s3_key, cdn_url FROM user_media WHERE id = $1",
+            media_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Media item not found")
+
+        user_id = row["user_id"]
+        cdn_url = row["cdn_url"] or avatar_public_url(user_id)
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE user_media
+                   SET status = 'approved',
+                       cdn_url = $1,
+                       reviewed_by = $2,
+                       reviewed_at = NOW()
+                 WHERE id = $3
+                """,
+                cdn_url,
+                admin["user_id"],
+                media_id,
+            )
+            await conn.execute(
+                "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                cdn_url,
+                user_id,
+            )
+            await recompute_trust_score(user_id, conn)
+
+        return {
+            "media_id": str(media_id),
+            "status": "approved",
+            "cdn_url": cdn_url,
+        }
 
 
 @router.post("/media/{media_id}/reject", status_code=status.HTTP_200_OK)
@@ -573,6 +651,37 @@ async def reject_media(
 ):
     """Manually reject a media item with a reason."""
     async with pool.acquire() as conn:
+        photo = await conn.fetchrow(
+            "SELECT id, user_id, cdn_url FROM user_photos WHERE id = $1",
+            media_id,
+        )
+        if photo:
+            user_id = photo["user_id"]
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE user_photos
+                       SET status = 'rejected',
+                           rejection_reason = $1,
+                           reviewed_by = $2,
+                           reviewed_at = NOW(),
+                           updated_at = NOW()
+                     WHERE id = $3
+                    """,
+                    body.reason,
+                    admin["user_id"],
+                    media_id,
+                )
+                if photo.get("cdn_url"):
+                    await conn.execute(
+                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1 AND avatar_url = $2",
+                        user_id,
+                        photo["cdn_url"],
+                    )
+                await recompute_trust_score(user_id, conn)
+
+            return {"rejected": True, "media_id": media_id, "reason": body.reason}
+
         row = await conn.fetchrow(
             "SELECT user_id, s3_key FROM user_media WHERE id = $1",
             media_id,
@@ -594,18 +703,9 @@ async def reject_media(
                 admin["user_id"],
                 media_id,
             )
-            # Recompute trust score atomically with the rejection
             await recompute_trust_score(row["user_id"], conn)
 
-        if row.get("s3_key"):
-            try:
-                from app.services.media_processor import _delete_from_quarantine
-                import asyncio
-                await asyncio.to_thread(_delete_from_quarantine, row["s3_key"])
-            except Exception:
-                pass
-
-    return {"rejected": True, "media_id": media_id, "reason": body.reason}
+        return {"rejected": True, "media_id": media_id, "reason": body.reason}
 
 
 # ---------------------------------------------------------------------------

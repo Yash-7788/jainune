@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     store_webhook_secret: str = ""
     webhook_secret: str = ""
 
+    # Content Moderation (Google Gemini Vision)
+    gemini_api_keys: str = ""
+    gemini_moderation_model: str = "gemini-1.5-flash"
+    gemini_moderation_enabled: bool = True
+
     # Legacy / Deprecated AWS settings for test backwards-compatibility
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

@@ -151,26 +151,29 @@ async def confirm_upload(
 
     cdn_url = avatar_public_url(user_id)
 
-    # Mark approved and store CDN URL
+    # Store CDN URL and retain status='pending' until moderation completes
     async with db.acquire() as conn:
         await conn.execute(
             """
             UPDATE user_photos
-               SET status = 'approved', cdn_url = $1, updated_at = NOW()
+               SET status = 'pending', cdn_url = $1, updated_at = NOW()
              WHERE id = $2 AND user_id = $3
             """,
             cdn_url,
             body.media_id,
             uuid.UUID(str(user_id)),
         )
-        # Keep users.avatar_url in sync
-        await conn.execute(
-            "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
-            cdn_url,
-            uuid.UUID(str(user_id)),
-        )
 
-    return {"success": True, "cdn_url": cdn_url}
+    # Dispatch automated vision moderation in background supervisor
+    from app.core.background_tasks import enqueue_task
+    from app.services.moderation import run_photo_moderation
+
+    enqueue_task(
+        run_photo_moderation(body.media_id, uuid.UUID(str(user_id)), pool=db),
+        task_name=f"moderate_photo_{body.media_id}",
+    )
+
+    return {"success": True, "status": "pending", "media_id": body.media_id, "cdn_url": cdn_url}
 
 
 # ---------------------------------------------------------------------------

@@ -54,7 +54,9 @@ def avatar_storage_path(user_id: str | uuid.UUID) -> str:
 
 
 def avatar_public_url(user_id: str | uuid.UUID) -> str:
-    return f"{settings.supabase_url}/storage/v1/object/public/{settings.supabase_storage_bucket}/{avatar_storage_path(user_id)}"
+    base = (settings.supabase_url or "https://supabase.local").rstrip("/")
+    bucket = getattr(settings, "supabase_storage_bucket", "avatars")
+    return f"{base}/storage/v1/object/public/{bucket}/{avatar_storage_path(user_id)}"
 
 
 # ---------------------------------------------------------------------------

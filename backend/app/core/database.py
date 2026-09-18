@@ -92,6 +92,11 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                     candidate_ids UUID[] NOT NULL,
                     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                -- Ensure user_photos has moderation audit columns
+                ALTER TABLE user_photos ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+                ALTER TABLE user_photos ADD COLUMN IF NOT EXISTS reviewed_by UUID;
+                ALTER TABLE user_photos ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
             """)
     except Exception as exc:
         log.warning("Database schema check for resilient tables deferred: %s", exc)
