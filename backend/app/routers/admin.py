@@ -33,6 +33,7 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import get_trusted_client_ip, sliding_window_rate_limit
 from app.dependencies import get_current_user, require_admin, require_superadmin
+from app.services.connection_manager import ws_manager
 from app.services.messaging_service import _mask_phone
 from app.services.dignity_engine import recompute_trust_score
 
@@ -252,12 +253,7 @@ async def ban_user(
     try:
         r = get_redis()
         await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
-        # N-17: terminate any active WebSocket connection immediately
-        import json as _json
-        await r.publish(
-            f"user:{user_id}:commands",
-            _json.dumps({"type": "force_disconnect", "reason": "Account banned."}),
-        )
+        await ws_manager.disconnect_user(str(user_id), reason="Account banned.")
     except Exception:
         pass
 
@@ -312,11 +308,7 @@ async def suspend_user(
     try:
         r = get_redis()
         await r.delete(f"user:session:{user_id}", f"feed:cache:{user_id}")
-        import json as _json
-        await r.publish(
-            f"user:{user_id}:commands",
-            _json.dumps({"type": "force_disconnect", "reason": "Account suspended."}),
-        )
+        await ws_manager.disconnect_user(str(user_id), reason="Account suspended.")
     except Exception:
         pass
 
@@ -509,12 +501,8 @@ async def resolve_report(
         try:
             r = get_redis()
             await r.delete(f"user:session:{report['reported_id']}", f"feed:cache:{report['reported_id']}")
-            import json as _json
             reason_msg = "Account banned." if body.action_taken == "banned" else "Account suspended."
-            await r.publish(
-                f"user:{report['reported_id']}:commands",
-                _json.dumps({"type": "force_disconnect", "reason": reason_msg}),
-            )
+            await ws_manager.disconnect_user(str(report["reported_id"]), reason=reason_msg)
         except Exception:
             pass
 

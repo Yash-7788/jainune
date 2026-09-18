@@ -27,8 +27,9 @@ from app.core.security import (
     verify_otp,
 )
 from app.core.redis import get_redis
-from app.dependencies import CurrentUser, CurrentUserForLogout, DBDep, RedisDep
 from app.core.responses import err, ok
+from app.dependencies import CurrentUser, CurrentUserForLogout, DBDep, RedisDep
+from app.services.connection_manager import ws_manager
 from app.models.schemas.auth import (
     AccessTokenResponse,
     AppleAuthBody,
@@ -168,8 +169,21 @@ async def _issue_token_response(
         await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
 
     # Track old token as replaced by login rather than rotated/theft (BUG-064)
-    # Proactively notify active sessions via user commands channel (FINDING-03)
+    # Proactively notify active sessions via in-process ConnectionManager (FINDING-03)
     if old_token_hash:
+        try:
+            exp_time = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+            await conn.execute(
+                """
+                INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, expires_at)
+                VALUES ($1, $2, 'replaced_by_login', $3)
+                ON CONFLICT (token_hash) DO NOTHING
+                """,
+                old_token_hash, user_id, exp_time,
+            )
+        except Exception as e:
+            log.warning("Failed to persist session replacement state in DB: %s", e)
+
         try:
             r = get_redis()
             res = r.set(
@@ -179,20 +193,19 @@ async def _issue_token_response(
             )
             if hasattr(res, "__await__"):
                 await res
-            pub_res = r.publish(
-                f"user:{user_id}:commands",
-                json.dumps({
-                    "type": "force_disconnect",
-                    "reason": "Session expired due to login from another device. Please sign in again.",
-                }),
-            )
-            if hasattr(pub_res, "__await__"):
-                await pub_res
             del_res = r.delete(f"user:session:{user_id}")
             if hasattr(del_res, "__await__"):
                 await del_res
         except Exception as e:
             log.warning("Failed to record session replacement state in Redis: %s", e)
+
+        try:
+            await ws_manager.disconnect_user(
+                str(user_id),
+                reason="Session expired due to login from another device. Please sign in again.",
+            )
+        except Exception:
+            pass
 
     return ok(TokenResponse(
         user_id=str(user_id),
@@ -897,6 +910,35 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
             detail="Refresh token reuse detected. All sessions revoked.",
         )
 
+    # Durable check against PostgreSQL if Redis had a cache miss or restarted
+    async with db.acquire() as conn:
+        rev_row = await conn.fetchrow(
+            """
+            SELECT revocation_type, user_id, payload, expires_at
+            FROM revoked_refresh_tokens
+            WHERE token_hash = $1 AND expires_at > NOW()
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            token_hash,
+        )
+        if rev_row:
+            if rev_row["revocation_type"] == "grace" and rev_row.get("payload"):
+                try:
+                    return ok(json.loads(rev_row["payload"]))
+                except Exception:
+                    pass
+            elif rev_row["revocation_type"] == "replaced_by_login":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session expired due to login from another device. Please sign in again.",
+                )
+            elif rev_row["revocation_type"] == "revoked":
+                await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", rev_row["user_id"])
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Refresh token reuse detected. All sessions revoked.",
+                )
+
     async with db.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -988,17 +1030,43 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                 expires_in=settings.access_token_expire_minutes * 60,
             ).model_dump(mode="json")
 
-            # Set grace window (15s) and revocation record before releasing lock (BUG-087)
-            await redis.set(
-                f"auth:grace_rt:{token_hash}",
-                _pack_grace_payload(resp_data),
-                ex=15,
-            )
-            await redis.set(
-                f"auth:revoked_rt:{token_hash}",
-                str(user_id),
-                ex=settings.refresh_token_expire_days * 86400,
-            )
+            # Persist revocation record to PostgreSQL before releasing lock
+            exp_time = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+            grace_exp = datetime.now(timezone.utc) + timedelta(seconds=15)
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, payload, expires_at)
+                    VALUES ($1, $2, 'revoked', NULL, $3)
+                    ON CONFLICT (token_hash) DO NOTHING
+                    """,
+                    token_hash, user_id, exp_time,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, payload, expires_at)
+                    VALUES ($1, $2, 'grace', $3, $4)
+                    ON CONFLICT (token_hash) DO UPDATE SET payload = EXCLUDED.payload, expires_at = EXCLUDED.expires_at
+                    """,
+                    token_hash, user_id, json.dumps(resp_data), grace_exp,
+                )
+            except Exception as dberr:
+                log.warning("Failed to record durable token revocation in DB: %s", dberr)
+
+            # Set grace window (15s) and revocation record in Redis cache
+            try:
+                await redis.set(
+                    f"auth:grace_rt:{token_hash}",
+                    _pack_grace_payload(resp_data),
+                    ex=15,
+                )
+                await redis.set(
+                    f"auth:revoked_rt:{token_hash}",
+                    str(user_id),
+                    ex=settings.refresh_token_expire_days * 86400,
+                )
+            except Exception:
+                pass
 
     return ok(resp_data)
 
@@ -1061,16 +1129,13 @@ async def logout_endpoint(
     # Invalidate feed cache and active session keys
     try:
         await redis.delete(f"feed:cache:{user_id}", f"user:session:{user_id}")
-        if body and body.all_devices:
-            await redis.publish(
-                f"user:{user_id}:commands",
-                json.dumps({
-                    "type": "force_disconnect",
-                    "reason": "You have been logged out on all devices.",
-                }),
-            )
     except Exception:
         pass
+    if body and body.all_devices:
+        try:
+            await ws_manager.disconnect_user(str(user_id), reason="You have been logged out on all devices.")
+        except Exception:
+            pass
 
     return ok({"message": "You have been logged out successfully."})
 

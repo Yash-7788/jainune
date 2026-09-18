@@ -36,6 +36,71 @@ if settings.environment == "production":
     logging.root.setLevel(logging.INFO)
 
 
+import asyncio
+from app.core.background_tasks import await_background_tasks
+
+
+async def _periodic_maintenance_loop() -> None:
+    """
+    Periodic background maintenance supervisor running every 10 minutes.
+    - Pure SQL pruning: downgrades expired subscriptions and reaps stale matches.
+    - Daily Gale-Shapley matching: checks if today's batch ran; if not, triggers run_daily_compatible().
+    - Flushes in-process impression buffer to PostgreSQL.
+    """
+    from datetime import datetime, timezone
+    from app.core.database import get_pool
+
+    while True:
+        try:
+            await asyncio.sleep(600)  # 10 minutes
+            pool = get_pool()
+            needs_daily_batch = False
+            async with pool.acquire() as conn:
+                # 1. Downgrade expired subscriptions (Pure SQL)
+                await conn.execute("""
+                    UPDATE users
+                    SET subscription_tier = 'free'
+                    WHERE subscription_expires_at IS NOT NULL
+                      AND subscription_expires_at < NOW()
+                      AND subscription_tier != 'free'
+                """)
+                await conn.execute("""
+                    UPDATE store_subscriptions
+                    SET status = 'expired'
+                    WHERE expires_at IS NOT NULL
+                      AND expires_at < NOW()
+                      AND status = 'active'
+                """)
+
+                # 2. Reap stale matches (Pure SQL)
+                await conn.execute("""
+                    UPDATE matches
+                    SET status = 'expired'
+                    WHERE expires_at IS NOT NULL
+                      AND expires_at < NOW()
+                      AND status IN ('pending', 'active')
+                """)
+
+                # 3. Check if today's Gale-Shapley matching batch has executed
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                latest_run = await conn.fetchval("SELECT MAX(generated_at) FROM feed_queues")
+                needs_daily_batch = (latest_run is None) or (latest_run < today_start)
+
+            if needs_daily_batch:
+                logging.getLogger("app.maintenance").info("Executing daily Gale-Shapley matching pipeline...")
+                from app.workers.daily_compatible import run_daily_compatible
+                await run_daily_compatible()
+
+            # 4. Flush in-process impression buffer
+            from app.services.core_people_finder import _async_flush_impressions
+            await _async_flush_impressions(pool, force=True)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logging.getLogger("app.maintenance").warning("Periodic maintenance cycle encountered error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -50,13 +115,13 @@ async def lifespan(app: FastAPI):
         await create_redis()
     except Exception as exc:
         logging.getLogger(__name__).warning("Redis startup connection deferred/failed: %s", exc)
+
+    m_task = asyncio.create_task(_periodic_maintenance_loop(), name="periodic_maintenance")
     yield
     # Shutdown
+    m_task.cancel()
     try:
-        import asyncio
-        from app.services.core_people_finder import _background_tasks
-        if _background_tasks:
-            await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+        await await_background_tasks(timeout=5.0)
     except Exception:
         pass
     await close_pool()

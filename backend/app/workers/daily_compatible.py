@@ -171,6 +171,28 @@ async def _run_async() -> None:
 
         log.info("run_daily_compatible: checkpointed %d feed queues", len(feed_queues))
 
+        # Durable PostgreSQL checkpointing for restart resilience (survives Render deploys)
+        try:
+            db_records = [
+                (uuid.UUID(uid), [uuid.UUID(c) for c in q if c])
+                for uid, q in feed_queues.items()
+                if q
+            ]
+            if db_records:
+                await conn.executemany(
+                    """
+                    INSERT INTO feed_queues (user_id, candidate_ids, generated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET candidate_ids = EXCLUDED.candidate_ids,
+                        generated_at = EXCLUDED.generated_at
+                    """,
+                    db_records,
+                )
+                log.info("run_daily_compatible: persisted %d feed queues to database", len(db_records))
+        except Exception as exc:
+            log.warning("run_daily_compatible: DB feed_queue persistence error: %s", exc)
+
         # --- Stable marriage on users who opted for it (looking_for != figuring_out) ---
         marriage_users = [
             u for u in user_list if u.get("looking_for") != "figuring_out"

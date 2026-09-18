@@ -17,12 +17,18 @@ import math
 import uuid
 from typing import List, Optional
 
+import time
+from collections import defaultdict
+
 import asyncpg
 import redis.asyncio as aioredis
 
 log = logging.getLogger(__name__)
 
 _background_tasks: set[asyncio.Task] = set()
+_impression_buffer: dict[str, int] = defaultdict(int)
+_impression_lock = asyncio.Lock()
+_last_flush_time: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +198,50 @@ async def fetch_recommended_feed(
             except Exception:
                 pass
 
+    # Durable fallback: Check Postgres feed_queues table if Redis cache was empty/restarted
+    if not force_refresh:
+        try:
+            async with db.acquire() as conn:
+                queue_row = await conn.fetchrow(
+                    "SELECT candidate_ids FROM feed_queues WHERE user_id = $1",
+                    user_id,
+                )
+                if queue_row and queue_row.get("candidate_ids"):
+                    q_ids = queue_row["candidate_ids"]
+                    if q_ids:
+                        swiped_ids = await conn.fetch(
+                            "SELECT target_id FROM interactions WHERE actor_id = $1",
+                            user_id,
+                        )
+                        swiped_set = {r["target_id"] for r in swiped_ids}
+                        eligible_ids = [cid for cid in q_ids if cid not in swiped_set][:limit * 2]
+                        if eligible_ids:
+                            candidate_rows = await conn.fetch(
+                                """
+                                SELECT id, first_name, date_of_birth, gender, city, photos,
+                                       bio, prompt_question_1, prompt_answer_1, is_verified,
+                                       looking_for, dietary_strictness, community_sect
+                                FROM users
+                                WHERE id = ANY($1::uuid[]) AND account_status = 'active'
+                                """,
+                                eligible_ids,
+                            )
+                            c_dict = {r["id"]: dict(r) for r in candidate_rows}
+                            candidates = [c_dict[cid] for cid in eligible_ids if cid in c_dict]
+                            if candidates:
+                                if len(candidates) > limit:
+                                    await _cache_feed(user_id, candidates[limit:], redis)
+                                for c in candidates:
+                                    _impression_buffer[str(c["id"])] += 1
+                                return {
+                                    "candidates": candidates[:limit],
+                                    "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                                    "exhausted": len(candidates) <= limit,
+                                    "from_cache": True,
+                                }
+        except Exception as exc:
+            log.warning("Durable feed_queue fetch fallback failed: %s", exc)
+
     # L0 + L1 + L2 + L3: Full pipeline
     candidates = await _run_pipeline(user_id, user_data, db, limit * 2)
 
@@ -199,18 +249,14 @@ async def fetch_recommended_feed(
     if len(candidates) > limit:
         await _cache_feed(user_id, candidates[limit:], redis)
 
-    # Buffer impressions in Redis counter to prevent row lock contention on users table
+    # Buffer impressions in-process to prevent row lock contention on users table
     if candidates:
-        try:
-            pipe = redis.pipeline()
-            for c in candidates:
-                pipe.hincrby("buffer:user_impressions_48h", str(c["id"]), 1)
-            await pipe.execute()
-            t = asyncio.create_task(_async_flush_impressions(db, redis))
-            _background_tasks.add(t)
-            t.add_done_callback(_background_tasks.discard)
-        except Exception:
-            pass
+        for c in candidates:
+            if isinstance(c, dict) and "id" in c:
+                _impression_buffer[str(c["id"])] += 1
+        t = asyncio.create_task(_async_flush_impressions(db))
+        _background_tasks.add(t)
+        t.add_done_callback(_background_tasks.discard)
 
     return {
         "candidates": candidates[:limit],
@@ -220,88 +266,40 @@ async def fetch_recommended_feed(
     }
 
 
-async def _async_flush_impressions(db: asyncpg.Pool, redis: aioredis.Redis) -> None:
-    """Asynchronously flush buffered user impression counts from Redis to PostgreSQL using atomic RENAME."""
-    lock_token = uuid.uuid4().hex
-    lock_key = "lock:flush_impressions"
-    try:
-        acquired = await redis.set(lock_key, lock_token, nx=True, ex=15)
-        if not acquired:
-            return
+async def _async_flush_impressions(db: asyncpg.Pool, force: bool = False) -> None:
+    """Periodically bulk-UPSERTs in-process impression counts into PostgreSQL."""
+    global _last_flush_time
+    now = time.time()
+    if not force and (now - _last_flush_time < 60.0 and len(_impression_buffer) < 50):
+        return
 
-        # N-23: recover orphaned flushing keys from previous crash before renaming.
-        # If process died between rename and DEL, temp key is stranded with no TTL.
+    async with _impression_lock:
+        if not _impression_buffer:
+            return
+        to_flush = dict(_impression_buffer)
+        _impression_buffer.clear()
+        _last_flush_time = now
+
+    updates = []
+    for k, v in to_flush.items():
         try:
-            orphan_pattern = "buffer:user_impressions_48h:flushing:*"
-            async for orphan_key in redis.scan_iter(orphan_pattern):
-                orphan_counts = await redis.hgetall(orphan_key)
-                if orphan_counts:
-                    pipe = redis.pipeline()
-                    for k, v in orphan_counts.items():
-                        pipe.hincrby("buffer:user_impressions_48h", k, int(v))
-                    await pipe.execute()
-                await redis.delete(orphan_key)
-                log.info("flush_impressions: recovered orphaned temp key %s", orphan_key)
-        except Exception as exc:
-            log.warning("flush_impressions: orphan recovery failed: %s", exc)
-
-        temp_key = f"buffer:user_impressions_48h:flushing:{lock_token}"
-        rename_script = """
-            if redis.call('exists', KEYS[1]) == 1 then
-                redis.call('rename', KEYS[1], KEYS[2])
-                return 1
-            else
-                return 0
-            end
-        """
-        renamed = await redis.eval(rename_script, 2, "buffer:user_impressions_48h", temp_key)
-        if not renamed:
-            return
-
-        counts = await redis.hgetall(temp_key)
-        if not counts:
-            await redis.delete(temp_key)
-            return
-
-        updates = []
-        for k, v in counts.items():
-            if not v:
-                continue
-            k_str = k.decode() if isinstance(k, bytes) else str(k)
-            try:
-                updates.append((int(v), uuid.UUID(k_str)))
-            except Exception:
-                continue
-
-        if updates:
-            try:
-                async with db.acquire() as conn:
-                    await conn.executemany(
-                        "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
-                        updates,
-                    )
-                await redis.delete(temp_key)
-            except Exception as db_err:
-                log.error("Failed to flush impressions to DB, restoring buffer: %s", db_err)
-                pipe = redis.pipeline()
-                for k, v in counts.items():
-                    pipe.hincrby("buffer:user_impressions_48h", k, int(v))
-                await pipe.execute()
-                await redis.delete(temp_key)
-    except Exception as exc:
-        log.debug("Impression flush non-blocking failure: %s", exc)
-    finally:
-        try:
-            release_script = """
-                if redis.call("get", KEYS[1]) == ARGV[1] then
-                    return redis.call("del", KEYS[1])
-                else
-                    return 0
-                end
-            """
-            await redis.eval(release_script, 1, lock_key, lock_token)
+            updates.append((int(v), uuid.UUID(k)))
         except Exception:
-            pass
+            continue
+
+    if updates:
+        try:
+            async with db.acquire() as conn:
+                await conn.executemany(
+                    "UPDATE users SET impressions_last_48h = impressions_last_48h + $1 WHERE id = $2",
+                    updates,
+                )
+            log.debug("Flushed %d batched impression counts to DB", len(updates))
+        except Exception as db_err:
+            log.warning("Failed to flush impressions to DB, restoring buffer: %s", db_err)
+            async with _impression_lock:
+                for k, v in to_flush.items():
+                    _impression_buffer[k] += v
 
 
 # ---------------------------------------------------------------------------

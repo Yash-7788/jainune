@@ -32,6 +32,7 @@ from app.core.database import get_pool
 from app.core.redis import get_redis
 from app.core.security import validate_access_token_raw, sliding_window_rate_limit
 from app.dependencies import CurrentUser, RedisDep
+from app.services.connection_manager import ws_manager
 
 log = logging.getLogger(__name__)
 
@@ -204,115 +205,50 @@ async def websocket_chat(
             await websocket.close(code=4003, reason="Communication blocked.")
             return
 
-    # ── 4. Redis pub/sub subscription on canonical chat channel (Finding 8) ───
-    pubsub = redis.pubsub()
-    real_chat_id = row["id"]
-    canonical_channel = f"chat:{real_chat_id}"
-    # N-17: also subscribe to per-user command channel to receive force_disconnect
-    user_cmd_channel = f"user:{user_id}:commands"
-    await pubsub.subscribe(canonical_channel, user_cmd_channel)
+    # ── 4. In-process ConnectionManager registration ──────────────────────────
+    real_chat_id = str(row["id"])
+    ws_manager.register(real_chat_id, str(user_id), websocket)
 
-    presence_key = f"presence:chat:{real_chat_id}:{user_id}"
+    # ── 5. Real-time Consumer Loop (60s zombie heartbeat timeout) ────────────
     try:
-        await redis.set(presence_key, "1", ex=75)
-    except Exception:
-        pass
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
+            except (asyncio.TimeoutError, WebSocketDisconnect):
+                break
+            except Exception:
+                continue
 
-    # ── 5. Concurrent tasks ──────────────────────────────────────────────────
+            if not isinstance(data, dict):
+                continue
 
-    async def _producer() -> None:
-        """Relay Redis channel messages → WebSocket client with slow-consumer protection."""
-        try:
-            async for raw_msg in pubsub.listen():
-                if raw_msg["type"] != "message":
-                    continue
+            ws_manager.refresh_presence(real_chat_id, str(user_id))
+
+            msg_type = data.get("type", "")
+            if msg_type == "ping":
                 try:
-                    data = json.loads(raw_msg["data"])
-                    if isinstance(data, dict):
-                        if data.get("type") == "chat_closed":
-                            await websocket.close(code=4003, reason=f"Chat closed: {data.get('reason', 'unmatched')}")
-                            break
-                        # N-17: admin ban forces immediate disconnect
-                        if data.get("type") == "force_disconnect":
-                            await websocket.close(code=4003, reason=data.get("reason", "Account banned."))
-                            break
-                    await asyncio.wait_for(websocket.send_json(data), timeout=5.0)
-                except (asyncio.TimeoutError, Exception):
-                    break
-        except asyncio.CancelledError:
-            pass
-
-    async def _consumer() -> None:
-        """Relay WebSocket frames → Redis channel with 60s zombie heartbeat timeout."""
-        try:
-            while True:
-                try:
-                    data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
-                except (asyncio.TimeoutError, WebSocketDisconnect):
-                    break
+                    await asyncio.wait_for(websocket.send_json({"type": "pong"}), timeout=5.0)
                 except Exception:
-                    continue
+                    break
+                continue
 
-                if not isinstance(data, dict):
-                    continue
-
-                try:
-                    await redis.set(presence_key, "1", ex=75)
-                except Exception:
-                    pass
-
-                msg_type = data.get("type", "")
-                if msg_type == "ping":
-                    try:
-                        await asyncio.wait_for(websocket.send_json({"type": "pong"}), timeout=5.0)
-                    except Exception:
-                        break
-                    continue
-
-                if msg_type in ("typing", "read_receipt"):
-                    # Fan out to other participant via the same Redis channel (R7-1: trusted sender_id must not be spoofed)
-                    try:
-                        client_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
-                        await redis.publish(
-                            f"chat:{real_chat_id}",
-                            json.dumps({
-                                "type": msg_type,
-                                "payload": {
-                                    **client_payload,
-                                    "sender_id": str(user_id),
-                                },
-                            }),
-                        )
-                    except Exception:
-                        pass
-        except asyncio.CancelledError:
-            pass
-
-    try:
-        producer_task = asyncio.create_task(_producer())
-        consumer_task = asyncio.create_task(_consumer())
-        done, pending = await asyncio.wait(
-            [producer_task, consumer_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            if msg_type in ("typing", "read_receipt"):
+                # Fan out to other participant via in-process broker (trusted sender_id)
+                client_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+                await ws_manager.broadcast_chat(
+                    real_chat_id,
+                    {
+                        "type": msg_type,
+                        "payload": {
+                            **client_payload,
+                            "sender_id": str(user_id),
+                        },
+                    },
+                    exclude_user_id=str(user_id),
+                )
     finally:
         # ── 6. Cleanup ───────────────────────────────────────────────────────
-        try:
-            await redis.delete(presence_key)
-        except Exception:
-            pass
-        try:
-            await pubsub.unsubscribe(canonical_channel, user_cmd_channel)
-        except Exception:
-            pass
-        try:
-            await pubsub.close()
-        except Exception:
-            pass
+        ws_manager.unregister(real_chat_id, str(user_id), websocket)
         try:
             await websocket.close()
         except Exception:

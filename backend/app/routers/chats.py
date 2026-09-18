@@ -16,7 +16,9 @@ from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
+from app.services.connection_manager import ws_manager
 from app.services.payment_service import get_effective_user_tier
+from app.workers.notification_worker import notify_new_message
 from app.models.schemas.chat import (
     ChatHistoryResponse,
     ChatListResponse,
@@ -614,17 +616,14 @@ async def send_message(
             "moderation_disclaimer": msg.moderation_disclaimer,
         },
     })
-    # Publish to Redis pub/sub for WebSocket fan-out on canonical chat channel (Finding 8)
-    canonical_channel = f"chat:{actual_chat_id}"
-    await redis.publish(canonical_channel, payload_str)
+    # Broadcast to active WebSockets in this chat via in-process ConnectionManager
+    await ws_manager.broadcast_chat(str(actual_chat_id), json.loads(payload_str))
 
     # Dispatch FCM push notification to recipient only if not actively in this chat
     try:
-        recipient_active = await redis.get(f"presence:chat:{actual_chat_id}:{other_id}")
-        if not recipient_active:
-            from app.workers.notification_worker import notify_new_message
+        if not ws_manager.is_present(str(actual_chat_id), str(other_id)):
             preview_text = msg.content[:80] if msg.content else "Sent a media attachment"
-            notify_new_message.delay(str(actual_chat_id), str(user_id), preview_text)
+            notify_new_message(str(actual_chat_id), str(user_id), preview_text)
     except Exception:
         pass
 
@@ -704,11 +703,9 @@ async def unmatch_chat(
     await redis.delete(f"feed:cache:{user_id}")
     await redis.delete(f"feed:cache:{other_id}")
 
-    # Evict active WebSocket sessions over Redis
+    # Evict active WebSocket sessions over in-process ConnectionManager
     try:
-        eviction_payload = json.dumps({"type": "chat_closed", "reason": "unmatched"})
-        canonical_channel = f"chat:{actual_chat_id}"
-        await redis.publish(canonical_channel, eviction_payload)
+        await ws_manager.close_chat(str(actual_chat_id), reason="unmatched")
     except Exception:
         pass
 

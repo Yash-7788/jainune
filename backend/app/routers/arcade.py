@@ -515,7 +515,7 @@ async def spin_serendipity_wheel(
     if candidate and match_row and match_row.get("id"):
         try:
             from app.workers.notification_worker import notify_new_match
-            notify_new_match.delay(str(match_row["id"]))
+            notify_new_match(str(match_row["id"]))
         except Exception:
             pass
 
@@ -699,7 +699,7 @@ async def roll_lucky_dice(
     if candidate and match_row and match_row.get("id"):
         try:
             from app.workers.notification_worker import notify_new_match
-            notify_new_match.delay(str(match_row["id"]))
+            notify_new_match(str(match_row["id"]))
         except Exception:
             pass
 

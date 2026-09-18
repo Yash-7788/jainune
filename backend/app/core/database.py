@@ -71,6 +71,31 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
 
     if _pool is None:
         raise RuntimeError("Could not establish connection to primary or fallback database servers.")
+
+    # Initialize restart-resilient persistence tables
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
+                    token_hash VARCHAR(64) PRIMARY KEY,
+                    user_id UUID NOT NULL,
+                    revocation_type VARCHAR(32) NOT NULL,
+                    payload TEXT,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_refresh_tokens(user_id);
+                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_refresh_tokens(expires_at);
+
+                CREATE TABLE IF NOT EXISTS feed_queues (
+                    user_id UUID PRIMARY KEY,
+                    candidate_ids UUID[] NOT NULL,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+    except Exception as exc:
+        log.warning("Database schema check for resilient tables deferred: %s", exc)
+
     return _pool
 
 

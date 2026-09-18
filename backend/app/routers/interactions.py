@@ -376,13 +376,13 @@ async def record_interaction_action(
     if match_created and match_id_to_notify:
         try:
             from app.workers.notification_worker import notify_new_match
-            notify_new_match.delay(str(match_id_to_notify))
+            notify_new_match(str(match_id_to_notify))
         except Exception:
             pass
     elif body.action in ("like", "super_connect"):
         try:
             from app.workers.notification_worker import notify_new_like
-            notify_new_like.delay(str(target_id), current_user.get("first_name", "Someone"), str(actor_id))
+            notify_new_like(str(target_id), current_user.get("first_name", "Someone"), str(actor_id))
         except Exception:
             pass
 

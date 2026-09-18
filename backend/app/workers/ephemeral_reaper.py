@@ -211,7 +211,7 @@ def reap_stale_matches() -> None:
                 from app.workers.notification_worker import notify_match_expiring
 
                 for row in warn_ids:
-                    notify_match_expiring.delay(str(row["id"]))
+                    notify_match_expiring(str(row["id"]))
 
                 ids = [row["id"] for row in warn_ids]
                 await conn.execute(
