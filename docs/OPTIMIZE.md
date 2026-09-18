@@ -29,6 +29,12 @@ This specification defines the complete end-to-end architecture required to oper
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
 │ Render Web Service      │ 100 GB Outbound Egress; │ Service suspended until 1st │
 │                         │ 512 MB RAM; 0.1 vCPU    │ of next calendar month      │
+├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
+│ Upstash Redis           │ 10,000 Commands / day   │ Rate limits & OTP fail;     │
+│                         │ (strictly ephemeral)    │ handled by in-memory fallbk │
+├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
+│ Celery Worker / Beat    │ ELIMINATED (0 compute)  │ 0 unbacked jobs; replaced   │
+│                         │                         │ by native asyncio + pg_cron │
 └─────────────────────────┴─────────────────────────┴─────────────────────────────┘
 ```
 
@@ -788,6 +794,15 @@ A common developer mistake is confusing which cloud component executes which com
 ├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
 │ 5. Push (FCM)   │ Google Firebase │ Google Cloud Compute │ 100% Free Unlimited; │
 │    & Crashlytics│ Infrastructure  │ (Spark Plan)         │ 0% Render/Supa cost  │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 6. Background   │ Render Web      │ Native asyncio Tasks │ 0 extra Celery       │
+│    Tasks (Push) │ Service (Python)│ (enqueue_task)       │ processes or RAM     │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 7. Real-Time WS │ Render Web      │ In-Process Broker    │ 0 Redis Pub/Sub      │
+│    & Presence   │ Service (Python)│ (ConnectionManager)  │ network commands     │
+├─────────────────┼─────────────────┼──────────────────────┼──────────────────────┤
+│ 8. Durable State│ Supabase        │ PostgreSQL Tables    │ 0 Redis quota risk;  │
+│    (RTs & Feeds)│ PostgreSQL      │ (revoked_tokens etc) │ survives deploys     │
 └─────────────────┴─────────────────┴──────────────────────┴──────────────────────┘
 ```
 
