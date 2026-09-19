@@ -1,21 +1,31 @@
+"""
+Telemetry hardening tests — updated for OPTIMIZE.md in-memory buffer implementation.
+
+OPTIMIZE.md §4: Zero Redis for telemetry. Events buffered in-process,
+flushed to Postgres via _periodic_maintenance_loop every 10 min.
+Celery beat + Redis stream approach replaced.
+"""
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.celery_app import celery_app
 from app.routers.telemetry import (
     TelemetryBatch,
     TelemetryEvent,
     _DWELL_ATTRACTION_COOLDOWN_S,
     _DWELL_ATTRACTION_THRESHOLD_S,
     _MAX_DURATION_MS,
+    _telemetry_buffer,
+    _vector_update_queue,
+    _dwell_cooldowns,
     ingest_events,
 )
 
 
 class TestTelemetryHardening:
-    """Unit tests for FINDING-09 telemetry fixes."""
+    """Unit tests for telemetry in-memory buffer implementation (OPTIMIZE.md §4)."""
 
     def test_01_duration_ms_bounds_validation(self):
         """Rejects negative and excessive duration_ms, allows valid durations."""
@@ -49,11 +59,11 @@ class TestTelemetryHardening:
         current_user = {"user_id": str(actor_id)}
 
         mock_redis = AsyncMock()
-        mock_redis.set = AsyncMock(return_value=True)  # Lock acquired
 
-        mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock(return_value=None)
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        # Clear module-level state to isolate test
+        _telemetry_buffer.clear()
+        _vector_update_queue.clear()
+        _dwell_cooldowns.clear()
 
         # 5 duplicate dwell events for same target in one batch
         events = [
@@ -76,75 +86,69 @@ class TestTelemetryHardening:
         assert resp.accepted == 5
         assert resp.dropped == 0
 
-        # Verify redis.set called once for that target
-        cooldown_key = f"cooldown:dwell_attract:{actor_id}:{target_id}"
-        mock_redis.set.assert_called_once_with(cooldown_key, "1", ex=_DWELL_ATTRACTION_COOLDOWN_S, nx=True)
+        # All 5 events buffered in-memory (no Redis xadd)
+        assert len(_telemetry_buffer) == 5
 
-        # Verify pipe.xadd for vector:update:queue called exactly once
-        vector_xadd_calls = [
-            call for call in mock_pipe.xadd.call_args_list
-            if call[0][0] == "vector:update:queue"
+        # Deduplication: at most 1 vector update queued despite 5 dwell events
+        actor_target_updates = [
+            v for v in _vector_update_queue
+            if v["actor_id"] == str(actor_id) and v["target_id"] == str(target_id)
         ]
-        assert len(vector_xadd_calls) == 1
-        assert vector_xadd_calls[0][0][1]["actor_id"] == str(actor_id)
-        assert vector_xadd_calls[0][0][1]["target_id"] == str(target_id)
-        assert vector_xadd_calls[0][0][1]["direction"] == "attract"
-        assert vector_xadd_calls[0][0][1]["alpha"] == "0.05"
+        assert len(actor_target_updates) == 1
+        assert actor_target_updates[0]["alpha"] == "0.05"
 
     @pytest.mark.asyncio
     async def test_03_cross_batch_dwell_attraction_cooldown(self):
-        """When cooldown key exists in Redis, no vector update is queued."""
+        """When cooldown is active in-memory, no second vector update is queued."""
         actor_id = uuid.uuid4()
         target_id = uuid.uuid4()
         current_user = {"user_id": str(actor_id)}
 
         mock_redis = AsyncMock()
-        # Cooldown active: NX set returns None / False
-        mock_redis.set = AsyncMock(return_value=None)
 
-        mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock(return_value=None)
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        # Clear state
+        _telemetry_buffer.clear()
+        _vector_update_queue.clear()
+        _dwell_cooldowns.clear()
 
-        batch = TelemetryBatch(events=[
-            TelemetryEvent(
-                event_type="profile_view_end",
-                target_user_id=target_id,
-                duration_ms=20_000,
-            )
-        ])
+        dwell_event = TelemetryEvent(
+            event_type="profile_view_end",
+            target_user_id=target_id,
+            duration_ms=20_000,
+        )
+        batch = TelemetryBatch(events=[dwell_event])
 
-        resp = await ingest_events(
+        # First call — cooldown not yet active
+        resp1 = await ingest_events(
             batch=batch,
             current_user=current_user,
             db=AsyncMock(),
             redis=mock_redis,
         )
+        assert resp1.accepted == 1
+        assert len(_vector_update_queue) == 1  # queued
 
-        assert resp.accepted == 1
-
-        # Stream still receives the raw event
-        stream_xadd_calls = [
-            call for call in mock_pipe.xadd.call_args_list
-            if call[0][0] == "telemetry:stream"
+        # Second call — cooldown now active, no duplicate
+        resp2 = await ingest_events(
+            batch=batch,
+            current_user=current_user,
+            db=AsyncMock(),
+            redis=mock_redis,
+        )
+        assert resp2.accepted == 1
+        # Still only 1 vector update despite second batch
+        actor_target_updates = [
+            v for v in _vector_update_queue
+            if v["actor_id"] == str(actor_id) and v["target_id"] == str(target_id)
         ]
-        assert len(stream_xadd_calls) == 1
+        assert len(actor_target_updates) == 1
 
-        # But zero vector updates queued due to cooldown
-        vector_xadd_calls = [
-            call for call in mock_pipe.xadd.call_args_list
-            if call[0][0] == "vector:update:queue"
-        ]
-        assert len(vector_xadd_calls) == 0
-
-    def test_04_beat_schedule_contains_aggregate_hourly_metrics(self):
-        """Verify aggregate_hourly_metrics is wired in Celery beat_schedule."""
-        if hasattr(celery_app.conf.update, "call_args") and celery_app.conf.update.call_args:
-            kwargs = celery_app.conf.update.call_args[1]
-            schedule = kwargs.get("beat_schedule", {})
-        else:
-            schedule = celery_app.conf.beat_schedule
-
-        assert "aggregate-hourly-metrics-hourly" in schedule
-        entry = schedule["aggregate-hourly-metrics-hourly"]
-        assert entry["task"] == "app.workers.telemetry_worker.aggregate_hourly_metrics"
+    def test_04_telemetry_flush_is_wired_in_maintenance_loop(self):
+        """Verify _async_flush_telemetry is called from _periodic_maintenance_loop in main.py."""
+        import inspect
+        import app.main as main_module
+        src = inspect.getsource(main_module._periodic_maintenance_loop)
+        assert "_async_flush_telemetry" in src, (
+            "_async_flush_telemetry must be called in _periodic_maintenance_loop"
+        )
+        assert "from app.routers.telemetry import _async_flush_telemetry" in src

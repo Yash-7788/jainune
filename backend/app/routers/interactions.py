@@ -10,8 +10,10 @@ On mutual like or super_connect:
   - Updates behavior vector via EMA bump on liked attributes
 """
 import asyncio
+import collections
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import date, timedelta
@@ -26,6 +28,53 @@ from app.services.core_people_finder import invalidate_feed_cache
 from app.services import payment_service
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# In-process swipe burst tracker (replaces Redis GET/INCR/EXPIRE/DELETE/SET)
+# Tracks last N swipe timestamps per user; no Redis quota consumed.
+# ---------------------------------------------------------------------------
+
+_BURST_WINDOW_MS = 200.0   # swipes < 200ms apart are suspicious
+_BURST_THRESHOLD = 5       # after 5 rapid swipes → log warning + throttle
+_BURST_MAXLEN    = 10      # keep last 10 timestamps per user
+_BURST_TTL_S     = 300     # prune users inactive for 5 min
+
+_swipe_deques: dict[str, collections.deque] = {}
+_swipe_lock = threading.Lock()
+_swipe_last_clean: float = 0.0
+
+
+def _record_swipe(user_key: str) -> int:
+    """
+    Records a swipe timestamp and returns the rapid-burst count in the last window.
+    Thread-safe; O(1) per call. Returns count of consecutive sub-200ms swipes.
+    """
+    global _swipe_last_clean
+    now = time.monotonic()
+
+    with _swipe_lock:
+        # Periodic cleanup of stale users (every 5 min)
+        if now - _swipe_last_clean > _BURST_TTL_S:
+            cutoff = now - _BURST_TTL_S
+            stale = [k for k, dq in _swipe_deques.items() if not dq or dq[-1] < cutoff]
+            for k in stale:
+                del _swipe_deques[k]
+            _swipe_last_clean = now
+
+        dq = _swipe_deques.setdefault(user_key, collections.deque(maxlen=_BURST_MAXLEN))
+        dq.append(now)
+
+        # Count consecutive sub-200ms gaps from the right
+        burst = 0
+        ts_list = list(dq)
+        for i in range(len(ts_list) - 1, 0, -1):
+            if (ts_list[i] - ts_list[i - 1]) * 1000.0 < _BURST_WINDOW_MS:
+                burst += 1
+            else:
+                break
+        return burst
+
 
 
 router = APIRouter(prefix="/v1/interactions", tags=["interactions"])
@@ -140,24 +189,12 @@ async def record_interaction_action(
     # Anti-bot rate limit: max 60 actions per minute per user (SECURITY.md 8.1)
     await sliding_window_rate_limit(f"ratelimit:interaction:{actor_id}", 60, 60, redis)
 
-    # Behavioral swipe velocity & robotic pacing tracking
+    # Behavioral swipe velocity tracking — in-process, zero Redis
     # Fast humans swipe >= 500ms; scripts fire at < 200ms
-    try:
-        now_ts = time.time()
-        last_ts_raw = await redis.get(f"ratelimit:swipe_last_ts:{actor_id}")
-        if last_ts_raw is not None:
-            delta_ms = (now_ts - float(last_ts_raw)) * 1000.0
-            if delta_ms < 200.0:
-                burst_count = await redis.incr(f"ratelimit:swipe_burst:{actor_id}")
-                await redis.expire(f"ratelimit:swipe_burst:{actor_id}", 10)
-                if burst_count > 5:
-                    log.warning("Bot swipe burst detected for user %s (%s rapid swipes < 200ms)", actor_id, burst_count)
-                    await asyncio.sleep(0.5)
-            else:
-                await redis.delete(f"ratelimit:swipe_burst:{actor_id}")
-        await redis.set(f"ratelimit:swipe_last_ts:{actor_id}", str(now_ts), ex=300)
-    except Exception as exc:
-        log.debug("Swipe velocity check non-blocking failure: %s", exc)
+    burst_count = _record_swipe(str(actor_id))
+    if burst_count >= _BURST_THRESHOLD:
+        log.warning("Bot swipe burst detected for user %s (%d rapid swipes < 200ms)", actor_id, burst_count)
+        await asyncio.sleep(0.5)
 
     if actor_id == target_id:
         raise HTTPException(

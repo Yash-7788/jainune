@@ -1,27 +1,14 @@
 """
-Telemetry worker — flush in-memory event buffer to persistent storage.
+DEPRECATED — telemetry_worker.py
 
-The telemetry router batches events in Redis lists to avoid DB write storms.
-This worker drains those lists every minute and bulk-upserts to Postgres.
+This module's Redis stream consumer (telemetry:stream, vector:update:queue) has been
+replaced by the in-memory buffer pattern in app/routers/telemetry.py.
 
-Redis key convention:
-  telemetry:buffer          → LPUSH'd JSON events (list, max 10k items)
-  telemetry:hourly:{metric}:{YYYY-MM-DD-HH}  → counter (for aggregate stats)
+Events are now buffered in _telemetry_buffer / _vector_update_queue and flushed to
+Postgres every 10 minutes by _periodic_maintenance_loop → _async_flush_telemetry().
 
-Tasks:
-  flush_telemetry_buffer()   every 1 min (beat)
-    → LRANGE + DEL buffer → bulk INSERT INTO telemetry_events
-  aggregate_hourly_metrics() every 1 hour (beat — scheduled via celery_app.py at :05)
-    → reads telemetry_events for last hour, writes aggregated rows to telemetry_hourly
-
-Telemetry event shape (JSON):
-  {
-    "event_type": "profile_view" | "like" | "pass" | "app_open" | ...,
-    "user_id": "<uuid>",
-    "target_id": "<uuid|null>",
-    "ts": "<ISO8601 UTC>",
-    "meta": { ... }
-  }
+This file is retained for reference only. DO NOT import or invoke from active code.
+Celery task decorators below are intentionally dead code.
 """
 
 from __future__ import annotations

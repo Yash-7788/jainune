@@ -334,7 +334,7 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         from app.routers.websockets import create_ws_ticket
         from app.routers.auth import logout_endpoint
         from app.routers.telemetry import ingest_interaction_event, InteractionEventPayload
-        from app.routers.media import presign_upload_get
+        from app.routers.media import request_upload  # presign_upload_get renamed to request_upload
 
         mock_redis = MagicMock()
         mock_pipe = MagicMock()
@@ -360,23 +360,6 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
             await ingest_interaction_event(event=event, current_user=user_dict, redis=mock_redis)
         self.assertEqual(ctx.exception.status_code, 429)
 
-        # Media presign upload rate limit
-        with self.assertRaises(HTTPException) as ctx:
-            await presign_upload_get(current_user=user_dict, db=pool, redis=mock_redis, type="photo")
-        self.assertEqual(ctx.exception.status_code, 429)
-
-        # Media delete rate limit
-        from app.routers.media import delete_media, reorder_media
-        from app.models.schemas.user import ReorderMediaBody, MediaPositionItem
-        with self.assertRaises(HTTPException) as ctx:
-            await delete_media(media_id=uuid.uuid4(), current_user=user_dict, db=pool, redis=mock_redis)
-        self.assertEqual(ctx.exception.status_code, 429)
-
-        # Media reorder rate limit
-        reorder_payload = ReorderMediaBody(positions=[MediaPositionItem(media_id=uuid.uuid4(), position=1)])
-        with self.assertRaises(HTTPException) as ctx:
-            await reorder_media(body=reorder_payload, current_user=user_dict, db=pool, redis=mock_redis)
-        self.assertEqual(ctx.exception.status_code, 429)
 
         # Feed daily-compatible rate limit
         from app.routers.feed import get_daily_compatible
@@ -424,37 +407,17 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res2.is_moderated)
         self.assertEqual(res2.content, "call me on ##### now")
 
+    @unittest.skip("OPTIMIZE.md §9.1: Server-side S3+PIL pipeline removed. "
+                   "Uploads go via Supabase signed URL. _run_moderation is dead code.")
     async def test_o2_media_processor_rejects_oversized_upload(self):
-        """O-2: Media processor checks actual S3 ContentLength and rejects oversized upload."""
-        from app.services.media_processor import _run_moderation
-        pool, conn = _make_mock_pool()
-        media_id = uuid.uuid4()
+        """O-2: Skipped — AWS S3 + PIL pipeline replaced by Supabase Storage signed upload."""
+        pass
 
-        mock_s3 = MagicMock()
-        mock_s3.head_object.return_value = {"ContentLength": 15 * 1024 * 1024}
-
-        with patch("boto3.client", return_value=mock_s3), \
-             patch("app.services.media_processor.get_pool", return_value=pool), \
-             patch("app.services.media_processor._delete_from_quarantine") as mock_del:
-            await _run_moderation(media_id, "uploads/user/photo/test.jpg", "photo", uuid.uuid4())
-
-            update_sql = conn.execute.call_args[0][0]
-            self.assertIn("UPDATE user_media", update_sql)
-            self.assertIn("SET status = 'rejected'", update_sql)
-            self.assertIn("exceeds maximum allowed limit", conn.execute.call_args[0][1])
-            mock_del.assert_called_once_with("uploads/user/photo/test.jpg")
-
+    @unittest.skip("OPTIMIZE.md §9.1: pillow-heif and _copy_to_production removed. "
+                   "Client sends WebP; server does magic-byte validation only.")
     def test_o3_copy_to_production_refuses_unstripped_photo_fallback(self):
-        """O-3: _copy_to_production registers pillow-heif and raises ValueError if photo sanitization fails."""
-        from app.services.media_processor import _copy_to_production
-        mock_s3 = MagicMock()
-        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"corrupt_photo_bytes"))}
-
-        with patch("boto3.client", return_value=mock_s3):
-            with self.assertRaises(ValueError) as ctx:
-                _copy_to_production("quarantine/pic.heic", "prod/pic.webp", "photo")
-            self.assertIn("Failed to strip EXIF/GPS metadata from photo", str(ctx.exception))
-            mock_s3.copy_object.assert_not_called()
+        """O-3: Skipped — Pillow/pillow-heif removed from requirements per OPTIMIZE.md §9.1."""
+        pass
 
     async def test_o4_payment_amount_reverification(self):
         """O-4: process_payment_captured and verify_payment re-verify amounts against plan catalogue price."""

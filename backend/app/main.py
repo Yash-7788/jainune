@@ -95,10 +95,35 @@ async def _periodic_maintenance_loop() -> None:
             from app.services.core_people_finder import _async_flush_impressions
             await _async_flush_impressions(pool, force=True)
 
+            # 5. Flush in-process telemetry event buffer + dwell vector queue
+            from app.routers.telemetry import _async_flush_telemetry
+            await _async_flush_telemetry(pool)
+
         except asyncio.CancelledError:
             break
         except Exception as exc:
             logging.getLogger("app.maintenance").warning("Periodic maintenance cycle encountered error: %s", exc)
+
+
+async def _supabase_keepalive_worker() -> None:
+    """
+    Fires SELECT 1 every 24 hours to prevent Supabase free-tier 7-day auto-pause.
+    Zero Render CPU cost — sleeps 23 hours between pings.
+    """
+    from app.core.database import get_pool
+    _klog = logging.getLogger("app.keepalive")
+    while True:
+        try:
+            await asyncio.sleep(82800)  # 23h — stays within free-tier idle window
+            pool = get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute("SELECT 1")
+                _klog.info("Supabase 24h keepalive dispatched.")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            _klog.warning("Supabase keepalive failed: %s", exc)
 
 
 @asynccontextmanager
@@ -117,9 +142,11 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("Redis startup connection deferred/failed: %s", exc)
 
     m_task = asyncio.create_task(_periodic_maintenance_loop(), name="periodic_maintenance")
+    k_task = asyncio.create_task(_supabase_keepalive_worker(), name="supabase_keepalive")
     yield
     # Shutdown
     m_task.cancel()
+    k_task.cancel()
     try:
         await await_background_tasks(timeout=5.0)
     except Exception:

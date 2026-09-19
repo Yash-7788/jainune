@@ -48,15 +48,15 @@ class TestBug8PythonMultipartVersion(unittest.TestCase):
     def test_cve_dependency_bumps_in_requirements(self):
         content = self._read_requirements()
 
-        # Item 9: Pillow >= 10.3.0 (CVE-2024-28219)
+        # Item 9: Pillow intentionally REMOVED per OPTIMIZE.md §9.1
+        # Server-side image loading (Pillow) causes 48 MB RAM spike per upload → OOM on 512 MB Render.
+        # Client sends WebP directly; server does magic-byte validation only.
+        # This assertion verifies Pillow has NOT been re-added.
         pillow_match = re.search(r"Pillow\s*([>=<]+)\s*([\d\.]+)", content)
-        self.assertIsNotNone(pillow_match, "Pillow not found in requirements.txt")
-        p_op, p_ver = pillow_match.groups()
-        self.assertGreaterEqual(
-            tuple(map(int, p_ver.split("."))),
-            (10, 3, 0),
-            f"Pillow must be >=10.3.0 to fix CVE-2024-28219, found {p_op}{p_ver}",
-        )
+        self.assertIsNone(pillow_match, (
+            "Pillow must NOT be in requirements.txt (OPTIMIZE.md §9.1): "
+            "server-side PIL causes OOM on 512 MB Render. Use client-side WebP compression."
+        ))
 
         # Item 10: cryptography >= 43.0.0 (CVE-2024-12797)
         crypto_match = re.search(r"cryptography\s*([>=<]+)\s*([\d\.]+)", content)

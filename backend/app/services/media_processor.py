@@ -13,13 +13,11 @@ boto3/AWS: REMOVED. Uses supabase-py + httpx.
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import uuid
 from typing import Optional
 
 import httpx
-from PIL import Image
 
 from app.core.config import settings
 
@@ -137,45 +135,36 @@ async def enqueue_moderation(media_id: uuid.UUID, *_args, **_kwargs) -> None:
     logger.debug("enqueue_moderation called for media_id=%s (no-op in Supabase mode)", media_id)
 
 
+# ---------------------------------------------------------------------------
+# Image payload validator (no server-side resize/transcode — client sends WebP)
+# ---------------------------------------------------------------------------
+
+# Recognised magic bytes: RIFF....WEBP, JPEG (FF D8 FF), PNG (89 50 4E 47)
+_MAGIC_WEBP = (b"RIFF", b"WEBP")
+_MAGIC_JPEG = b"\xff\xd8\xff"
+_MAGIC_PNG  = b"\x89PNG"
+_MAX_BYTES   = 10 * 1024 * 1024  # 10 MB hard cap
+
+
 def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:
     """
-    Sanitizes an image payload:
-    1. Validates magic bytes and image integrity.
-    2. Protects against decompression bombs (PIL DecompressionBombError).
-    3. Strips all EXIF metadata (GPS, device info).
-    4. Transcodes to optimized WebP.
+    Lightweight server-side guard: validates magic bytes and enforces size cap.
+    No image loading, no resize, no transcode — that happens client-side (WebP/480px).
+    Raises ValueError for invalid or oversized payloads.
+    Returns the original bytes unchanged.
     """
     if not data:
         raise ValueError("Corrupted image header: empty payload")
-
-    buf = io.BytesIO(data)
-    try:
-        with Image.open(buf) as img:
-            img.verify()
-    except Image.DecompressionBombError as e:
-        raise ValueError(f"Decompression bomb detected: {e}") from e
-    except Exception as e:
-        raise ValueError(f"Corrupted image header: {e}") from e
-
-    # Re-open buffer after verify() to load image data
-    buf.seek(0)
-    try:
-        with Image.open(buf) as img:
-            img.load()
-            if img.width > max_dimension or img.height > max_dimension:
-                img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
-
-            # Strip EXIF and convert to RGB/RGBA
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGBA" if "transparency" in img.info or img.mode == "P" else "RGB")
-
-            out = io.BytesIO()
-            img.save(out, format="WEBP", quality=85)
-            return out.getvalue()
-    except Image.DecompressionBombError as e:
-        raise ValueError(f"Decompression bomb detected: {e}") from e
-    except Exception as e:
-        raise ValueError(f"Corrupted image header: {e}") from e
+    if len(data) > _MAX_BYTES:
+        raise ValueError(f"Image exceeds {_MAX_BYTES // (1024*1024)} MB limit")
+    # Validate magic bytes — accept WebP, JPEG, PNG
+    if not (
+        (data[:4] == _MAGIC_WEBP[0] and data[8:12] == _MAGIC_WEBP[1])
+        or data[:3] == _MAGIC_JPEG
+        or data[:4] == _MAGIC_PNG
+    ):
+        raise ValueError("Unsupported image format: must be WebP, JPEG, or PNG")
+    return data
 
 
 def _check_s3_size(key: str, media_type: str = "photo") -> tuple[bool, Optional[str]]:

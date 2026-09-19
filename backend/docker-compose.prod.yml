@@ -34,69 +34,8 @@ services:
         max-size: "50m"
         max-file: "5"
 
-  worker:
-    image: ${BACKEND_IMAGE:-ghcr.io/yash-7788/jainune/backend:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: jainune_prod_worker
-    restart: always
-    env_file:
-      - .env.production
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q default,notifications,batch
-    user: "10001:10001"
-    init: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2048M
-        reservations:
-          cpus: "0.5"
-          memory: 512M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-
-  beat:
-    image: ${BACKEND_IMAGE:-ghcr.io/yash-7788/jainune/backend:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: jainune_prod_beat
-    restart: always
-    env_file:
-      - .env.production
-    command: celery -A app.celery_app beat --loglevel=info -s /var/celerybeat/celerybeat-schedule
-    volumes:
-      - celerybeat_data:/var/celerybeat
-    user: "10001:10001"
-    init: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-        reservations:
-          cpus: "0.2"
-          memory: 128M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20m"
-        max-file: "3"
-
-volumes:
-  celerybeat_data:
+# NOTE: Celery worker + beat services removed (OPTIMIZE.md §3).
+# Background tasks now use asyncio in-process tasks in main.py lifespan:
+#   - _periodic_maintenance_loop (10-min cycle): subscriptions, matches, matching, impressions, telemetry
+#   - _supabase_keepalive_worker (23h cycle): prevents Supabase free-tier auto-pause
+# No external worker process needed on Render free tier.

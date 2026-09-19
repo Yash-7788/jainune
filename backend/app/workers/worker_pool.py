@@ -1,7 +1,7 @@
 """
-Shared asyncpg connection pool and event loop manager for Celery worker processes.
-Reuses a single event loop and connection pool per worker process instead of
-creating and destroying them on every individual task invocation.
+Shared asyncpg connection pool and event loop manager for background worker processes.
+Uses a single event loop and connection pool per process instead of creating/destroying
+per-task. statement_cache_size=0 is required for PgBouncer transaction-mode (port 6543).
 """
 
 from __future__ import annotations
@@ -11,15 +11,6 @@ import logging
 from typing import Any
 
 import asyncpg
-try:
-    from celery.signals import worker_process_init, worker_process_shutdown
-except Exception:
-    class _DummySignal:
-        @staticmethod
-        def connect(fn: Any) -> Any:
-            return fn
-    worker_process_init = _DummySignal()  # type: ignore
-    worker_process_shutdown = _DummySignal()  # type: ignore
 
 from app.core.config import settings
 
@@ -62,7 +53,7 @@ def get_worker_loop() -> asyncio.AbstractEventLoop:
 
 def run_worker_task(coro: Any) -> Any:
     """Executes a coroutine on the long-lived worker process event loop,
-    falling back to asyncio.run if outside a Celery worker.
+    falling back to asyncio.run if outside a worker.
     """
     global _worker_loop
     if _worker_loop is not None and not _worker_loop.is_closed():
@@ -73,6 +64,7 @@ def run_worker_task(coro: Any) -> Any:
 async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
     """Acquires a pooled connection if worker pool is initialized on the current loop,
     otherwise lazily initializes the pool, falling back to a standalone connection on error.
+    statement_cache_size=0 required for PgBouncer transaction mode (port 6543).
     """
     global _worker_pool, _worker_loop
     current_loop = None
@@ -81,7 +73,7 @@ async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
     except RuntimeError:
         pass
 
-    # Lazy pool initialization if worker_process_init signal didn't execute
+    # Lazy pool initialization
     if _worker_pool is None or getattr(_worker_pool, "_closed", False):
         try:
             target_loop = current_loop or get_worker_loop()
@@ -90,11 +82,12 @@ async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
                 min_size=settings.database_pool_min_size,
                 max_size=min(settings.database_pool_max_size, 10),
                 timeout=10,
+                statement_cache_size=0,  # PgBouncer transaction mode (port 6543)
             )
             _worker_loop = target_loop
         except Exception as exc:
             log.warning("Lazy worker pool init failed, falling back to standalone connection: %s", exc)
-            return await asyncpg.connect(settings.database_url, timeout=10)
+            return await asyncpg.connect(settings.database_url, timeout=10, statement_cache_size=0)
 
     if (
         _worker_pool is not None
@@ -104,47 +97,4 @@ async def get_worker_conn() -> asyncpg.Connection | PooledConnectionProxy:
         conn = await _worker_pool.acquire()
         return PooledConnectionProxy(conn, _worker_pool)
 
-    return await asyncpg.connect(settings.database_url, timeout=10)
-
-
-@worker_process_init.connect
-def on_worker_process_init(**kwargs: Any) -> None:
-    """Initialize persistent event loop and connection pool per Celery worker child process."""
-    global _worker_loop, _worker_pool
-    try:
-        _worker_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_worker_loop)
-        _worker_pool = _worker_loop.run_until_complete(
-            asyncpg.create_pool(
-                settings.database_url,
-                min_size=settings.database_pool_min_size,
-                max_size=min(settings.database_pool_max_size, 10),
-                timeout=10,
-            )
-        )
-        log.info("Initialized Celery worker connection pool (min=%d, max=%d)", 
-                 settings.database_pool_min_size, min(settings.database_pool_max_size, 10))
-    except Exception as exc:
-        log.error("CRITICAL: Failed to initialize worker database connection pool: %s", exc)
-        if getattr(settings, "environment", "") in ("production", "staging"):
-            raise RuntimeError(f"Celery worker pool initialization failed: {exc}") from exc
-
-
-@worker_process_shutdown.connect
-def on_worker_process_shutdown(**kwargs: Any) -> None:
-    """Gracefully close connection pool and event loop on worker child process exit."""
-    global _worker_loop, _worker_pool
-    if _worker_pool is not None and _worker_loop is not None and not _worker_loop.is_closed():
-        try:
-            _worker_loop.run_until_complete(_worker_pool.close())
-            log.info("Closed Celery worker connection pool")
-        except Exception as exc:
-            log.warning("Error closing worker pool on shutdown: %s", exc)
-        _worker_pool = None
-
-    if _worker_loop is not None and not _worker_loop.is_closed():
-        try:
-            _worker_loop.close()
-        except Exception:
-            pass
-        _worker_loop = None
+    return await asyncpg.connect(settings.database_url, timeout=10, statement_cache_size=0)
