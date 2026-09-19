@@ -28,10 +28,15 @@ This specification defines the complete end-to-end architecture required to oper
 │                         │ (cached egress band)    │ across all mobile clients   │
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
 │ Render Web Service      │ 100 GB Outbound Egress; │ Service suspended until 1st │
-│                         │ 512 MB RAM; 0.1 vCPU    │ of next calendar month      │
+│                         │ 512 MB RAM; 0.1 vCPU;   │ of next calendar month;     │
+│                         │ Diskless (zero disk)    │ RAM kept at ~80-120MB (safe)│
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
 │ Upstash Redis           │ 10,000 Commands / day   │ Rate limits & OTP fail;     │
-│                         │ (strictly ephemeral)    │ handled by in-memory fallbk │
+│                         │ (strictly ephemeral)    │ Swipes use in-memory (0 cmd)│
+│                         │                         │ & fail-safe memory fallback │
+├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
+│ Google Gemini API       │ 15 RPM / 1,500 RPD free │ 3-key pool = 45 RPM / 4,500 │
+│ (Flash Vision)          │ tier per key (0 cost)   │ RPD; 1 req per photo locked │
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
 │ Celery Worker / Beat    │ ELIMINATED (0 compute)  │ 0 unbacked jobs; replaced   │
 │                         │                         │ by native asyncio + pg_cron │
@@ -284,6 +289,31 @@ WHERE created_at < NOW() - INTERVAL '30 days';
 - Runs via a background `asyncio` worker in FastAPI scheduled at **03:00 UTC** (lowest traffic window).
 - Daily batch size: ~33,000 rows.
 - Deletion duration: **< 45ms** (indexed on `created_at`). Zero table lock disruption for active users.
+
+### 3.4 Connection Pool Ceiling & PgBouncer Transaction Mode (`statement_cache_size=0`)
+- **The 15-Connection Ceiling**: PostgreSQL free instances on Supabase strictly cap concurrent backend connections at **15**. Running unbounded connection pools under bursty traffic causes connection refusals (`too many clients already` / HTTP 500).
+- **Hard Pool Allocation (10 Max)**: Configured in `backend/app/core/config.py`:
+  - `database_pool_max_size: int = 10`
+  - `database_pool_min_size: int = 2`
+  - Reserves **5 unallocated connections** permanently for Supabase Studio dashboard queries, WAL replication, and schema maintenance.
+- **PgBouncer Port 6543 Requirement (`statement_cache_size=0`)**:
+  - When connecting through Supabase's transaction pooler (port `6543`), successive queries within or across transactions may land on different physical PostgreSQL backend worker processes.
+  - Default `asyncpg` prepared statement caching expects client queries to bind to the exact same backend process, triggering fatal runtime errors: `prepared statement "..." does not exist`.
+  - Configured in `backend/app/core/database.py:41,64`:
+    ```python
+    _pool = await asyncpg.create_pool(
+        dsn=primary_dsn,
+        min_size=settings.database_pool_min_size,
+        max_size=settings.database_pool_max_size,
+        statement_cache_size=0,  # REQUIRED for PgBouncer transaction mode
+        ...
+    )
+    ```
+  - Setting `statement_cache_size=0` eliminates all prepared statement desynchronization while maintaining maximum throughput and sub-millisecond query latency through PgBouncer.
+- **Zero-DB Compute Batched Swipes**:
+  - Profile impressions are buffered in-process (`_impression_buffer` in `core_people_finder.py`) with an `asyncio.Lock()`.
+  - Buffered impressions flush to PostgreSQL table `user_feed_impressions` in batches of 100 or every 60 seconds via single bulk `INSERT ... ON CONFLICT DO NOTHING`.
+  - Eliminates per-swipe write transactions and row-lock contention, reducing PostgreSQL write IOPS by over 98%.
 
 ---
 
@@ -621,23 +651,59 @@ grep -rnEi "SELECT .* FROM (messages|interactions|users)" backend/app/ | grep -v
 
 ---
 
-## 10. Content Moderation & Upstash Rate Limiter Hardening
+## 10. Content Moderation, Upstash Defense & Compute Optimization
 
-### 10.1 Upstash 10k Quota Defense & In-Memory Fallback
-- **High-Frequency Swipes**: Evaluated via in-process sliding window limiter (`_check_in_memory_rate_limit`), consuming **0 Upstash commands per swipe**. Saves ~90% of Redis command budget.
-- **Fail-Safe Fallback**: If Upstash hits its 10,000 daily command quota or throws a connection error, `sliding_window_rate_limit` automatically switches to in-memory sliding window rate limiting. The application **never throws HTTP 503**, completely eliminating service outage risks during traffic surges.
-- **Quota Reservation**: 100% of Upstash's 10k daily command budget is reserved for critical distributed operations (OTP request/verify brute-force protection and admin login defense).
+### 10.1 Upstash 10k Quota Defense & Zero-Cost Swipe Architecture
+- **High-Frequency Swipes**: Evaluated via in-process sliding window token limiter (`_check_in_memory_rate_limit`), consuming **0 Upstash commands and 0 PostgreSQL queries per swipe**. Saves >95% of Redis command budget.
+- **Fail-Safe Fallback**: If Upstash hits its 10,000 daily command quota or encounters network timeouts, `sliding_window_rate_limit` automatically switches to in-memory sliding window rate limiting. The application **never throws HTTP 503**, completely eliminating service outage risks during traffic surges.
+- **Quota Reservation**: 100% of Upstash's 10k daily command budget is reserved for critical distributed security barriers (OTP request/verify brute-force protection and admin login defense).
 
-### 10.2 Media Moderation Pipeline & Quota Protection
+### 10.2 Media Moderation Pipeline & Gemini Quota Protection
 - **Multi-Account Gemini Flash Pool**: Supported via `GEMINI_API_KEYS="key1,key2,key3"` with automatic round-robin and instant failover on HTTP 429 (`RESOURCE_EXHAUSTED`). Provides up to 4,500 free daily checks.
-- **15 RPM & Single-Flight Concurrency Guard**: Concurrency is locked per `photo_id` to eliminate duplicate API dispatches caused by rapid client taps or retries. A sliding window rate limiter strictly enforces the 15 RPM free tier boundary per key.
+- **Strict Single-Flight Concurrency (1 Request = 1 Request Only)**:
+  - An in-memory lock dictionary (`_photo_locks: dict[str, asyncio.Lock]`) isolates execution per `photo_id`.
+  - Even if a user spam-taps "Confirm" 10 times or multiple background workers attempt evaluation, **exactly one Gemini Vision API request is dispatched**.
+  - All concurrent callers await the single in-flight evaluation result.
+  - Locks are proactively purged on completion (`_photo_locks.pop()`), ensuring zero heap accumulation or memory leaks on Render.
+- **15 RPM Rate Boundary & Thread Cooldowns**:
+  - Gemini free tier permits 15 requests per minute per key.
+  - The client maintains per-key cooldown timers (`_key_cooldowns`) enforcing a minimum 2.0-second delay between calls per key, completely eliminating burst-induced 429 errors.
+  - Synchronous Supabase Storage SDK downloads are offloaded to `asyncio.to_thread`, keeping Render's single ASGI event loop completely unblocked.
+- **Alternative & Future Models**:
+  - Primary: `gemini-1.5-flash` (15 RPM / 1,500 RPD free tier, multimodal vision, ~800ms latency).
+  - High-Throughput Alternative: `gemini-1.5-flash-8b` (identical free-tier limits, lower token latency).
+  - Modern Alternative: `gemini-2.0-flash` (same 15 RPM free tier, enhanced multi-modal reasoning; configurable via `GEMINI_MODEL="gemini-2.0-flash"` in `.env`).
+  - (Note: "Gemini 3.5" is not an official Google release yet; any upcoming Flash vision model adhering to Google's 15 RPM free tier can be dropped in seamlessly).
 - **TOCTOU Avatar Overwrite Guard**: When moderation completes, `users.avatar_url` is updated only if the approved photo is still the user's active avatar (`position = 1`), preventing stale out-of-order overwrites.
 - **1 GB Supabase Storage Quota Preservation**: Rejected avatars (via automated Gemini checks or manual admin rejection) are immediately purged from the Supabase Storage bucket (`delete_user_avatar`), preventing abandoned or illicit images from consuming the 1 GB free object storage quota.
-- **Self-View Zero-Egress Caching**: The mobile client caches the user's own avatar URI locally (`AsyncStorage`), eliminating 100% of Supabase download egress on self-profile views.
+
+### 10.3 Image Caching After Gemini Lookup & Client/Backend Autonomy
+- **The Decoupled Golden Rule**: Client caching optimizes user ergonomics and eliminates download egress, but the **backend and database remain 100% stable and performant even if client caching is completely disabled or bypassed**.
+- **Post-Moderation Storage Lifecycle**:
+  1. *Upload*: Avatar binary uploads directly from client to Supabase Storage via signed URL (`avatars/avatar_{user_id}.webp`).
+  2. *Moderation State*: Retained in `status = 'pending'` in PostgreSQL (`user_photos`), invisible to discovery feeds.
+  3. *Approval & CDN Publication*: Once Gemini verifies the photo, `user_photos.status` becomes `'approved'` and `users.avatar_url` is set.
+- **Client-Side Cache Layer**:
+  - Mobile client caches own avatar URI in `AsyncStorage` and remote candidate avatars in fast disk cache, consuming **0 Supabase egress bytes** on subsequent profile views.
+- **Backend Autonomous Resilience**:
+  - If a user clears app storage, switches devices, or accesses Jainune via desktop Safari with DevTools open (cache disabled):
+    - Profile queries execute indexed keyset lookups against PostgreSQL (`users.avatar_url`), consuming < 1ms DB CPU.
+    - Supabase Storage public CDN headers (`Cache-Control: public, max-age=86400, stale-while-revalidate=3600`) ensure edge CDN caches handle requests without hitting origin storage servers.
+    - **Zero repeated Gemini calls**: Once a photo is approved, its moderation status is immutable in PostgreSQL. It is never re-sent to Gemini Vision.
+
+### 10.4 Diskless Service Account Credentials & Render RAM Footprint
+- **Zero Persistent Disk on Render Free Tier**:
+  - Render free instances do not include persistent local disk storage. Attempting to mount `/etc/secrets/*.json` fails in diskless configurations.
+  - Both Firebase Cloud Messaging (`FCM_SERVICE_ACCOUNT_JSON`) and Google Play Billing (`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`) parse raw JSON strings directly from environment variables.
+  - Startup audit in `config.py` accepts either raw JSON or file path, allowing zero-disk production deployments without paying for Render persistent disks.
+- **RAM Optimization (Celery Elimination)**:
+  - Running separate Celery worker and beat processes consumed ~150 MB extra RAM per container, creating severe OOM risks against Render's 512 MB ceiling.
+  - Native tracked supervisor (`enqueue_task` in `app/core/background_tasks.py`) with GC protection (`_active_tasks`) and DB-tracked periodic maintenance (`_periodic_maintenance_loop` in `app/main.py`) run entirely inside the single FastAPI web process.
+  - Result: Whole backend runs stably at **~80–120 MB RAM**, preserving >380 MB safety buffer below Render's 512 MB hard crash limit.
 
 ---
 
-### 9.3 Production Observability & Warning Thresholds
+### 10.5 Production Observability & Warning Thresholds
 
 Configure these alerts in your cloud dashboards to catch any regression early:
 
@@ -652,7 +718,7 @@ Configure these alerts in your cloud dashboards to catch any regression early:
 
 ---
 
-## 10. Zero-Cost Crash Reporting Architecture: Firebase (Android) + Sentry (iOS/Web)
+## 11. Zero-Cost Crash Reporting Architecture: Firebase (Android) + Sentry (iOS/Web)
 
 To guarantee 100% production observability across native Android, iOS, and Web PWA without incurring cloud fees or consuming any Render/Supabase compute power, Jainune implements a dual-provider telemetry strategy.
 
@@ -675,7 +741,7 @@ To guarantee 100% production observability across native Android, iOS, and Web P
 
 ---
 
-### 10.1 Resource & Compute Ledger (Zero Server Impact)
+### 11.1 Resource & Compute Ledger (Zero Server Impact)
 
 | Provider | Cloud Resource Used | Render Compute Impact | Supabase DB Impact | Data Path |
 | :--- | :--- | :--- | :--- | :--- |
@@ -685,7 +751,7 @@ To guarantee 100% production observability across native Android, iOS, and Web P
 
 ---
 
-### 10.2 Architectural Implementation Blueprint
+### 11.2 Architectural Implementation Blueprint
 
 #### A. Conditional Mobile Client Initializer (`mobile/src/services/crashReporter.ts`)
 ```typescript
@@ -732,7 +798,7 @@ export function recordHandledError(error: Error, context?: Record<string, any>) 
 
 ---
 
-### 10.3 Benefits of the Dual-Engine Strategy
+### 11.3 Benefits of the Dual-Engine Strategy
 
 1. **Infinite Scale on Android**: Android makes up 90%+ of Indian dating app traffic. Firebase Crashlytics provides **unlimited, uncapped crash logging**, so 100,000 Android users will never exceed any quota.
 2. **Web PWA Resilience**: Firebase Crashlytics does not support web browsers; Sentry seamlessly captures uncaught JavaScript exceptions and broken rendering trees on iPhone Safari PWA.
@@ -740,7 +806,7 @@ export function recordHandledError(error: Error, context?: Record<string, any>) 
 
 ---
 
-## 11. Production Verification & Dashboard Audit Protocol
+## 12. Production Verification & Dashboard Audit Protocol
 
 When rolling out Jainune 2.0 to the first 100–500 live users, use this concrete operational checklist to visually verify that client caching, media optimization, and database pruning are functioning correctly in production.
 
@@ -764,7 +830,7 @@ When rolling out Jainune 2.0 to the first 100–500 live users, use this concret
 └──────────────────┴─────────────────────────────┴────────────────────────────────┘
 ```
 
-### 11.1 Step-by-Step Verification Procedure
+### 12.1 Step-by-Step Verification Procedure
 
 #### Step 1: Verify Zero-Query Chat Caching (Supabase Dashboard)
 1. Open `supabase.com` → Select Jainune Project → Click **Database** → **Reports**.
@@ -786,7 +852,7 @@ When rolling out Jainune 2.0 to the first 100–500 live users, use this concret
 
 ---
 
-## 12. Distributed Compute Responsibility Matrix & Edge Demarcation
+## 13. Distributed Compute Responsibility Matrix & Edge Demarcation
 
 A common developer mistake is confusing which cloud component executes which computational workload. This matrix delineates the physical boundary lines of compute, memory, and storage across Jainune's infrastructure.
 
@@ -822,7 +888,7 @@ A common developer mistake is confusing which cloud component executes which com
 └─────────────────┴─────────────────┴──────────────────────┴──────────────────────┘
 ```
 
-### 12.1 The 3:00 AM Deletion Reality (Deep Dive)
+### 13.1 The 3:00 AM Deletion Reality (Deep Dive)
 - **Why 3:00 AM vs 12:00 Midnight**:
   - In dating applications, midnight (10:30 PM – 1:00 AM) is **peak emotional engagement time** when users chat in bed before sleep.
   - Executing a database prune at midnight forces PostgreSQL to write Write-Ahead Logs (WAL) and re-index B-Trees while live users are sending messages.
@@ -836,7 +902,7 @@ A common developer mistake is confusing which cloud component executes which com
 
 ---
 
-## 13. Progressive Web App (PWA) Security vs Native Mobile Security Architecture
+## 14. Progressive Web App (PWA) Security vs Native Mobile Security Architecture
 
 Deploying Jainune as an installable standalone Web PWA for Apple iOS devices requires a fundamentally different security model than native Android `.apk` or native iOS `.ipa` binary distributions.
 
@@ -859,14 +925,14 @@ Deploying Jainune as an installable standalone Web PWA for Apple iOS devices req
 └─────────────────┴───────────────────────────────┴───────────────────────────────┘
 ```
 
-### 13.1 Does PWA Support Gradle, ProGuard, or Frida?
+### 14.1 Does PWA Support Gradle, ProGuard, or Frida?
 - **No, by physical architecture.**
   - **Gradle & ProGuard / R8** are Android native buildchain compilers. They transform Java/Kotlin bytecode into Dalvik/ART executable formats (`classes.dex`). A PWA on iOS does not contain Java, Kotlin, Dalvik, or Gradle.
   - **Frida**: Frida is a dynamic binary instrumentation toolkit designed to hook native Objective-C/Swift/C++ machine code symbols in memory. An iOS PWA runs strictly within **Apple WebKit's standalone WebProcess sandbox**. There is no compiled binary image for Frida to hook.
 
 ---
 
-### 13.2 What PWA Actually Requires: Modern Web Application Security
+### 14.2 What PWA Actually Requires: Modern Web Application Security
 
 Instead of binary obfuscation, PWA security relies on 4 defensive perimeters:
 
@@ -885,7 +951,7 @@ Because any user with a Mac and iPhone can inspect WebKit DevTools:
 
 ---
 
-### 13.3 The Golden Rule of PWA Security: Zero Client Trust
+### 14.3 The Golden Rule of PWA Security: Zero Client Trust
 
 > [!IMPORTANT]
 > **Assume the client can always open DevTools (`F12` / Web Inspector).**

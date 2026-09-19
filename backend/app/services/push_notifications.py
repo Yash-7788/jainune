@@ -27,22 +27,62 @@ from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
-_FCM_ENDPOINT = (
-    f"https://fcm.googleapis.com/v1/projects/{settings.fcm_project_id}/messages:send"
-)
-_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 
-# Module-level token cache: (access_token, expiry_timestamp)
-_token_cache: tuple[str, float] = ("", 0.0)
+_token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0}
+_cached_sa: dict[str, Any] | None = None
+_cached_project_id: str | None = None
 
 
 def _load_service_account() -> dict[str, Any]:
-    path = settings.fcm_service_account_path
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"FCM service account not found: {path}")
-    with open(path) as f:
-        return json.load(f)
+    """Loads FCM service account credentials from raw JSON env var or file path."""
+    global _cached_sa
+    if _cached_sa is not None:
+        return _cached_sa
+
+    raw = getattr(settings, "fcm_service_account_json", "") or os.environ.get(
+        "FCM_SERVICE_ACCOUNT_JSON", ""
+    )
+    if raw and raw.strip():
+        stripped = raw.strip()
+        if stripped.startswith("{"):
+            try:
+                _cached_sa = json.loads(stripped)
+                return _cached_sa
+            except Exception as exc:
+                log.warning("Failed to parse FCM_SERVICE_ACCOUNT_JSON as JSON: %s", exc)
+        elif os.path.isfile(stripped):
+            with open(stripped, "r", encoding="utf-8") as f:
+                _cached_sa = json.load(f)
+                return _cached_sa
+
+    path = getattr(settings, "fcm_service_account_path", "")
+    if path and os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            _cached_sa = json.load(f)
+            return _cached_sa
+
+    raise FileNotFoundError(
+        f"FCM service account not found: neither valid JSON in FCM_SERVICE_ACCOUNT_JSON nor file at '{path}'"
+    )
+
+
+def _get_fcm_endpoint() -> str:
+    """Derives FCM send endpoint, using project_id from service account if available."""
+    global _cached_project_id
+    if _cached_project_id:
+        return f"https://fcm.googleapis.com/v1/projects/{_cached_project_id}/messages:send"
+    try:
+        sa = _load_service_account()
+        pid = sa.get("project_id")
+        if pid:
+            _cached_project_id = pid
+            return f"https://fcm.googleapis.com/v1/projects/{pid}/messages:send"
+    except Exception:
+        pass
+    pid = getattr(settings, "fcm_project_id", "") or "jainune-prod"
+    return f"https://fcm.googleapis.com/v1/projects/{pid}/messages:send"
 
 
 def _build_jwt(sa: dict[str, Any]) -> str:
@@ -216,7 +256,7 @@ async def send_push(
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                _FCM_ENDPOINT,
+                _get_fcm_endpoint(),
                 json=message,
                 headers={
                     "Authorization": f"Bearer {access_token}",

@@ -98,6 +98,7 @@ class Settings(BaseSettings):
 
     # Firebase Cloud Messaging (push notifications)
     fcm_service_account_path: str = "/etc/secrets/fcm_service_account.json"
+    fcm_service_account_json: str = ""
     fcm_project_id: str = "jainune-prod"
 
     # Celery
@@ -153,8 +154,10 @@ class Settings(BaseSettings):
             if not self.smtp_host:
                 errors.append("smtp_host must be configured for email OTP delivery in production")
             import os
-            if not self.fcm_service_account_path or not os.path.isfile(self.fcm_service_account_path):
-                errors.append(f"fcm_service_account_path '{self.fcm_service_account_path}' not found")
+            has_fcm_json = bool(self.fcm_service_account_json and self.fcm_service_account_json.strip())
+            has_fcm_file = bool(self.fcm_service_account_path and os.path.isfile(self.fcm_service_account_path))
+            if not (has_fcm_json or has_fcm_file):
+                errors.append(f"fcm_service_account_path '{self.fcm_service_account_path}' not found and fcm_service_account_json is empty")
             if not self.jwt_secret_key or self.jwt_secret_key == "default_jwt_hmac_secret_32_bytes_len" or len(self.jwt_secret_key) < 32:
                 errors.append("jwt_secret_key must be set to a cryptographically random secret (>=32 chars) without default values; used for refresh-token grace HMAC")
             if not self.razorpay_webhook_secret or self.razorpay_webhook_secret in ("test_rzp_webhook_secret", "") or self.razorpay_webhook_secret.startswith("test_"):

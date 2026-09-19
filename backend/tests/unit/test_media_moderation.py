@@ -18,10 +18,23 @@ from app.services.moderation import (
 
 
 class TestBug8PythonMultipartVersion(unittest.TestCase):
-    def test_python_multipart_cve_fix_in_requirements(self):
-        with open("requirements.txt", "r", encoding="utf-8") as f:
-            content = f.read()
+    @classmethod
+    def _read_requirements(cls) -> str:
+        from pathlib import Path
+        cur = Path(__file__).resolve()
+        candidates = [
+            cur.parents[2] / "requirements.txt",
+            cur.parents[1] / "requirements.txt",
+            Path("requirements.txt"),
+            Path("backend/requirements.txt"),
+        ]
+        for p in candidates:
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8")
+        raise FileNotFoundError("requirements.txt not found in candidate paths")
 
+    def test_python_multipart_cve_fix_in_requirements(self):
+        content = self._read_requirements()
         match = re.search(r"python-multipart\s*([>=<]+)\s*([\d\.]+)", content)
         self.assertIsNotNone(match, "python-multipart not found in requirements.txt")
         op, ver = match.groups()
@@ -30,6 +43,39 @@ class TestBug8PythonMultipartVersion(unittest.TestCase):
             ver_tuple,
             (0, 0, 18),
             f"python-multipart must be >=0.0.18 to fix CVE-2024-53981, found {op}{ver}",
+        )
+
+    def test_cve_dependency_bumps_in_requirements(self):
+        content = self._read_requirements()
+
+        # Item 9: Pillow >= 10.3.0 (CVE-2024-28219)
+        pillow_match = re.search(r"Pillow\s*([>=<]+)\s*([\d\.]+)", content)
+        self.assertIsNotNone(pillow_match, "Pillow not found in requirements.txt")
+        p_op, p_ver = pillow_match.groups()
+        self.assertGreaterEqual(
+            tuple(map(int, p_ver.split("."))),
+            (10, 3, 0),
+            f"Pillow must be >=10.3.0 to fix CVE-2024-28219, found {p_op}{p_ver}",
+        )
+
+        # Item 10: cryptography >= 43.0.0 (CVE-2024-12797)
+        crypto_match = re.search(r"cryptography\s*([>=<]+)\s*([\d\.]+)", content)
+        self.assertIsNotNone(crypto_match, "cryptography not found in requirements.txt")
+        c_op, c_ver = crypto_match.groups()
+        self.assertGreaterEqual(
+            tuple(map(int, c_ver.split("."))),
+            (43, 0, 0),
+            f"cryptography must be >=43.0.0 to fix CVE-2024-12797, found {c_op}{c_ver}",
+        )
+
+        # Item 11: fastapi >= 0.115.0 (CVE-2024-47874 via Starlette >= 0.40.0)
+        fastapi_match = re.search(r"fastapi\s*([>=<]+)\s*([\d\.]+)", content)
+        self.assertIsNotNone(fastapi_match, "fastapi not found in requirements.txt")
+        f_op, f_ver = fastapi_match.groups()
+        self.assertGreaterEqual(
+            tuple(map(int, f_ver.split("."))),
+            (0, 115, 0),
+            f"fastapi must be >=0.115.0 to fix CVE-2024-47874, found {f_op}{f_ver}",
         )
 
 
