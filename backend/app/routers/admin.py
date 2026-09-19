@@ -552,15 +552,22 @@ async def list_pending_media(
         )
     media_list = []
     is_superadmin = admin.get("admin_role") == "superadmin"
+    from app.services.media_processor import avatar_public_url
     for r in rows:
         d = dict(r)
+        if not d.get("cdn_url") and d.get("user_id") and d.get("media_type") == "photo":
+            d["cdn_url"] = avatar_public_url(d["user_id"])
         if not is_superadmin and d.get("phone_number"):
             d["phone_number"] = _mask_phone(d["phone_number"])
         media_list.append(d)
     return {"media": media_list}
 
 
-@router.post("/media/{media_id}/approve", status_code=status.HTTP_200_OK)
+# ---------------------------------------------------------------------------
+# 7. Approve / Reject media
+# ---------------------------------------------------------------------------
+
+@router.post("/media/{media_id}/approve")
 async def approve_media(
     media_id: UUID,
     admin: dict = Depends(require_admin),
@@ -571,7 +578,7 @@ async def approve_media(
 
     async with pool.acquire() as conn:
         photo = await conn.fetchrow(
-            "SELECT id, user_id, cdn_url, s3_key FROM user_photos WHERE id = $1",
+            "SELECT id, user_id, cdn_url, s3_key, position FROM user_photos WHERE id = $1",
             media_id,
         )
         if photo:
@@ -592,12 +599,30 @@ async def approve_media(
                     admin["user_id"],
                     media_id,
                 )
+                # TOCTOU guard: Only update users.avatar_url if this photo is STILL position = 1
                 await conn.execute(
-                    "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                    """
+                    UPDATE users
+                       SET avatar_url = $1, updated_at = NOW()
+                     WHERE id = $2
+                       AND EXISTS (
+                           SELECT 1 FROM user_photos
+                            WHERE id = $3 AND user_id = $2 AND position = 1
+                       )
+                    """,
                     cdn_url,
                     user_id,
+                    media_id,
                 )
                 await recompute_trust_score(user_id, conn)
+
+            # Invalidate caches
+            try:
+                r = get_redis()
+                if r:
+                    await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+            except Exception:
+                pass
 
             return {
                 "media_id": str(media_id),
@@ -606,7 +631,7 @@ async def approve_media(
             }
 
         row = await conn.fetchrow(
-            "SELECT id, user_id, s3_key, cdn_url FROM user_media WHERE id = $1",
+            "SELECT id, user_id, s3_key, cdn_url, media_type, position FROM user_media WHERE id = $1",
             media_id,
         )
         if not row:
@@ -628,12 +653,22 @@ async def approve_media(
                 admin["user_id"],
                 media_id,
             )
-            await conn.execute(
-                "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
-                cdn_url,
-                user_id,
-            )
+            # Only update users.avatar_url if this is a primary photo (NOT voice note, NOT secondary media)
+            if row["media_type"] == "photo" and row.get("position", 1) == 1:
+                await conn.execute(
+                    "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                    cdn_url,
+                    user_id,
+                )
             await recompute_trust_score(user_id, conn)
+
+        # Invalidate caches
+        try:
+            r = get_redis()
+            if r:
+                await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+        except Exception:
+            pass
 
         return {
             "media_id": str(media_id),
@@ -642,17 +677,17 @@ async def approve_media(
         }
 
 
-@router.post("/media/{media_id}/reject", status_code=status.HTTP_200_OK)
+@router.post("/media/{media_id}/reject")
 async def reject_media(
     media_id: UUID,
     body: RejectMediaBody,
     admin: dict = Depends(require_admin),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Manually reject a media item with a reason."""
+    """Reject a media item with reason. Recomputes trust score and purges storage."""
     async with pool.acquire() as conn:
         photo = await conn.fetchrow(
-            "SELECT id, user_id, cdn_url FROM user_photos WHERE id = $1",
+            "SELECT id, user_id, cdn_url, position FROM user_photos WHERE id = $1",
             media_id,
         )
         if photo:
@@ -672,27 +707,42 @@ async def reject_media(
                     admin["user_id"],
                     media_id,
                 )
-                if photo.get("cdn_url"):
+                # TOCTOU guard: Only clear avatar_url if this photo is STILL position 1
+                is_active = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM user_photos WHERE id = $1 AND user_id = $2 AND position = 1)",
+                    media_id,
+                    user_id,
+                )
+                if is_active:
                     await conn.execute(
-                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1 AND avatar_url = $2",
+                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
                         user_id,
-                        photo["cdn_url"],
                     )
                 await recompute_trust_score(user_id, conn)
 
-            # Purge rejected avatar from Supabase Storage to protect 1GB free tier
-            from app.services.media_processor import delete_user_avatar
-            await delete_user_avatar(user_id)
+            # Purge rejected avatar from Supabase Storage ONLY if it was the active avatar
+            if is_active:
+                from app.services.media_processor import delete_user_avatar
+                await delete_user_avatar(user_id)
+
+            # Invalidate caches
+            try:
+                r = get_redis()
+                if r:
+                    await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+            except Exception:
+                pass
 
             return {"rejected": True, "media_id": media_id, "reason": body.reason}
 
         row = await conn.fetchrow(
-            "SELECT user_id, s3_key FROM user_media WHERE id = $1",
+            "SELECT id, user_id, s3_key, media_type, position FROM user_media WHERE id = $1",
             media_id,
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Media not found")
 
+        user_id = row["user_id"]
         async with conn.transaction():
             await conn.execute(
                 """
@@ -707,7 +757,34 @@ async def reject_media(
                 admin["user_id"],
                 media_id,
             )
-            await recompute_trust_score(row["user_id"], conn)
+            # If this was primary photo, clear users.avatar_url
+            if row["media_type"] == "photo" and row.get("position", 1) == 1:
+                await conn.execute(
+                    "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+                    user_id,
+                )
+            await recompute_trust_score(user_id, conn)
+
+        # Quota optimization: purge rejected user_media file from Supabase Storage
+        if row.get("s3_key"):
+            try:
+                from app.services.media_processor import _get_supabase
+                import asyncio
+                client = _get_supabase()
+                await asyncio.to_thread(
+                    client.storage.from_(settings.supabase_storage_bucket).remove,
+                    [row["s3_key"]],
+                )
+            except Exception as exc:
+                logger.warning("Failed to purge rejected user_media %s from storage: %s", row["s3_key"], exc)
+
+        # Invalidate caches
+        try:
+            r = get_redis()
+            if r:
+                await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+        except Exception:
+            pass
 
         return {"rejected": True, "media_id": media_id, "reason": body.reason}
 

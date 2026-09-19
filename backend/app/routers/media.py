@@ -153,7 +153,7 @@ async def confirm_upload(
 
     # Store CDN URL and retain status='pending' until moderation completes
     async with db.acquire() as conn:
-        await conn.execute(
+        res = await conn.execute(
             """
             UPDATE user_photos
                SET status = 'pending', cdn_url = $1, updated_at = NOW()
@@ -163,6 +163,18 @@ async def confirm_upload(
             body.media_id,
             uuid.UUID(str(user_id)),
         )
+        if res == "UPDATE 0":
+            raise HTTPException(
+                status_code=404,
+                detail="Upload intent not found or expired. Request a new upload URL.",
+            )
+
+    # Invalidate cached profile and feed
+    try:
+        if redis and hasattr(redis, "delete"):
+            await redis.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+    except Exception:
+        pass
 
     # Dispatch automated vision moderation in background supervisor
     from app.core.background_tasks import enqueue_task

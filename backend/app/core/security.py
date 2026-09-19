@@ -189,6 +189,13 @@ async def _check_in_memory_rate_limit(key: str, limit: int, window_seconds: int)
     import time
     now = time.monotonic()
     async with _in_memory_rate_lock:
+        # Prevent unbounded memory growth by evicting stale keys when dictionary exceeds 5,000 entries.
+        # Use safe 3600s max TTL threshold so short-window calls (e.g. 60s swipes) never evict long-window keys.
+        if len(_in_memory_rate_limits) > 5000:
+            stale_keys = [k for k, v in _in_memory_rate_limits.items() if not v or (now - v[-1] >= 3600)]
+            for sk in stale_keys:
+                _in_memory_rate_limits.pop(sk, None)
+
         stamps = [t for t in _in_memory_rate_limits.get(key, []) if now - t < window_seconds]
         if len(stamps) >= limit:
             _in_memory_rate_limits[key] = stamps

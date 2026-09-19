@@ -12,6 +12,7 @@ boto3/AWS: REMOVED. Uses supabase-py + httpx.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import uuid
@@ -71,7 +72,7 @@ async def generate_supabase_upload_signed_url(user_id: str | uuid.UUID) -> dict:
     bucket = settings.supabase_storage_bucket
     path = avatar_storage_path(user_id)
     client = _get_supabase()
-    res = client.storage.from_(bucket).create_signed_upload_url(path)
+    res = await asyncio.to_thread(client.storage.from_(bucket).create_signed_upload_url, path)
     return {
         "signed_url": res["signedURL"],
         "token": res.get("token", ""),
@@ -85,15 +86,27 @@ async def generate_supabase_upload_signed_url(user_id: str | uuid.UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 async def verify_avatar_uploaded(user_id: str | uuid.UUID) -> bool:
-    """HEAD request to confirm object landed in Supabase Storage."""
+    """HEAD request to confirm object landed in Supabase Storage with authenticated SDK fallback."""
     url = avatar_public_url(user_id)
     try:
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.head(url)
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
     except Exception as exc:
         logger.warning("Avatar HEAD check failed for %s: %s", user_id, exc)
-        return False
+
+    # Authenticated Supabase SDK fallback (e.g. if bucket has RLS or CDN has propagation delay)
+    try:
+        client = _get_supabase()
+        items = await asyncio.to_thread(client.storage.from_(settings.supabase_storage_bucket).list, str(user_id))
+        for item in items:
+            if item.get("name") == "avatar.webp":
+                return True
+    except Exception as exc:
+        logger.warning("Avatar SDK check failed for %s: %s", user_id, exc)
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +117,10 @@ async def delete_user_avatar(user_id: str | uuid.UUID) -> bool:
     """Remove avatar from Supabase Storage avatars bucket."""
     try:
         client = _get_supabase()
-        client.storage.from_(settings.supabase_storage_bucket).remove([avatar_storage_path(user_id)])
+        await asyncio.to_thread(
+            client.storage.from_(settings.supabase_storage_bucket).remove,
+            [avatar_storage_path(user_id)],
+        )
         return True
     except Exception as exc:
         logger.error("Failed to delete avatar for user %s: %s", user_id, exc)

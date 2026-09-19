@@ -59,6 +59,9 @@ class GeminiModerationClient:
     async def _get_available_key(self) -> Optional[str]:
         """Selects next available key respecting 15 RPM rate limits and cooldowns."""
         async with self._lock:
+            if not self._keys and settings.gemini_api_keys:
+                self.set_keys([k.strip() for k in settings.gemini_api_keys.split(",") if k.strip()])
+
             if not self._keys:
                 return None
 
@@ -103,6 +106,10 @@ class GeminiModerationClient:
         if not self._keys:
             logger.info("No Gemini API keys configured. Routing photo to manual admin queue.")
             return ModerationResult(is_safe=None, reason="Gemini API unconfigured; queued for admin", confidence=0.0)
+
+        if len(image_bytes) > 5 * 1024 * 1024:
+            logger.warning("Image too large for moderation: %s bytes", len(image_bytes))
+            return ModerationResult(is_safe=False, reason="Image file exceeds size limit (5MB)", confidence=1.0)
 
         b64_data = base64.b64encode(image_bytes).decode("ascii")
 
@@ -194,25 +201,44 @@ class GeminiModerationClient:
                 finish_reason = candidate.get("finish_reason") or candidate.get("finishReason")
 
                 # 2. Check safety filter refusal
-                if finish_reason == "SAFETY":
-                    logger.warning("Gemini refused image due to safety filters (finish_reason=SAFETY)")
-                    return ModerationResult(is_safe=False, reason="Refused by safety filters (nudity/explicit)", confidence=1.0)
+                if finish_reason in ("SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"):
+                    logger.warning("Gemini refused image due to safety filters (finish_reason=%s)", finish_reason)
+                    return ModerationResult(is_safe=False, reason=f"Refused by safety filters ({str(finish_reason).lower()})", confidence=1.0)
 
                 # 3. Parse JSON response
                 parts = candidate.get("content", {}).get("parts", [])
                 if not parts:
                     return ModerationResult(is_safe=None, reason="Empty response parts", confidence=0.0)
 
-                raw_text = parts[0].get("text", "{}")
+                raw_text = parts[0].get("text", "{}").strip()
+                if raw_text.startswith("```"):
+                    import re
+                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
+                    raw_text = re.sub(r"\s*```$", "", raw_text)
+                    raw_text = raw_text.strip()
                 try:
                     parsed = json.loads(raw_text)
+                except Exception:
+                    import re
+                    match = re.search(r"\{.*?\}", raw_text, re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(0))
+                        except Exception as exc:
+                            logger.error("Failed to parse regex-extracted Gemini JSON: %s (raw: %s)", exc, raw_text)
+                            return ModerationResult(is_safe=None, reason="Invalid JSON from model; queued for admin", confidence=0.0)
+                    else:
+                        logger.error("Failed to parse Gemini moderation JSON: no JSON object found (raw: %s)", raw_text)
+                        return ModerationResult(is_safe=None, reason="Invalid JSON from model; queued for admin", confidence=0.0)
+
+                try:
                     is_safe = bool(parsed.get("is_safe", False))
                     reason = str(parsed.get("reason", "clean" if is_safe else "unspecified"))
                     confidence = float(parsed.get("confidence", 0.9))
                     return ModerationResult(is_safe=is_safe, reason=reason, confidence=confidence)
                 except Exception as exc:
-                    logger.error("Failed to parse Gemini moderation JSON: %s (raw: %s)", exc, raw_text)
-                    return ModerationResult(is_safe=None, reason="Invalid JSON from model; queued for admin", confidence=0.0)
+                    logger.error("Failed to extract schema fields from Gemini JSON: %s (parsed: %s)", exc, parsed)
+                    return ModerationResult(is_safe=None, reason="Invalid schema from model; queued for admin", confidence=0.0)
 
             # All attempts failed or exhausted
             return ModerationResult(is_safe=None, reason="All moderation keys exhausted; queued for admin", confidence=0.0)
@@ -248,6 +274,7 @@ async def run_photo_moderation(
     3. Fetches image bytes.
     4. Moderates via Gemini client with multi-key failover.
     5. Updates user_photos status and synchronizes users.avatar_url if safe.
+    6. Cleans up in-memory lock on completion to prevent memory leaks.
     """
     from app.core.database import get_pool
     from app.services.media_processor import avatar_public_url
@@ -258,113 +285,149 @@ async def run_photo_moderation(
     if moderator is None:
         moderator = gemini_moderator
 
-    async with lock:
-        if pool is None:
-            pool = get_pool()
+    try:
+        async with lock:
             if pool is None:
-                logger.error("run_photo_moderation: DB pool not initialized")
-                return ModerationResult(is_safe=None, reason="DB pool uninitialized", confidence=0.0)
+                pool = get_pool()
+                if pool is None:
+                    logger.error("run_photo_moderation: DB pool not initialized")
+                    return ModerationResult(is_safe=None, reason="DB pool uninitialized", confidence=0.0)
 
-        cdn_url = avatar_public_url(user_id)
+            cdn_url = avatar_public_url(user_id)
 
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, user_id, status, cdn_url FROM user_photos WHERE id = $1 AND user_id = $2",
-                photo_id,
-                user_id,
-            )
-            if not row:
-                logger.warning("run_photo_moderation: Photo %s not found in DB", photo_id)
-                return ModerationResult(is_safe=None, reason="Photo not found", confidence=0.0)
-
-            # Idempotency guard: already resolved
-            if row["status"] in ("approved", "rejected"):
-                logger.info("Photo %s already resolved with status %s", photo_id, row["status"])
-                return ModerationResult(
-                    is_safe=(row["status"] == "approved"),
-                    reason=f"Already {row['status']}",
-                    confidence=1.0,
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, user_id, status, cdn_url FROM user_photos WHERE id = $1 AND user_id = $2",
+                    photo_id,
+                    user_id,
                 )
+                if not row:
+                    logger.warning("run_photo_moderation: Photo %s not found in DB", photo_id)
+                    return ModerationResult(is_safe=None, reason="Photo not found", confidence=0.0)
 
-        # Download image bytes from public CDN / storage
-        img_client = http_client
-        close_img_client = False
-        if img_client is None:
-            img_client = httpx.AsyncClient(timeout=10.0)
-            close_img_client = True
-
-        try:
-            resp = await img_client.get(cdn_url)
-            if resp.status_code != 200:
-                logger.error("Failed to download avatar image from %s: HTTP %s", cdn_url, resp.status_code)
-                return ModerationResult(is_safe=None, reason="Image download failed", confidence=0.0)
-            image_bytes = resp.content
-        finally:
-            if close_img_client:
-                await img_client.aclose()
-
-        # Run moderation
-        result = await moderator.moderate_image_bytes(
-            image_bytes=image_bytes,
-            mime_type="image/webp",
-            http_client=http_client,
-        )
-
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                if result.is_safe is True:
-                    # Auto-approve and publish to users table
-                    await conn.execute(
-                        """
-                        UPDATE user_photos
-                           SET status = 'approved', cdn_url = $1, updated_at = NOW()
-                         WHERE id = $2 AND user_id = $3
-                        """,
-                        cdn_url,
-                        photo_id,
-                        user_id,
+                # Idempotency guard: already resolved
+                if row["status"] in ("approved", "rejected"):
+                    logger.info("Photo %s already resolved with status %s", photo_id, row["status"])
+                    return ModerationResult(
+                        is_safe=(row["status"] == "approved"),
+                        reason=f"Already {row['status']}",
+                        confidence=1.0,
                     )
-                    # TOCTOU guard: Only update users.avatar_url if this photo is STILL the user's active avatar
-                    await conn.execute(
-                        """
-                        UPDATE users
-                           SET avatar_url = $1, updated_at = NOW()
-                         WHERE id = $2
-                           AND EXISTS (
-                               SELECT 1 FROM user_photos
-                                WHERE id = $3 AND user_id = $2 AND position = 1
-                           )
-                        """,
-                        cdn_url,
-                        user_id,
-                        photo_id,
-                    )
-                    logger.info("Photo %s auto-approved for user %s", photo_id, user_id)
 
-                elif result.is_safe is False:
-                    # Reject and ensure avatar_url is not published
-                    await conn.execute(
-                        """
-                        UPDATE user_photos
-                           SET status = 'rejected', rejection_reason = $1, updated_at = NOW()
-                         WHERE id = $2 AND user_id = $3
-                        """,
-                        result.reason,
-                        photo_id,
-                        user_id,
-                    )
-                    await conn.execute(
-                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1 AND avatar_url = $2",
-                        user_id,
-                        cdn_url,
-                    )
-                    # Quota optimization: purge rejected image from Supabase Storage to protect 1GB free tier
-                    from app.services.media_processor import delete_user_avatar
-                    await delete_user_avatar(user_id)
-                    logger.warning("Photo %s rejected for user %s: %s (purged from storage)", photo_id, user_id, result.reason)
+            # Download image bytes from public CDN / storage
+            img_client = http_client
+            close_img_client = False
+            if img_client is None:
+                img_client = httpx.AsyncClient(timeout=10.0)
+                close_img_client = True
 
-                else:
-                    # Undetermined / Quota exhausted -> stays 'pending' for admin review
-                    logger.info("Photo %s marked pending for manual admin review: %s", photo_id, result.reason)
+            image_bytes = None
+            try:
+                resp = await img_client.get(cdn_url)
+                if resp.status_code == 200:
+                    image_bytes = resp.content
+            except Exception as exc:
+                logger.warning("Avatar HTTP GET failed for %s: %s", cdn_url, exc)
+            finally:
+                if close_img_client:
+                    await img_client.aclose()
 
-        return result
+            # Fallback to authenticated Supabase storage download if public GET failed
+            if not image_bytes:
+                try:
+                    from app.services.media_processor import _get_supabase, avatar_storage_path
+                    supabase = _get_supabase()
+                    path = avatar_storage_path(user_id)
+                    image_bytes = await asyncio.to_thread(
+                        supabase.storage.from_(settings.supabase_storage_bucket).download,
+                        path,
+                    )
+                except Exception as exc:
+                    logger.error("Authenticated Supabase download failed for %s: %s", user_id, exc)
+                    return ModerationResult(is_safe=None, reason="Image download failed", confidence=0.0)
+
+            # Run moderation
+            result = await moderator.moderate_image_bytes(
+                image_bytes=image_bytes,
+                mime_type="image/webp",
+                http_client=http_client,
+            )
+
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    if result.is_safe is True:
+                        # Auto-approve and publish to users table
+                        await conn.execute(
+                            """
+                            UPDATE user_photos
+                               SET status = 'approved', cdn_url = $1, updated_at = NOW()
+                             WHERE id = $2 AND user_id = $3
+                            """,
+                            cdn_url,
+                            photo_id,
+                            user_id,
+                        )
+                        # TOCTOU guard: Only update users.avatar_url if this photo is STILL the user's active avatar
+                        await conn.execute(
+                            """
+                            UPDATE users
+                               SET avatar_url = $1, updated_at = NOW()
+                             WHERE id = $2
+                               AND EXISTS (
+                                   SELECT 1 FROM user_photos
+                                    WHERE id = $3 AND user_id = $2 AND position = 1
+                               )
+                            """,
+                            cdn_url,
+                            user_id,
+                            photo_id,
+                        )
+                        logger.info("Photo %s auto-approved for user %s", photo_id, user_id)
+
+                    elif result.is_safe is False:
+                        # Reject photo record
+                        await conn.execute(
+                            """
+                            UPDATE user_photos
+                               SET status = 'rejected', rejection_reason = $1, updated_at = NOW()
+                             WHERE id = $2 AND user_id = $3
+                            """,
+                            result.reason,
+                            photo_id,
+                            user_id,
+                        )
+                        # TOCTOU guard: Only clear users.avatar_url and storage if this photo is STILL the user's active avatar
+                        is_active = await conn.fetchval(
+                            "SELECT EXISTS (SELECT 1 FROM user_photos WHERE id = $1 AND user_id = $2 AND position = 1)",
+                            photo_id,
+                            user_id,
+                        )
+                        if is_active:
+                            await conn.execute(
+                                "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+                                user_id,
+                            )
+                            # Quota optimization: purge rejected image from Supabase Storage to protect 1GB free tier
+                            from app.services.media_processor import delete_user_avatar
+                            await delete_user_avatar(user_id)
+                            logger.warning("Photo %s rejected for user %s: %s (purged from storage)", photo_id, user_id, result.reason)
+                        else:
+                            logger.warning("Photo %s rejected for user %s: %s (skipped storage purge, superseded by newer photo)", photo_id, user_id, result.reason)
+
+                    else:
+                        # Undetermined / Quota exhausted -> stays 'pending' for admin review
+                        logger.info("Photo %s marked pending for manual admin review: %s", photo_id, result.reason)
+
+            # Invalidate Redis profile and feed cache if redis is available
+            try:
+                from app.core.redis import get_redis
+                r = get_redis()
+                if r:
+                    await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+            except Exception:
+                pass
+
+            return result
+    finally:
+        async with _photo_locks_guard:
+            _photo_locks.pop(photo_id_str, None)
