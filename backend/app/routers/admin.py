@@ -541,6 +541,7 @@ async def list_pending_media(
                 FROM user_media m
                 JOIN users u ON u.id = m.user_id
                 WHERE m.status IN ('flagged', 'pending')
+                  AND m.media_type = 'photo'
                   AND NOT EXISTS (SELECT 1 FROM user_photos up WHERE up.id = m.id)
             )
             SELECT * FROM combined
