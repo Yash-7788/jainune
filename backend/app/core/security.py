@@ -1,8 +1,12 @@
+import asyncio
 import hashlib
 import ipaddress
 import hmac
+import logging
 import secrets
 import uuid
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -176,22 +180,59 @@ def get_ist_today_str() -> str:
 
 # ── Rate Limiting ────────────────────────────────────────────────────────────
 
+_in_memory_rate_limits: dict[str, list[float]] = {}
+_in_memory_rate_lock = asyncio.Lock()
+
+
+async def _check_in_memory_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
+    """In-memory sliding window rate limiter fallback. Returns True if allowed, False if exceeded."""
+    import time
+    now = time.monotonic()
+    async with _in_memory_rate_lock:
+        stamps = [t for t in _in_memory_rate_limits.get(key, []) if now - t < window_seconds]
+        if len(stamps) >= limit:
+            _in_memory_rate_limits[key] = stamps
+            return False
+        stamps.append(now)
+        _in_memory_rate_limits[key] = stamps
+        return True
+
+
 async def sliding_window_rate_limit(
     key: str,
     limit: int,
     window_seconds: int,
     redis: aioredis.Redis,
 ) -> None:
-    """Sliding-window rate limiter using Redis sorted set with atomic pipeline and fail-closed behavior."""
+    """
+    Sliding-window rate limiter.
+    1. Handles high-frequency swipe interactions in-process (0 Redis commands, saving 100% of Upstash quota).
+    2. Uses Redis sorted sets for distributed endpoints (OTP / Auth / Admin).
+    3. Gracefully falls back to in-memory limiter if Redis is unavailable or quota is exceeded (prevents 503 crash).
+    """
     from fastapi.params import Depends
     if isinstance(redis, Depends):
         return
 
+    # High-frequency swipe interactions: evaluate in-process to protect Upstash 10k daily command quota
+    if key.startswith("ratelimit:interaction:"):
+        allowed = await _check_in_memory_rate_limit(key, limit, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded.",
+            )
+        return
+
+    # If Redis client is missing or unconfigured, fall back to in-memory
     if redis is None or not hasattr(redis, "pipeline"):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Rate limiting service unavailable.",
-        )
+        allowed = await _check_in_memory_rate_limit(key, limit, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded.",
+            )
+        return
 
     import time
     import secrets
@@ -217,11 +258,16 @@ async def sliding_window_rate_limit(
         count = results[2] if isinstance(results, (list, tuple)) and len(results) > 2 else 1
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Rate limiting service unavailable.",
-        )
+    except Exception as exc:
+        # Fall back gracefully to in-memory rate limiter on Redis failure or Upstash quota exhaustion
+        logger.warning("Redis rate limit unavailable for %s (%s). Falling back to in-memory limiter.", key, exc)
+        allowed = await _check_in_memory_rate_limit(key, limit, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded.",
+            )
+        return
 
     if count > limit:
         try:

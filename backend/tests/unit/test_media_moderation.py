@@ -153,10 +153,10 @@ class TestPhotoModerationPipeline(unittest.IsolatedAsyncioTestCase):
             return None
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query and "SET status = 'approved'" in query:
+            if "UPDATE user_photos" in query and "status = 'approved'" in query:
                 db_state["photo_status"] = "approved"
                 db_state["photo_cdn"] = args[0]
-            elif "UPDATE users SET avatar_url" in query:
+            elif "UPDATE users" in query and "avatar_url" in query:
                 db_state["user_avatar"] = args[0]
 
         conn.fetchrow = AsyncMock(side_effect=mock_fetchrow)
@@ -375,12 +375,82 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
         pool.acquire.return_value.__aenter__.return_value = conn
         pool.acquire.return_value.__aexit__ = AsyncMock()
 
-        with patch("app.routers.admin.recompute_trust_score", AsyncMock()):
+        with patch("app.routers.admin.recompute_trust_score", AsyncMock()), \
+             patch("app.services.media_processor.delete_user_avatar", AsyncMock()) as mock_delete:
             resp = await reject_media(media_id=photo_id, body=body, admin=admin, pool=pool)
+            mock_delete.assert_called_once_with(user_id)
 
         self.assertTrue(resp["rejected"])
         self.assertEqual(db_state["status"], "rejected")
         self.assertIsNone(db_state["avatar_url"])
+
+
+class TestRateLimiterUpstashResilienceAndTOCTOU(unittest.IsolatedAsyncioTestCase):
+    async def test_in_memory_rate_limiter_swipe_actions_zero_redis_calls(self):
+        from app.core.security import sliding_window_rate_limit
+        from fastapi import HTTPException
+
+        mock_redis = MagicMock()
+        user_id = str(uuid.uuid4())
+        key = f"ratelimit:interaction:{user_id}"
+
+        # 2 calls allowed with limit=2
+        await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+        await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+
+        # Zero Redis pipeline calls made!
+        mock_redis.pipeline.assert_not_called()
+
+        # 3rd call exceeds limit in memory -> 429
+        with self.assertRaises(HTTPException) as ctx:
+            await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    async def test_rate_limiter_falls_back_to_in_memory_on_redis_exception(self):
+        from app.core.security import sliding_window_rate_limit
+        from fastapi import HTTPException
+
+        # Simulate Upstash 10k quota exhaustion
+        mock_redis = MagicMock()
+        mock_redis.pipeline.side_effect = Exception("ERR max daily request limit exceeded")
+
+        key = f"ratelimit:auth:otp:{uuid.uuid4()}"
+
+        # Should NOT raise 503; gracefully falls back to in-memory limiter!
+        await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+        await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+
+        # 3rd call triggers 429 via in-memory fallback
+        with self.assertRaises(HTTPException) as ctx:
+            await sliding_window_rate_limit(key, limit=2, window_seconds=10, redis=mock_redis)
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    async def test_photo_moderation_purges_storage_on_rejection(self):
+        photo_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        conn = MagicMock()
+        conn.fetchrow = AsyncMock(return_value={"id": photo_id, "user_id": user_id, "status": "pending", "cdn_url": "https://cdn.example.com/avatar.webp"})
+        conn.execute = AsyncMock()
+        conn.transaction = MagicMock()
+        conn.transaction.return_value.__aenter__ = AsyncMock()
+        conn.transaction.return_value.__aexit__ = AsyncMock()
+
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__.return_value = conn
+        pool.acquire.return_value.__aexit__ = AsyncMock()
+
+        moderator = MagicMock()
+        moderator.moderate_image_bytes = AsyncMock(
+            return_value=ModerationResult(is_safe=False, reason="nudity", confidence=0.99)
+        )
+
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, content=b"bytes"))
+        async with httpx.AsyncClient(transport=transport) as http:
+            with patch("app.services.media_processor.delete_user_avatar", AsyncMock()) as mock_delete:
+                res = await run_photo_moderation(photo_id, user_id, pool=pool, moderator=moderator, http_client=http)
+                mock_delete.assert_called_once_with(user_id)
+        self.assertFalse(res.is_safe)
 
 
 if __name__ == "__main__":

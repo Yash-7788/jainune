@@ -324,10 +324,20 @@ async def run_photo_moderation(
                         photo_id,
                         user_id,
                     )
+                    # TOCTOU guard: Only update users.avatar_url if this photo is STILL the user's active avatar
                     await conn.execute(
-                        "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                        """
+                        UPDATE users
+                           SET avatar_url = $1, updated_at = NOW()
+                         WHERE id = $2
+                           AND EXISTS (
+                               SELECT 1 FROM user_photos
+                                WHERE id = $3 AND user_id = $2 AND position = 1
+                           )
+                        """,
                         cdn_url,
                         user_id,
+                        photo_id,
                     )
                     logger.info("Photo %s auto-approved for user %s", photo_id, user_id)
 
@@ -348,7 +358,10 @@ async def run_photo_moderation(
                         user_id,
                         cdn_url,
                     )
-                    logger.warning("Photo %s rejected for user %s: %s", photo_id, user_id, result.reason)
+                    # Quota optimization: purge rejected image from Supabase Storage to protect 1GB free tier
+                    from app.services.media_processor import delete_user_avatar
+                    await delete_user_avatar(user_id)
+                    logger.warning("Photo %s rejected for user %s: %s (purged from storage)", photo_id, user_id, result.reason)
 
                 else:
                     # Undetermined / Quota exhausted -> stays 'pending' for admin review

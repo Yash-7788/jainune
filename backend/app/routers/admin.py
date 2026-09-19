@@ -680,6 +680,10 @@ async def reject_media(
                     )
                 await recompute_trust_score(user_id, conn)
 
+            # Purge rejected avatar from Supabase Storage to protect 1GB free tier
+            from app.services.media_processor import delete_user_avatar
+            await delete_user_avatar(user_id)
+
             return {"rejected": True, "media_id": media_id, "reason": body.reason}
 
         row = await conn.fetchrow(

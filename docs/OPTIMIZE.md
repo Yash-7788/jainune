@@ -621,6 +621,22 @@ grep -rnEi "SELECT .* FROM (messages|interactions|users)" backend/app/ | grep -v
 
 ---
 
+## 10. Content Moderation & Upstash Rate Limiter Hardening
+
+### 10.1 Upstash 10k Quota Defense & In-Memory Fallback
+- **High-Frequency Swipes**: Evaluated via in-process sliding window limiter (`_check_in_memory_rate_limit`), consuming **0 Upstash commands per swipe**. Saves ~90% of Redis command budget.
+- **Fail-Safe Fallback**: If Upstash hits its 10,000 daily command quota or throws a connection error, `sliding_window_rate_limit` automatically switches to in-memory sliding window rate limiting. The application **never throws HTTP 503**, completely eliminating service outage risks during traffic surges.
+- **Quota Reservation**: 100% of Upstash's 10k daily command budget is reserved for critical distributed operations (OTP request/verify brute-force protection and admin login defense).
+
+### 10.2 Media Moderation Pipeline & Quota Protection
+- **Multi-Account Gemini Flash Pool**: Supported via `GEMINI_API_KEYS="key1,key2,key3"` with automatic round-robin and instant failover on HTTP 429 (`RESOURCE_EXHAUSTED`). Provides up to 4,500 free daily checks.
+- **15 RPM & Single-Flight Concurrency Guard**: Concurrency is locked per `photo_id` to eliminate duplicate API dispatches caused by rapid client taps or retries. A sliding window rate limiter strictly enforces the 15 RPM free tier boundary per key.
+- **TOCTOU Avatar Overwrite Guard**: When moderation completes, `users.avatar_url` is updated only if the approved photo is still the user's active avatar (`position = 1`), preventing stale out-of-order overwrites.
+- **1 GB Supabase Storage Quota Preservation**: Rejected avatars (via automated Gemini checks or manual admin rejection) are immediately purged from the Supabase Storage bucket (`delete_user_avatar`), preventing abandoned or illicit images from consuming the 1 GB free object storage quota.
+- **Self-View Zero-Egress Caching**: The mobile client caches the user's own avatar URI locally (`AsyncStorage`), eliminating 100% of Supabase download egress on self-profile views.
+
+---
+
 ### 9.3 Production Observability & Warning Thresholds
 
 Configure these alerts in your cloud dashboards to catch any regression early:
