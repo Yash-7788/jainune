@@ -175,7 +175,7 @@ class TestProfileAndMediaManagement(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(resp.media_id)
         self.assertIn("token=xyz", resp.signed_url)
 
-        insert_calls = [call for call in conn.execute.call_args_list if "INSERT INTO user_photos" in call[0][0]]
+        insert_calls = [call for call in conn.execute.call_args_list if "INSERT INTO user_media" in call[0][0]]
         self.assertTrue(len(insert_calls) > 0)
 
 

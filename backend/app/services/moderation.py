@@ -273,7 +273,7 @@ async def run_photo_moderation(
     2. Checks DB to avoid re-checking already approved/rejected photo.
     3. Fetches image bytes.
     4. Moderates via Gemini client with multi-key failover.
-    5. Updates user_photos status and synchronizes users.avatar_url if safe.
+    5. Updates user_media status and synchronizes users.avatar_url if safe.
     6. Cleans up in-memory lock on completion to prevent memory leaks.
     """
     from app.core.database import get_pool
@@ -297,7 +297,7 @@ async def run_photo_moderation(
 
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT id, user_id, status, cdn_url FROM user_photos WHERE id = $1 AND user_id = $2",
+                    "SELECT id, user_id, status, cdn_url FROM user_media WHERE id = $1 AND user_id = $2",
                     photo_id,
                     user_id,
                 )
@@ -359,8 +359,8 @@ async def run_photo_moderation(
                         # Auto-approve and publish to users table
                         await conn.execute(
                             """
-                            UPDATE user_photos
-                               SET status = 'approved', cdn_url = $1, updated_at = NOW()
+                            UPDATE user_media
+                               SET status = 'approved', cdn_url = $1, is_processed = TRUE
                              WHERE id = $2 AND user_id = $3
                             """,
                             cdn_url,
@@ -374,8 +374,8 @@ async def run_photo_moderation(
                                SET avatar_url = $1, updated_at = NOW()
                              WHERE id = $2
                                AND EXISTS (
-                                   SELECT 1 FROM user_photos
-                                    WHERE id = $3 AND user_id = $2 AND position = 1
+                                   SELECT 1 FROM user_media
+                                    WHERE id = $3 AND user_id = $2 AND position = 1 AND media_type = 'photo'
                                )
                             """,
                             cdn_url,
@@ -388,8 +388,8 @@ async def run_photo_moderation(
                         # Reject photo record
                         await conn.execute(
                             """
-                            UPDATE user_photos
-                               SET status = 'rejected', rejection_reason = $1, updated_at = NOW()
+                            UPDATE user_media
+                               SET status = 'rejected', rejection_reason = $1, is_processed = TRUE
                              WHERE id = $2 AND user_id = $3
                             """,
                             result.reason,
@@ -398,7 +398,7 @@ async def run_photo_moderation(
                         )
                         # TOCTOU guard: Only clear users.avatar_url and storage if this photo is STILL the user's active avatar
                         is_active = await conn.fetchval(
-                            "SELECT EXISTS (SELECT 1 FROM user_photos WHERE id = $1 AND user_id = $2 AND position = 1)",
+                            "SELECT EXISTS (SELECT 1 FROM user_media WHERE id = $1 AND user_id = $2 AND position = 1 AND media_type = 'photo')",
                             photo_id,
                             user_id,
                         )

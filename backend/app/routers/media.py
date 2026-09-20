@@ -98,10 +98,10 @@ async def request_upload(
     async with db.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO user_photos (id, user_id, media_type, status, s3_key, position)
+            INSERT INTO user_media (id, user_id, media_type, status, s3_key, position)
             VALUES ($1, $2, 'photo', 'pending', $3, 1)
-            ON CONFLICT (user_id, position) DO UPDATE
-                SET id = $1, status = 'pending', s3_key = $3, cdn_url = NULL, updated_at = NOW()
+            ON CONFLICT (user_id, media_type, position) DO UPDATE
+                SET id = $1, status = 'pending', s3_key = $3, cdn_url = NULL, is_processed = FALSE
             """,
             media_id,
             uuid.UUID(str(user_id)),
@@ -155,8 +155,8 @@ async def confirm_upload(
     async with db.acquire() as conn:
         res = await conn.execute(
             """
-            UPDATE user_photos
-               SET status = 'pending', cdn_url = $1, updated_at = NOW()
+            UPDATE user_media
+               SET status = 'pending', cdn_url = $1, is_processed = TRUE
              WHERE id = $2 AND user_id = $3
             """,
             cdn_url,
@@ -204,7 +204,7 @@ async def get_media_status(
 ):
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, status, cdn_url FROM user_photos WHERE id = $1 AND user_id = $2",
+            "SELECT id, status, cdn_url FROM user_media WHERE id = $1 AND user_id = $2",
             media_id,
             uuid.UUID(str(current_user["user_id"])),
         )
@@ -235,27 +235,16 @@ async def delete_media(
     user_id = current_user["user_id"]
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, s3_key FROM user_photos WHERE id = $1 AND user_id = $2",
+            "SELECT id, s3_key FROM user_media WHERE id = $1 AND user_id = $2",
             media_id,
             uuid.UUID(str(user_id)),
         )
-        if not row:
-            row = await conn.fetchrow(
-                "SELECT id, s3_key FROM user_media WHERE id = $1 AND user_id = $2",
-                media_id,
-                uuid.UUID(str(user_id)),
-            )
         if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
         from app.services.media_processor import delete_user_avatar
         await delete_user_avatar(user_id)
 
-        await conn.execute(
-            "DELETE FROM user_photos WHERE id = $1 AND user_id = $2",
-            media_id,
-            uuid.UUID(str(user_id)),
-        )
         await conn.execute(
             "DELETE FROM user_media WHERE id = $1 AND user_id = $2",
             media_id,
@@ -291,13 +280,7 @@ async def reorder_media(
     async with db.acquire() as conn:
         for item in body.positions:
             await conn.execute(
-                "UPDATE user_photos SET position = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3",
-                item.position,
-                item.media_id,
-                uuid.UUID(str(user_id)),
-            )
-            await conn.execute(
-                "UPDATE user_media SET position = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3 AND media_type = 'photo'",
+                "UPDATE user_media SET position = $1 WHERE id = $2 AND user_id = $3 AND media_type = 'photo'",
                 item.position,
                 item.media_id,
                 uuid.UUID(str(user_id)),

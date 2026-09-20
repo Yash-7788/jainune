@@ -5,7 +5,7 @@ Policy: ONE avatar per user. Path always: {user_id}/avatar.webp
 Pipeline:
   1. Generate signed upload URL (300s expiry) → client uploads directly
   2. After client confirms: verify object exists via HEAD request
-  3. CDN URL stored in user_photos.cdn_url; s3_key repurposed for storage path
+  3. CDN URL stored in user_media.cdn_url; s3_key repurposed for storage path
 
 Voice notes: DEPRECATED per product scope.
 boto3/AWS: REMOVED. Uses supabase-py + httpx.

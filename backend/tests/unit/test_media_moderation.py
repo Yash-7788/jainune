@@ -199,7 +199,7 @@ class TestPhotoModerationPipeline(unittest.IsolatedAsyncioTestCase):
             return None
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query and "status = 'approved'" in query:
+            if "UPDATE user_media" in query and "status = 'approved'" in query:
                 db_state["photo_status"] = "approved"
                 db_state["photo_cdn"] = args[0]
             elif "UPDATE users" in query and "avatar_url" in query:
@@ -255,7 +255,7 @@ class TestPhotoModerationPipeline(unittest.IsolatedAsyncioTestCase):
             }
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query and "status = 'rejected'" in query:
+            if "UPDATE user_media" in query and "status = 'rejected'" in query:
                 db_state["photo_status"] = "rejected"
             elif "UPDATE users SET avatar_url = NULL" in query:
                 db_state["user_avatar"] = None
@@ -307,7 +307,7 @@ class TestPhotoModerationPipeline(unittest.IsolatedAsyncioTestCase):
             }
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query:
+            if "UPDATE user_media" in query:
                 db_state["status"] = "approved"
 
         conn.fetchrow = AsyncMock(side_effect=mock_fetchrow)
@@ -355,18 +355,19 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
 
         conn = MagicMock()
         async def mock_fetchrow(query, *args):
-            if "FROM user_photos" in query:
+            if "FROM user_media" in query:
                 return {
                     "id": photo_id,
                     "user_id": user_id,
                     "cdn_url": "https://cdn.example.com/avatar.webp",
                     "s3_key": f"{user_id}/avatar.webp",
+                    "media_type": "photo",
                     "position": 1,
                 }
             return None
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query and "status = 'approved'" in query:
+            if "UPDATE user_media" in query and "status = 'approved'" in query:
                 db_state["status"] = "approved"
             elif "UPDATE users" in query and "avatar_url" in query:
                 db_state["avatar_url"] = args[0]
@@ -404,17 +405,18 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
 
         conn = MagicMock()
         async def mock_fetchrow(query, *args):
-            if "FROM user_photos" in query:
+            if "FROM user_media" in query:
                 return {
                     "id": photo_id,
                     "user_id": user_id,
                     "cdn_url": "https://cdn.example.com/avatar.webp",
+                    "media_type": "photo",
                     "position": 1,
                 }
             return None
 
         async def mock_execute(query, *args):
-            if "UPDATE user_photos" in query and "status = 'rejected'" in query:
+            if "UPDATE user_media" in query and "status = 'rejected'" in query:
                 db_state["status"] = "rejected"
             elif "UPDATE users" in query and "avatar_url = NULL" in query:
                 db_state["avatar_url"] = None
@@ -450,8 +452,6 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
 
         conn = MagicMock()
         async def mock_fetchrow(query, *args):
-            if "FROM user_photos" in query:
-                return None
             if "FROM user_media" in query:
                 return {
                     "id": media_id,

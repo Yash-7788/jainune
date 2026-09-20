@@ -525,27 +525,15 @@ async def list_pending_media(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            WITH combined AS (
-                SELECT
-                    p.id, p.user_id, p.media_type, p.cdn_url,
-                    p.status, p.rejection_reason, p.created_at,
-                    u.first_name, u.phone_number
-                FROM user_photos p
-                JOIN users u ON u.id = p.user_id
-                WHERE p.status IN ('flagged', 'pending')
-                UNION ALL
-                SELECT
-                    m.id, m.user_id, m.media_type, m.cdn_url,
-                    m.status, m.rejection_reason, m.created_at,
-                    u.first_name, u.phone_number
-                FROM user_media m
-                JOIN users u ON u.id = m.user_id
-                WHERE m.status IN ('flagged', 'pending')
-                  AND m.media_type = 'photo'
-                  AND NOT EXISTS (SELECT 1 FROM user_photos up WHERE up.id = m.id)
-            )
-            SELECT * FROM combined
-            ORDER BY created_at ASC
+            SELECT
+                m.id, m.user_id, m.media_type, m.cdn_url,
+                m.status, m.rejection_reason, m.created_at,
+                u.first_name, u.phone_number
+            FROM user_media m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.status IN ('flagged', 'pending')
+              AND m.media_type = 'photo'
+            ORDER BY m.created_at ASC
             LIMIT $1 OFFSET $2
             """,
             limit,
@@ -578,59 +566,6 @@ async def approve_media(
     from app.services.media_processor import avatar_public_url
 
     async with pool.acquire() as conn:
-        photo = await conn.fetchrow(
-            "SELECT id, user_id, cdn_url, s3_key, position FROM user_photos WHERE id = $1",
-            media_id,
-        )
-        if photo:
-            user_id = photo["user_id"]
-            cdn_url = photo["cdn_url"] or avatar_public_url(user_id)
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    UPDATE user_photos
-                       SET status = 'approved',
-                           cdn_url = $1,
-                           reviewed_by = $2,
-                           reviewed_at = NOW(),
-                           updated_at = NOW()
-                     WHERE id = $3
-                    """,
-                    cdn_url,
-                    admin["user_id"],
-                    media_id,
-                )
-                # TOCTOU guard: Only update users.avatar_url if this photo is STILL position = 1
-                await conn.execute(
-                    """
-                    UPDATE users
-                       SET avatar_url = $1, updated_at = NOW()
-                     WHERE id = $2
-                       AND EXISTS (
-                           SELECT 1 FROM user_photos
-                            WHERE id = $3 AND user_id = $2 AND position = 1
-                       )
-                    """,
-                    cdn_url,
-                    user_id,
-                    media_id,
-                )
-                await recompute_trust_score(user_id, conn)
-
-            # Invalidate caches
-            try:
-                r = get_redis()
-                if r:
-                    await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
-            except Exception:
-                pass
-
-            return {
-                "media_id": str(media_id),
-                "status": "approved",
-                "cdn_url": cdn_url,
-            }
-
         row = await conn.fetchrow(
             "SELECT id, user_id, s3_key, cdn_url, media_type, position FROM user_media WHERE id = $1",
             media_id,
@@ -687,55 +622,6 @@ async def reject_media(
 ):
     """Reject a media item with reason. Recomputes trust score and purges storage."""
     async with pool.acquire() as conn:
-        photo = await conn.fetchrow(
-            "SELECT id, user_id, cdn_url, position FROM user_photos WHERE id = $1",
-            media_id,
-        )
-        if photo:
-            user_id = photo["user_id"]
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    UPDATE user_photos
-                       SET status = 'rejected',
-                           rejection_reason = $1,
-                           reviewed_by = $2,
-                           reviewed_at = NOW(),
-                           updated_at = NOW()
-                     WHERE id = $3
-                    """,
-                    body.reason,
-                    admin["user_id"],
-                    media_id,
-                )
-                # TOCTOU guard: Only clear avatar_url if this photo is STILL position 1
-                is_active = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM user_photos WHERE id = $1 AND user_id = $2 AND position = 1)",
-                    media_id,
-                    user_id,
-                )
-                if is_active:
-                    await conn.execute(
-                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
-                        user_id,
-                    )
-                await recompute_trust_score(user_id, conn)
-
-            # Purge rejected avatar from Supabase Storage ONLY if it was the active avatar
-            if is_active:
-                from app.services.media_processor import delete_user_avatar
-                await delete_user_avatar(user_id)
-
-            # Invalidate caches
-            try:
-                r = get_redis()
-                if r:
-                    await r.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
-            except Exception:
-                pass
-
-            return {"rejected": True, "media_id": media_id, "reason": body.reason}
-
         row = await conn.fetchrow(
             "SELECT id, user_id, s3_key, media_type, position FROM user_media WHERE id = $1",
             media_id,
@@ -748,10 +634,10 @@ async def reject_media(
             await conn.execute(
                 """
                 UPDATE user_media
-                   SET status           = 'rejected',
+                   SET status = 'rejected',
                        rejection_reason = $1,
-                       reviewed_by      = $2,
-                       reviewed_at      = NOW()
+                       reviewed_by = $2,
+                       reviewed_at = NOW()
                  WHERE id = $3
                 """,
                 body.reason,
@@ -766,8 +652,14 @@ async def reject_media(
                 )
             await recompute_trust_score(user_id, conn)
 
-        # Quota optimization: purge rejected user_media file from Supabase Storage
-        if row.get("s3_key"):
+        # Quota optimization: purge rejected media from Supabase Storage
+        if row["media_type"] == "photo" and row.get("position", 1) == 1:
+            try:
+                from app.services.media_processor import delete_user_avatar
+                await delete_user_avatar(user_id)
+            except Exception as exc:
+                logger.warning("Failed to purge rejected avatar for user %s: %s", user_id, exc)
+        elif row.get("s3_key"):
             try:
                 from app.services.media_processor import _get_supabase
                 import asyncio

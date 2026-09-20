@@ -195,7 +195,7 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         mock_conn = AsyncMock()
 
         async def track_execute(query, *args):
-            if "INSERT INTO user_photos" in query:
+            if "INSERT INTO user_media" in query:
                 executed_inserts.append(args)
             return "INSERT 1"
 
@@ -260,7 +260,7 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
 
         res = await request_upload(body, current_user, mock_db, mock_redis)
         self.assertIsNotNone(res.media_id)
-        self.assertTrue(any("ON CONFLICT (user_id, position) DO UPDATE" in q for q in executed_queries))
+        self.assertTrue(any("ON CONFLICT (user_id, media_type, position) DO UPDATE" in q for q in executed_queries))
 
     # -----------------------------------------------------------------------
     # FINDING-03: Proactive session replacement notification
