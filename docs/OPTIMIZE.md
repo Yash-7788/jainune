@@ -35,8 +35,9 @@ This specification defines the complete end-to-end architecture required to oper
 │                         │ (strictly ephemeral)    │ Swipes use in-memory (0 cmd)│
 │                         │                         │ & fail-safe memory fallback │
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
-│ Google Gemini API       │ 15 RPM / 1,500 RPD free │ 3-key pool = 45 RPM / 4,500 │
-│ (Flash Vision)          │ tier per key (0 cost)   │ RPD; 1 req per photo locked │
+│ Cloudflare Workers AI   │ 10,000 Neurons / day    │ Capped at 9,500 N/day;      │
+│ (Llama 3.2 11B Vision)  │ free tier (zero-cost)   │ routes to manual review;    │
+│                         │                         │ 15 RPM safe pacing queue    │
 ├─────────────────────────┼─────────────────────────┼─────────────────────────────┤
 │ Celery Worker / Beat    │ ELIMINATED (0 compute)  │ 0 unbacked jobs; replaced   │
 │                         │                         │ by native asyncio + pg_cron │
@@ -677,38 +678,39 @@ grep -rnEi "SELECT .* FROM (messages|interactions|users)" backend/app/ | grep -v
 - **Fail-Safe Fallback**: If Upstash hits its 10,000 daily command quota or encounters network timeouts, `sliding_window_rate_limit` automatically switches to in-memory sliding window rate limiting. The application **never throws HTTP 503**, completely eliminating service outage risks during traffic surges.
 - **Quota Reservation**: 100% of Upstash's 10k daily command budget is reserved for critical distributed security barriers (OTP request/verify brute-force protection and admin login defense).
 
-### 10.2 Media Moderation Pipeline & Gemini Quota Protection
-- **Multi-Account Gemini Flash Pool**: Supported via `GEMINI_API_KEYS="key1,key2,key3"` with automatic round-robin and instant failover on HTTP 429 (`RESOURCE_EXHAUSTED`). Provides up to 4,500 free daily checks.
+### 10.2 Media Moderation Pipeline & Cloudflare Workers AI Gate
+- **Cloudflare Workers AI Llama 3.2 Vision**: Hosted on Cloudflare's serverless edge infrastructure (`@cf/meta/llama-3.2-11b-vision-instruct`). Uses single Cloudflare API token with permanent zero credit card requirement.
 - **Strict Single-Flight Concurrency (1 Request = 1 Request Only)**:
   - An in-memory lock dictionary (`_photo_locks: dict[str, asyncio.Lock]`) isolates execution per `photo_id`.
-  - Even if a user spam-taps "Confirm" 10 times or multiple background workers attempt evaluation, **exactly one Gemini Vision API request is dispatched**.
+  - Even if a user spam-taps "Confirm" 10 times or multiple background workers attempt evaluation, **exactly one Cloudflare Vision API request is dispatched**.
   - All concurrent callers await the single in-flight evaluation result.
   - Locks are proactively purged on completion (`_photo_locks.pop()`), ensuring zero heap accumulation or memory leaks on Render.
-- **15 RPM Rate Boundary & Thread Cooldowns**:
-  - Gemini free tier permits 15 requests per minute per key.
-  - The client maintains per-key cooldown timers (`_key_cooldowns`) enforcing a minimum 2.0-second delay between calls per key, completely eliminating burst-induced 429 errors.
-  - Synchronous Supabase Storage SDK downloads are offloaded to `asyncio.to_thread`, keeping Render's single ASGI event loop completely unblocked.
-- **Alternative & Future Models**:
-  - Primary: `gemini-1.5-flash` (15 RPM / 1,500 RPD free tier, multimodal vision, ~800ms latency).
-  - High-Throughput Alternative: `gemini-1.5-flash-8b` (identical free-tier limits, lower token latency).
-  - Modern Alternative: `gemini-2.0-flash` (same 15 RPM free tier, enhanced multi-modal reasoning; configurable via `GEMINI_MODEL="gemini-2.0-flash"` in `.env`).
-  - (Note: "Gemini 3.5" is not an official Google release yet; any upcoming Flash vision model adhering to Google's 15 RPM free tier can be dropped in seamlessly).
+- **15 RPM Rate Boundary & Safe Queue Pacing**:
+  - Cloudflare Workers AI platform enforces a 20 RPM ceiling.
+  - The client paces requests via `asyncio.Semaphore(1)` with a 4.0-second inter-request delay (15 RPM), providing a 25% safety buffer that completely eliminates HTTP 429 Too Many Requests.
+- **In-Memory Perceptual dHash Deduplication**:
+  - `_banned_hashes_cache: set[str]` pre-checks photos against previously banned dHash fingerprints in 0ms.
+  - Re-uploads of rejected content are rejected instantly with **0 API calls, 0 Neurons, and 0 DB queries**.
+- **Prompt Prefix Caching**:
+  - Permanent prefix caching enabled via `x-session-affinity: dating-moderation-pool`, reducing prompt token costs to zero.
+- **Hybrid Single-Token Output**:
+  - Model outputs single word (`PASS` if safe; reject category e.g. `nudity` if unsafe) to minimize token latency and Neuron usage (~1.221 Neurons/photo).
 - **TOCTOU Avatar Overwrite Guard**: When moderation completes, `users.avatar_url` is updated only if the approved photo is still the user's active avatar (`position = 1`), preventing stale out-of-order overwrites.
-- **1 GB Supabase Storage Quota Preservation**: Rejected avatars (via automated Gemini checks or manual admin rejection) are immediately purged from the Supabase Storage bucket (`delete_user_avatar`), preventing abandoned or illicit images from consuming the 1 GB free object storage quota.
+- **1 GB Supabase Storage Quota Preservation**: Rejected avatars (via automated checks or manual admin rejection) are immediately purged from the Supabase Storage bucket (`delete_user_avatar`), preventing abandoned or illicit images from consuming the 1 GB free object storage quota.
 
-### 10.3 Image Caching After Gemini Lookup & Client/Backend Autonomy
+### 10.3 Image Caching After Moderation & Client/Backend Autonomy
 - **The Decoupled Golden Rule**: Client caching optimizes user ergonomics and eliminates download egress, but the **backend and database remain 100% stable and performant even if client caching is completely disabled or bypassed**.
 - **Post-Moderation Storage Lifecycle**:
   1. *Upload*: Avatar binary uploads directly from client to Supabase Storage via signed URL (`avatars/avatar_{user_id}.webp`).
   2. *Moderation State*: Retained in `status = 'pending'` in PostgreSQL (`user_photos`), invisible to discovery feeds.
-  3. *Approval & CDN Publication*: Once Gemini verifies the photo, `user_photos.status` becomes `'approved'` and `users.avatar_url` is set.
+  3. *Approval & CDN Publication*: Once moderation verifies the photo, `user_photos.status` becomes `'approved'` and `users.avatar_url` is set.
 - **Client-Side Cache Layer**:
   - Mobile client caches own avatar URI in `AsyncStorage` and remote candidate avatars in fast disk cache, consuming **0 Supabase egress bytes** on subsequent profile views.
 - **Backend Autonomous Resilience**:
   - If a user clears app storage, switches devices, or accesses Jainune via desktop Safari with DevTools open (cache disabled):
     - Profile queries execute indexed keyset lookups against PostgreSQL (`users.avatar_url`), consuming < 1ms DB CPU.
     - Supabase Storage public CDN headers (`Cache-Control: public, max-age=86400, stale-while-revalidate=3600`) ensure edge CDN caches handle requests without hitting origin storage servers.
-    - **Zero repeated Gemini calls**: Once a photo is approved, its moderation status is immutable in PostgreSQL. It is never re-sent to Gemini Vision.
+    - **Zero repeated moderation calls**: Once a photo is approved, its moderation status is immutable in PostgreSQL. It is never re-sent to Cloudflare AI.
 
 ### 10.4 Diskless Service Account Credentials & Render RAM Footprint
 - **Zero Persistent Disk on Render Free Tier**:

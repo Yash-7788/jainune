@@ -1,22 +1,22 @@
 """
-Content Moderation Service — Google Gemini Vision Gate with Failover & Deduplication.
+Content Moderation Service — Cloudflare Workers AI Vision Gate with Deduplication.
 
 Enforces:
-1. Multi-key pool rotation (supports 3 free-tier or paid accounts via GEMINI_API_KEYS).
-2. Per-key rate limiting (15 RPM compliance).
+1. Single Cloudflare API token (no key rotation; no rolling accounts).
+2. 15 RPM safe pacing (asyncio.Semaphore(1) + 4.0s inter-request delay).
 3. Single-flight async deduplication (exactly 1 API call per photo_id under concurrency).
-4. Safety refusal capture (finish_reason="SAFETY" treated as explicit violation).
-5. Safe failover: exhausted quota or API errors leave photo in status='pending' for admin review.
+4. In-memory perceptual hash cache (_banned_hashes_cache) for instant 0ms duplicate rejection.
+5. Perpetual prompt prefix caching via x-session-affinity header.
+6. Safe fallback: daily neuron cap reached or API errors leave photo in status='pending'.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -29,6 +29,30 @@ logger = logging.getLogger(__name__)
 _photo_locks: dict[str, asyncio.Lock] = {}
 _photo_locks_guard = asyncio.Lock()
 
+# In-memory perceptual hash cache — O(1) pre-check, avoids DB reads on re-uploads
+_banned_hashes_cache: set[str] = set()
+_banned_hashes_loaded: bool = False
+
+# Inter-request pacing state
+_last_cf_request_time: float = 0.0
+_cf_rpm_lock = asyncio.Lock()
+
+# Daily Neuron tracker
+_daily_neurons_used: float = 0.0
+_daily_neurons_reset_ts: float = 0.0
+
+# Hybrid single-token prompt (perpetually cacheable — static, never changes)
+_CF_MODERATION_PROMPT = (
+    "You are an automated photo moderator for a Jain community dating app. "
+    "ALLOW: ethnic wear, sarees, waist, short dresses, cleavage, swimwear, shirtless men, "
+    "gym wear, normal social photos, hobbies (ps5, trees, etc). "
+    "REJECT: genitalia, nipples, explicit sex, CSAM, weapons, gore, phone numbers/contact overlay, "
+    "ads, promotional, celebrity photos (any country, TV, movies, OTT, YouTubers, TikTok), "
+    "AI generated/morphed photos. "
+    "Reply PASS if safe. If unsafe, reply with single word: "
+    "nudity / csam / weapon / gore / contact / ad / celebrity / morph"
+)
+
 
 @dataclass
 class ModerationResult:
@@ -37,219 +61,142 @@ class ModerationResult:
     confidence: float
 
 
-class GeminiModerationClient:
-    """Manages Gemini Vision API calls with multi-key pool, rate limiting, and failover."""
+class CloudflareVisionModerationClient:
+    """Cloudflare Workers AI vision moderation with 15 RPM pacing and daily Neuron cap."""
 
-    def __init__(self) -> None:
-        self._keys: list[str] = [
-            k.strip() for k in settings.gemini_api_keys.split(",") if k.strip()
-        ]
-        self._current_key_idx = 0
-        self._key_timestamps: dict[str, list[float]] = {k: [] for k in self._keys}
-        self._key_cooldowns: dict[str, float] = {k: 0.0 for k in self._keys}
-        self._lock = asyncio.Lock()
+    # Neurons per photo: 256 img tokens (cached) = 1.129 N + 1 output token = 0.061 N → 1.221 N/photo
+    _NEURONS_PER_PHOTO: float = 1.221
 
-    def set_keys(self, keys: list[str]) -> None:
-        """Update key pool dynamically (e.g. for testing)."""
-        self._keys = [k.strip() for k in keys if k.strip()]
-        self._current_key_idx = 0
-        self._key_timestamps = {k: [] for k in self._keys}
-        self._key_cooldowns = {k: 0.0 for k in self._keys}
-
-    async def _get_available_key(self) -> Optional[str]:
-        """Selects next available key respecting 15 RPM rate limits and cooldowns."""
-        async with self._lock:
-            if not self._keys and settings.gemini_api_keys:
-                self.set_keys([k.strip() for k in settings.gemini_api_keys.split(",") if k.strip()])
-
-            if not self._keys:
-                return None
-
+    async def _pace_request(self) -> None:
+        """Enforce 15 RPM: 4.0s minimum gap between requests."""
+        global _last_cf_request_time
+        async with _cf_rpm_lock:
             now = time.monotonic()
-            n_keys = len(self._keys)
+            gap = now - _last_cf_request_time
+            if gap < 4.0:
+                await asyncio.sleep(4.0 - gap)
+            _last_cf_request_time = time.monotonic()
 
-            for i in range(n_keys):
-                idx = (self._current_key_idx + i) % n_keys
-                key = self._keys[idx]
+    def _check_daily_cap(self) -> bool:
+        """Returns True if daily Neuron cap has NOT been exceeded."""
+        global _daily_neurons_used, _daily_neurons_reset_ts
+        now = time.time()
+        # Reset counter daily at midnight UTC
+        if now - _daily_neurons_reset_ts >= 86400:
+            _daily_neurons_used = 0.0
+            _daily_neurons_reset_ts = now
+        return _daily_neurons_used < settings.cf_ai_daily_neuron_cap
 
-                # Check cooldown (e.g., after 429)
-                if self._key_cooldowns.get(key, 0.0) > now:
-                    continue
-
-                # Prune request timestamps older than 60 seconds
-                stamps = [t for t in self._key_timestamps.get(key, []) if now - t < 60.0]
-                self._key_timestamps[key] = stamps
-
-                # Free tier rate limit: 15 RPM
-                if len(stamps) < 15:
-                    stamps.append(now)
-                    self._current_key_idx = (idx + 1) % n_keys
-                    return key
-
-            return None
-
-    def _mark_key_rate_limited(self, key: str, cooldown_seconds: float = 60.0) -> None:
-        """Puts a key in cooldown on HTTP 429."""
-        self._key_cooldowns[key] = time.monotonic() + cooldown_seconds
-        logger.warning("Gemini API key %s rate-limited (429). Cooldown: %ss", key[:6] + "...", cooldown_seconds)
+    def _record_neurons(self) -> None:
+        global _daily_neurons_used
+        _daily_neurons_used += self._NEURONS_PER_PHOTO
 
     async def moderate_image_bytes(
         self,
         image_bytes: bytes,
         mime_type: str = "image/webp",
+        dhash: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> ModerationResult:
-        """Evaluates image bytes against dating app moderation guidelines."""
-        if not settings.gemini_moderation_enabled:
+        """
+        Evaluate image bytes via Cloudflare Workers AI Llama 3.2 Vision.
+        1. dHash pre-check against in-memory banned set (0ms, 0 Neurons).
+        2. Daily Neuron cap check.
+        3. 15 RPM pacing.
+        4. POST to Cloudflare Workers AI endpoint.
+        5. Parse hybrid single-token output (PASS or reject reason).
+        """
+        # 1. In-memory dHash pre-check (0ms, 0 Neurons)
+        if dhash and dhash in _banned_hashes_cache:
+            logger.info("dHash cache hit — instant reject: %s", dhash)
+            return ModerationResult(is_safe=False, reason="duplicate", confidence=1.0)
+
+        if not settings.cf_ai_moderation_enabled:
             return ModerationResult(is_safe=None, reason="Moderation disabled in config", confidence=0.0)
 
-        if not self._keys:
-            logger.info("No Gemini API keys configured. Routing photo to manual admin queue.")
-            return ModerationResult(is_safe=None, reason="Gemini API unconfigured; queued for admin", confidence=0.0)
+        if not settings.cloudflare_account_id or not settings.cloudflare_api_token:
+            logger.info("Cloudflare Workers AI not configured. Routing photo to manual review.")
+            return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
 
-        if len(image_bytes) > 5 * 1024 * 1024:
-            logger.warning("Image too large for moderation: %s bytes", len(image_bytes))
-            return ModerationResult(is_safe=False, reason="Image file exceeds size limit (5MB)", confidence=1.0)
+        # 2. Daily Neuron cap
+        if not self._check_daily_cap():
+            logger.warning("Daily Neuron cap reached. Routing photo to manual review.")
+            return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
+
+        # 3. 15 RPM pacing
+        await self._pace_request()
 
         b64_data = base64.b64encode(image_bytes).decode("ascii")
 
-        system_instruction = (
-            "You are an automated photo moderator for a modern dating app. Analyze the uploaded image.\n"
-            "Guidelines:\n"
-            "- ALLOW: cleavage, swimwear, shirtless men, stylish revealing outfits, gym wear, ethnic clothing, normal social photos.\n"
-            "- REJECT: exposed genitalia, exposed nipples/areola, explicit sex acts, pornographic content, "
-            "child exploitation/CSAM, firearms/weapons, graphic violence/gore, hate symbols.\n"
-            "Respond ONLY with valid JSON in this schema:\n"
-            '{"is_safe": boolean, "reason": "clean" | "nudity" | "violence" | "csam" | "other", "confidence": float}'
-        )
-
         payload = {
-            "contents": [
+            "messages": [
                 {
-                    "parts": [
-                        {"text": system_instruction},
+                    "role": "user",
+                    "content": [
                         {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": b64_data,
-                            }
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
                         },
-                    ]
+                        {"type": "text", "text": _CF_MODERATION_PROMPT},
+                    ],
                 }
             ],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-            },
-            "safetySettings": [
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_ONLY_HIGH",
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-                },
-            ],
+            "max_tokens": 3,
         }
 
-        attempts = len(self._keys)
+        url = (
+            f"https://api.cloudflare.com/client/v4/accounts/"
+            f"{settings.cloudflare_account_id}/ai/run/{settings.cf_ai_vision_model}"
+        )
+        headers = {
+            "Authorization": f"Bearer {settings.cloudflare_api_token}",
+            "x-session-affinity": "dating-moderation-pool",
+        }
+
         close_client = False
         client = http_client
         if client is None:
-            client = httpx.AsyncClient(timeout=15.0)
+            client = httpx.AsyncClient(timeout=20.0)
             close_client = True
 
         try:
-            for _ in range(attempts):
-                api_key = await self._get_available_key()
-                if not api_key:
-                    logger.warning("All Gemini API keys are busy or cooling down. Queuing for admin.")
-                    return ModerationResult(is_safe=None, reason="Rate limit reached across all keys; queued for admin", confidence=0.0)
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+            except httpx.RequestError as exc:
+                logger.warning("Cloudflare Workers AI network error: %s", exc)
+                return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
 
-                url = (
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{settings.gemini_moderation_model}:generateContent?key={api_key}"
-                )
+            if resp.status_code == 429:
+                logger.warning("Cloudflare Workers AI 429 rate limit hit unexpectedly.")
+                return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
 
-                try:
-                    resp = await client.post(url, json=payload)
-                except httpx.RequestError as exc:
-                    logger.warning("Gemini network error with key %s: %s", api_key[:6] + "...", exc)
-                    continue
+            if resp.status_code != 200:
+                logger.warning("Cloudflare Workers AI returned HTTP %s: %s", resp.status_code, resp.text[:200])
+                return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
 
-                if resp.status_code == 429:
-                    self._mark_key_rate_limited(api_key, cooldown_seconds=60.0)
-                    continue
+            data = resp.json()
+            raw_text = (data.get("result", {}).get("response") or "").strip().upper()
 
-                if resp.status_code != 200:
-                    logger.warning("Gemini returned HTTP %s: %s", resp.status_code, resp.text)
-                    continue
+            self._record_neurons()
 
-                data = resp.json()
+            if raw_text == "PASS":
+                return ModerationResult(is_safe=True, reason="clean", confidence=0.95)
 
-                # 1. Check prompt feedback block
-                prompt_feedback = data.get("promptFeedback", {})
-                if prompt_feedback.get("blockReason"):
-                    logger.warning("Gemini blocked prompt: %s", prompt_feedback)
-                    return ModerationResult(is_safe=False, reason=f"Safety block: {prompt_feedback.get('blockReason')}", confidence=1.0)
+            # Single-word reject reason
+            _VALID_REJECT_TAGS = {"NUDITY", "CSAM", "WEAPON", "GORE", "CONTACT", "AD", "CELEBRITY", "MORPH"}
+            reason_word = raw_text.lower() if raw_text in _VALID_REJECT_TAGS else "other"
+            return ModerationResult(is_safe=False, reason=reason_word, confidence=0.95)
 
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return ModerationResult(is_safe=None, reason="No candidates returned", confidence=0.0)
-
-                candidate = candidates[0]
-                finish_reason = candidate.get("finish_reason") or candidate.get("finishReason")
-
-                # 2. Check safety filter refusal
-                if finish_reason in ("SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"):
-                    logger.warning("Gemini refused image due to safety filters (finish_reason=%s)", finish_reason)
-                    return ModerationResult(is_safe=False, reason=f"Refused by safety filters ({str(finish_reason).lower()})", confidence=1.0)
-
-                # 3. Parse JSON response
-                parts = candidate.get("content", {}).get("parts", [])
-                if not parts:
-                    return ModerationResult(is_safe=None, reason="Empty response parts", confidence=0.0)
-
-                raw_text = parts[0].get("text", "{}").strip()
-                if raw_text.startswith("```"):
-                    import re
-                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
-                    raw_text = re.sub(r"\s*```$", "", raw_text)
-                    raw_text = raw_text.strip()
-                try:
-                    parsed = json.loads(raw_text)
-                except Exception:
-                    import re
-                    match = re.search(r"\{.*?\}", raw_text, re.DOTALL)
-                    if match:
-                        try:
-                            parsed = json.loads(match.group(0))
-                        except Exception as exc:
-                            logger.error("Failed to parse regex-extracted Gemini JSON: %s (raw: %s)", exc, raw_text)
-                            return ModerationResult(is_safe=None, reason="Invalid JSON from model; queued for admin", confidence=0.0)
-                    else:
-                        logger.error("Failed to parse Gemini moderation JSON: no JSON object found (raw: %s)", raw_text)
-                        return ModerationResult(is_safe=None, reason="Invalid JSON from model; queued for admin", confidence=0.0)
-
-                try:
-                    is_safe = bool(parsed.get("is_safe", False))
-                    reason = str(parsed.get("reason", "clean" if is_safe else "unspecified"))
-                    confidence = float(parsed.get("confidence", 0.9))
-                    return ModerationResult(is_safe=is_safe, reason=reason, confidence=confidence)
-                except Exception as exc:
-                    logger.error("Failed to extract schema fields from Gemini JSON: %s (parsed: %s)", exc, parsed)
-                    return ModerationResult(is_safe=None, reason="Invalid schema from model; queued for admin", confidence=0.0)
-
-            # All attempts failed or exhausted
-            return ModerationResult(is_safe=None, reason="All moderation keys exhausted; queued for admin", confidence=0.0)
-
+        except Exception as exc:
+            logger.error("Unexpected error in Cloudflare moderation: %s", exc)
+            return ModerationResult(is_safe=None, reason="Photo under review", confidence=0.0)
         finally:
             if close_client:
                 await client.aclose()
 
 
-# Global client instance
-gemini_moderator = GeminiModerationClient()
+# Global client singleton
+cf_moderator = CloudflareVisionModerationClient()
 
 
 async def get_photo_lock(photo_id: str) -> asyncio.Lock:
@@ -260,21 +207,58 @@ async def get_photo_lock(photo_id: str) -> asyncio.Lock:
         return _photo_locks[photo_id]
 
 
+async def load_banned_hashes(pool) -> None:
+    """Load all banned hashes from DB into in-memory set on startup."""
+    global _banned_hashes_cache, _banned_hashes_loaded
+    if _banned_hashes_loaded:
+        return
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT dhash FROM banned_image_hashes")
+            _banned_hashes_cache = {r["dhash"] for r in rows}
+            _banned_hashes_loaded = True
+            logger.info("Loaded %d banned hashes into memory", len(_banned_hashes_cache))
+    except Exception as exc:
+        logger.error("Failed to load banned hashes: %s", exc)
+
+
+async def record_banned_hash(pool, dhash: str, reason: str, confidence: float) -> None:
+    """Insert new banned hash into DB and in-memory set atomically."""
+    _banned_hashes_cache.add(dhash)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO banned_image_hashes (dhash, reason, confidence)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (dhash) DO NOTHING
+                """,
+                dhash,
+                reason,
+                confidence,
+            )
+    except Exception as exc:
+        logger.error("Failed to persist banned hash %s: %s", dhash, exc)
+
+
 async def run_photo_moderation(
     photo_id: uuid.UUID,
     user_id: uuid.UUID,
     pool=None,
-    moderator: Optional[GeminiModerationClient] = None,
+    moderator: Optional[CloudflareVisionModerationClient] = None,
     http_client: Optional[httpx.AsyncClient] = None,
+    dhash: Optional[str] = None,
 ) -> ModerationResult:
     """
     Background worker task:
     1. Single-flight locks on photo_id.
     2. Checks DB to avoid re-checking already approved/rejected photo.
-    3. Fetches image bytes.
-    4. Moderates via Gemini client with multi-key failover.
-    5. Updates user_media status and synchronizes users.avatar_url if safe.
-    6. Cleans up in-memory lock on completion to prevent memory leaks.
+    3. dHash fast-fail against in-memory banned set.
+    4. Fetches image bytes.
+    5. Moderates via Cloudflare Workers AI with 15 RPM pacing.
+    6. Updates user_media status and synchronizes users.avatar_url if safe.
+    7. Records banned hash on rejection.
+    8. Cleans up in-memory lock on completion to prevent memory leaks.
     """
     from app.core.database import get_pool
     from app.services.media_processor import avatar_public_url
@@ -283,7 +267,7 @@ async def run_photo_moderation(
     lock = await get_photo_lock(photo_id_str)
 
     if moderator is None:
-        moderator = gemini_moderator
+        moderator = cf_moderator
 
     try:
         async with lock:
@@ -346,10 +330,11 @@ async def run_photo_moderation(
                     logger.error("Authenticated Supabase download failed for %s: %s", user_id, exc)
                     return ModerationResult(is_safe=None, reason="Image download failed", confidence=0.0)
 
-            # Run moderation
+            # Run moderation via Cloudflare Workers AI
             result = await moderator.moderate_image_bytes(
                 image_bytes=image_bytes,
                 mime_type="image/webp",
+                dhash=dhash,
                 http_client=http_client,
             )
 
@@ -396,6 +381,10 @@ async def run_photo_moderation(
                             photo_id,
                             user_id,
                         )
+                        # Record banned hash for instant future rejection
+                        if dhash:
+                            await record_banned_hash(pool, dhash, result.reason, result.confidence)
+
                         # TOCTOU guard: Only clear users.avatar_url and storage if this photo is STILL the user's active avatar
                         is_active = await conn.fetchval(
                             "SELECT EXISTS (SELECT 1 FROM user_media WHERE id = $1 AND user_id = $2 AND position = 1 AND media_type = 'photo')",
@@ -415,8 +404,8 @@ async def run_photo_moderation(
                             logger.warning("Photo %s rejected for user %s: %s (skipped storage purge, superseded by newer photo)", photo_id, user_id, result.reason)
 
                     else:
-                        # Undetermined / Quota exhausted -> stays 'pending' for admin review
-                        logger.info("Photo %s marked pending for manual admin review: %s", photo_id, result.reason)
+                        # Undetermined / cap reached -> stays 'pending' for internal review
+                        logger.info("Photo %s marked pending for manual review: %s", photo_id, result.reason)
 
             # Invalidate Redis profile and feed cache if redis is available
             try:

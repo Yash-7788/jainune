@@ -98,7 +98,7 @@ export default function Step19Screen() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
-      aspect: [4, 5],
+      aspect: [1, 1],
       quality: 0.8,
     });
     if (result.canceled || !result.assets || result.assets.length === 0) return;

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from app.services.moderation import (
-    GeminiModerationClient,
+    CloudflareVisionModerationClient,
     ModerationResult,
     run_photo_moderation,
     get_photo_lock,
@@ -79,88 +79,30 @@ class TestBug8PythonMultipartVersion(unittest.TestCase):
         )
 
 
-class TestGeminiModerationClient(unittest.IsolatedAsyncioTestCase):
-    async def test_key_rotation_on_429(self):
-        client = GeminiModerationClient()
-        client.set_keys(["key_primary", "key_backup"])
+class TestCloudflareVisionModerationClient(unittest.IsolatedAsyncioTestCase):
+    """Tests for Cloudflare Workers AI single-token hybrid output moderation."""
 
-        called_urls = []
+    def setUp(self):
+        from app.core.config import settings
+        self._orig_acc = settings.cloudflare_account_id
+        self._orig_tok = settings.cloudflare_api_token
+        settings.cloudflare_account_id = "test_cf_account_id"
+        settings.cloudflare_api_token = "test_cf_api_token"
+        self._sleep_patcher = patch("asyncio.sleep", AsyncMock())
+        self._sleep_patcher.start()
 
-        def mock_handler(request: httpx.Request):
-            called_urls.append(str(request.url))
-            if "key=key_primary" in str(request.url):
-                return httpx.Response(429, json={"error": {"message": "Resource exhausted"}})
-            if "key=key_backup" in str(request.url):
-                return httpx.Response(
-                    200,
-                    json={
-                        "candidates": [
-                            {
-                                "finish_reason": "STOP",
-                                "content": {
-                                    "parts": [{"text": '{"is_safe": true, "reason": "clean", "confidence": 0.95}'}]
-                                },
-                            }
-                        ]
-                    },
-                )
-            return httpx.Response(500)
+    def tearDown(self):
+        self._sleep_patcher.stop()
+        from app.core.config import settings
+        settings.cloudflare_account_id = self._orig_acc
+        settings.cloudflare_api_token = self._orig_tok
 
-        transport = httpx.MockTransport(mock_handler)
-        async with httpx.AsyncClient(transport=transport) as http:
-            result = await client.moderate_image_bytes(b"dummy_bytes", http_client=http)
-
-        self.assertTrue(result.is_safe)
-        self.assertEqual(result.reason, "clean")
-        self.assertEqual(len(called_urls), 2)
-        self.assertIn("key=key_primary", called_urls[0])
-        self.assertIn("key=key_backup", called_urls[1])
-
-    async def test_safety_refusal_handled_as_rejection(self):
-        client = GeminiModerationClient()
-        client.set_keys(["test_key"])
+    async def test_pass_token_returns_safe(self):
+        """Single-token PASS → is_safe=True, reason='clean'."""
+        client = CloudflareVisionModerationClient()
 
         def mock_handler(request: httpx.Request):
-            return httpx.Response(
-                200,
-                json={
-                    "candidates": [
-                        {
-                            "finishReason": "SAFETY",
-                            "safetyRatings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "probability": "HIGH"}],
-                        }
-                    ]
-                },
-            )
-
-        transport = httpx.MockTransport(mock_handler)
-        async with httpx.AsyncClient(transport=transport) as http:
-            result = await client.moderate_image_bytes(b"nsfw_bytes", http_client=http)
-
-        self.assertFalse(result.is_safe)
-        self.assertIn("safety filters", result.reason.lower())
-        self.assertEqual(result.confidence, 1.0)
-
-    async def test_safe_revealing_outfit_allowed_by_model_response(self):
-        client = GeminiModerationClient()
-        client.set_keys(["test_key"])
-
-        def mock_handler(request: httpx.Request):
-            return httpx.Response(
-                200,
-                json={
-                    "candidates": [
-                        {
-                            "finishReason": "STOP",
-                            "content": {
-                                "parts": [
-                                    {"text": '{"is_safe": true, "reason": "clean", "confidence": 0.92}'}
-                                ]
-                            },
-                        }
-                    ]
-                },
-            )
+            return httpx.Response(200, json={"result": {"response": "PASS"}})
 
         transport = httpx.MockTransport(mock_handler)
         async with httpx.AsyncClient(transport=transport) as http:
@@ -168,6 +110,75 @@ class TestGeminiModerationClient(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.is_safe)
         self.assertEqual(result.reason, "clean")
+        self.assertAlmostEqual(result.confidence, 0.95)
+
+    async def test_nudity_token_returns_rejection(self):
+        """Single-token 'nudity' → is_safe=False, reason='nudity'."""
+        client = CloudflareVisionModerationClient()
+
+        def mock_handler(request: httpx.Request):
+            return httpx.Response(200, json={"result": {"response": "nudity"}})
+
+        transport = httpx.MockTransport(mock_handler)
+        async with httpx.AsyncClient(transport=transport) as http:
+            result = await client.moderate_image_bytes(b"nsfw_bytes", http_client=http)
+
+        self.assertFalse(result.is_safe)
+        self.assertEqual(result.reason, "nudity")
+
+    async def test_all_valid_reject_tags_produce_rejection(self):
+        """All 8 reject tags are correctly classified as rejections."""
+        tags = ["nudity", "csam", "weapon", "gore", "contact", "ad", "celebrity", "morph"]
+        client = CloudflareVisionModerationClient()
+        for tag in tags:
+            def make_handler(t):
+                def mock_handler(request: httpx.Request):
+                    return httpx.Response(200, json={"result": {"response": t}})
+                return mock_handler
+            transport = httpx.MockTransport(make_handler(tag))
+            async with httpx.AsyncClient(transport=transport) as http:
+                result = await client.moderate_image_bytes(b"test_bytes", http_client=http)
+            self.assertFalse(result.is_safe, f"Expected rejection for tag '{tag}'")
+            self.assertEqual(result.reason, tag)
+
+    async def test_rate_limit_429_returns_pending(self):
+        """HTTP 429 from CF → is_safe=None (pending for admin review)."""
+        client = CloudflareVisionModerationClient()
+
+        def mock_handler(request: httpx.Request):
+            return httpx.Response(429, json={"errors": [{"message": "rate limited"}]})
+
+        transport = httpx.MockTransport(mock_handler)
+        async with httpx.AsyncClient(transport=transport) as http:
+            result = await client.moderate_image_bytes(b"dummy_bytes", http_client=http)
+
+        self.assertIsNone(result.is_safe)
+        self.assertEqual(result.reason, "Photo under review")
+
+    async def test_dhash_cache_hit_instant_reject(self):
+        """In-memory dHash cache hit → instant rejection with 0 HTTP calls."""
+        import app.services.moderation as mod_module
+        client = CloudflareVisionModerationClient()
+        test_hash = "deadbeefcafe0001"
+        mod_module._banned_hashes_cache.add(test_hash)
+
+        called = []
+
+        def mock_handler(request: httpx.Request):
+            called.append(request)
+            return httpx.Response(200, json={"result": {"response": "PASS"}})
+
+        transport = httpx.MockTransport(mock_handler)
+        async with httpx.AsyncClient(transport=transport) as http:
+            result = await client.moderate_image_bytes(b"banned_bytes", dhash=test_hash, http_client=http)
+
+        # No HTTP call made — cache short-circuit
+        self.assertEqual(len(called), 0)
+        self.assertFalse(result.is_safe)
+        self.assertEqual(result.reason, "duplicate")
+
+        # Cleanup
+        mod_module._banned_hashes_cache.discard(test_hash)
 
 
 class TestPhotoModerationPipeline(unittest.IsolatedAsyncioTestCase):
@@ -618,37 +629,29 @@ class TestRateLimiterUpstashResilienceAndTOCTOU(unittest.IsolatedAsyncioTestCase
                 mock_delete.assert_not_called()
         self.assertFalse(res.is_safe)
 
-    async def test_gemini_moderation_strips_commentary_and_parses_json(self):
-        """Resilience: Extra model thoughts/commentary and backticks are cleanly parsed."""
-        client = GeminiModerationClient()
-        client.set_keys(["test_key_1"])
+    async def test_cloudflare_moderation_unknown_word_maps_to_other(self):
+        """Unknown model output word that isn't in valid tags → reason='other', is_safe=False."""
+        from app.core.config import settings
+        orig_acc = settings.cloudflare_account_id
+        orig_tok = settings.cloudflare_api_token
+        settings.cloudflare_account_id = "test_cf_account_id"
+        settings.cloudflare_api_token = "test_cf_api_token"
+        try:
+            client = CloudflareVisionModerationClient()
 
-        raw_response = (
-            "Here is the automated moderation evaluation for the dating profile photo:\n"
-            "```json\n"
-            '{"is_safe": true, "reason": "clean", "confidence": 0.98}\n'
-            "```\n"
-            "This image conforms to all community standards."
-        )
+            def mock_handler(request: httpx.Request):
+                return httpx.Response(200, json={"result": {"response": "UNKNOWN_LABEL"}})
 
-        payload = {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": raw_response}],
-                    },
-                    "finishReason": "STOP",
-                }
-            ]
-        }
+            transport = httpx.MockTransport(mock_handler)
+            with patch("asyncio.sleep", AsyncMock()):
+                async with httpx.AsyncClient(transport=transport) as http:
+                    res = await client.moderate_image_bytes(b"test_image_bytes", http_client=http)
 
-        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
-        async with httpx.AsyncClient(transport=transport) as http:
-            res = await client.moderate_image_bytes(b"test_image_bytes", http_client=http)
-
-        self.assertTrue(res.is_safe)
-        self.assertEqual(res.reason, "clean")
-        self.assertAlmostEqual(res.confidence, 0.98)
+            self.assertFalse(res.is_safe)
+            self.assertEqual(res.reason, "other")
+        finally:
+            settings.cloudflare_account_id = orig_acc
+            settings.cloudflare_api_token = orig_tok
 
 
 if __name__ == "__main__":

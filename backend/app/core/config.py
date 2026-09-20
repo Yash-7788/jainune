@@ -110,10 +110,13 @@ class Settings(BaseSettings):
     store_webhook_secret: str = ""
     webhook_secret: str = ""
 
-    # Content Moderation (Google Gemini Vision)
-    gemini_api_keys: str = ""
-    gemini_moderation_model: str = "gemini-1.5-flash"
-    gemini_moderation_enabled: bool = True
+    # Content Moderation (Cloudflare Workers AI - Llama 3.2 Vision)
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cf_ai_vision_model: str = "@cf/meta/llama-3.2-11b-vision-instruct"
+    cf_ai_moderation_enabled: bool = True
+    cf_ai_daily_neuron_cap: int = 9500  # Hard ceiling below 10k free tier
+    cf_ai_max_rpm: int = 15  # 15 RPM queue pacing (4s delay; safe below CF 20 RPM limit)
 
     # Legacy / Deprecated AWS settings for test backwards-compatibility
     aws_access_key_id: str = ""

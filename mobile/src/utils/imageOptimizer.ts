@@ -23,7 +23,8 @@ export async function optimizeProfilePhoto(
       [
         {
           resize: {
-            width: 480, // Clamps width to 480px; height auto-scales maintaining 4:5 ratio
+            width: 480,
+            height: 480, // WhatsApp-style 1:1 square crop
           },
         },
       ],

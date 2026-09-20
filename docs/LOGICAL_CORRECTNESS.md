@@ -250,7 +250,7 @@ Supabase Storage deletion
 batch processing
 bulk cleanup (daily 03:00 UTC pass reaper)
 notification fan-out
-external provider operations (Supabase / Gemini / Google Play)
+external provider operations (Supabase / Cloudflare Workers AI / Google Play)
 ```
 
 ---
@@ -392,7 +392,7 @@ Examples:
 DB record created
 → client 480px WebP pre-compression
 → direct Supabase Storage upload
-→ async Gemini Flash moderation
+→ async Cloudflare Workers AI vision moderation
 → DB approved / rejected
 ```
 
