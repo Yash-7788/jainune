@@ -589,12 +589,21 @@ async def approve_media(
                 admin["user_id"],
                 media_id,
             )
-            # Only update users.avatar_url if this is a primary photo (NOT voice note, NOT secondary media)
+            # TOCTOU guard: Only update users.avatar_url if this photo is STILL position = 1
             if row["media_type"] == "photo" and row.get("position", 1) == 1:
                 await conn.execute(
-                    "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+                    """
+                    UPDATE users
+                       SET avatar_url = $1, updated_at = NOW()
+                     WHERE id = $2
+                       AND EXISTS (
+                           SELECT 1 FROM user_media
+                            WHERE id = $3 AND user_id = $2 AND position = 1
+                       )
+                    """,
                     cdn_url,
                     user_id,
+                    media_id,
                 )
             await recompute_trust_score(user_id, conn)
 
@@ -630,6 +639,7 @@ async def reject_media(
             raise HTTPException(status_code=404, detail="Media not found")
 
         user_id = row["user_id"]
+        is_active = False
         async with conn.transaction():
             await conn.execute(
                 """
@@ -644,16 +654,22 @@ async def reject_media(
                 admin["user_id"],
                 media_id,
             )
-            # If this was primary photo, clear users.avatar_url
+            # TOCTOU guard: Only clear avatar_url if this photo is STILL position 1
             if row["media_type"] == "photo" and row.get("position", 1) == 1:
-                await conn.execute(
-                    "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+                is_active = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM user_media WHERE id = $1 AND user_id = $2 AND position = 1)",
+                    media_id,
                     user_id,
                 )
+                if is_active:
+                    await conn.execute(
+                        "UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+                        user_id,
+                    )
             await recompute_trust_score(user_id, conn)
 
         # Quota optimization: purge rejected media from Supabase Storage
-        if row["media_type"] == "photo" and row.get("position", 1) == 1:
+        if is_active:
             try:
                 from app.services.media_processor import delete_user_avatar
                 await delete_user_avatar(user_id)
