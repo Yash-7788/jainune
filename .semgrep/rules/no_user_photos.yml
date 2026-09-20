@@ -1,0 +1,11 @@
+rules:
+  - id: ban-legacy-user-photos-table
+    patterns:
+      - pattern-regex: "(FROM|INTO|UPDATE|JOIN)\\s+user_photos\\b"
+    paths:
+      include:
+        - "backend/app/**/*.py"
+    message: "Use canonical 'user_media' table instead of legacy 'user_photos' (BUG-001 invariant)."
+    languages:
+      - python
+    severity: ERROR
