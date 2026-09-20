@@ -29,10 +29,10 @@ The visible failure may occur in:
 * a UI screen,
 * an API response,
 * a database query,
-* a worker,
-* a notification,
-* a cache,
-* an S3 object,
+* an in-process background worker,
+* a push notification (FCM),
+* an Upstash / in-memory cache key,
+* a Supabase Storage object,
 * a native module,
 * a CI build,
 
@@ -64,9 +64,9 @@ service ↔ database
 database ↔ cache
 API ↔ frontend
 frontend ↔ navigation
-API ↔ worker
-worker ↔ queue
-database ↔ S3
+API ↔ background worker pool
+worker ↔ state machine
+database ↔ Supabase Storage bucket
 JS ↔ native bridge
 native source ↔ generated build
 configuration ↔ runtime behavior
@@ -203,11 +203,11 @@ This is mandatory for:
 * moderation,
 * account deletion,
 * notifications,
-* queues,
-* Redis state,
-* S3 operations,
+* in-process worker queues,
+* Upstash Redis fallback state,
+* Supabase Storage operations,
 * cache invalidation,
-* worker processing,
+* worker pool processing,
 * external API integrations.
 
 ---
@@ -222,12 +222,12 @@ Some systems can return partial success.
 
 Examples include:
 
-* S3 multi-object deletion,
+* Supabase Storage batch deletion,
 * batch APIs,
 * database transactions combined with Redis,
-* push notification providers,
-* queue publication,
-* external payment systems.
+* push notification providers (FCM),
+* in-memory queue publication,
+* external payment systems (Razorpay / Google Play).
 
 The auditor must inspect the actual response semantics.
 
@@ -246,11 +246,11 @@ If yes:
 This class of reasoning is especially important for:
 
 ```text
-S3 deletion
+Supabase Storage deletion
 batch processing
-bulk cleanup
+bulk cleanup (daily 03:00 UTC pass reaper)
 notification fan-out
-external provider operations
+external provider operations (Supabase / Gemini / Google Play)
 ```
 
 ---
@@ -381,7 +381,7 @@ is one atomic operation.
 For operations involving:
 
 ```text
-PostgreSQL ↔ S3
+PostgreSQL ↔ Supabase Storage
 ```
 
 or another external store, trace the complete lifecycle.
@@ -390,17 +390,17 @@ Examples:
 
 ```text
 DB record created
-→ object uploaded
-→ moderation
-→ production copy
-→ DB approved
+→ client 480px WebP pre-compression
+→ direct Supabase Storage upload
+→ async Gemini Flash moderation
+→ DB approved / rejected
 ```
 
 and:
 
 ```text
 DB deleted
-→ S3 deletion
+→ Supabase Storage deletion
 ```
 
 Ask:
@@ -426,11 +426,10 @@ Any asynchronous operation must be audited against process lifecycle.
 For:
 
 ```text
-asyncio.create_task
-Celery
-Redis queues
-background workers
-scheduled jobs
+asyncio.create_task / worker_pool
+async background workers
+ephemeral_reaper / scheduled sweeps
+keepalive ping loops
 ```
 
 check:
@@ -485,7 +484,7 @@ For workers and large datasets check:
 * caches,
 * queues,
 * large result sets,
-* image/audio buffers,
+* image buffers (WebP),
 * decoded payloads,
 * batch sizes,
 * concurrent tasks.
@@ -672,7 +671,7 @@ Likewise:
 
 If one distributed lock uses unsafe unconditional deletion, inspect every distributed lock.
 
-If one S3 batch operation mishandles partial failures, inspect every batch S3 delete.
+If one Supabase Storage batch operation mishandles partial failures, inspect every batch storage delete.
 
 If one notification creates dedup state before successful delivery, inspect every notification type.
 
@@ -784,17 +783,17 @@ Ask whether the production binary can actually call it.
 
 ### Example D — External partial failure
 
-A cleanup function deletes ten S3 objects.
+A cleanup function deletes ten photo objects from Supabase Storage (`storage.from_("photos").remove(...)`).
 
 Do not stop at:
 
-> “DeleteObjects succeeded.”
+> “Storage remove call completed without HTTP error.”
 
-Inspect the actual response.
+Inspect the actual response: Supabase Storage returns a list of successfully deleted objects or error payloads per key.
 
 Ask:
 
-> Did all ten objects succeed?
+> Did all ten objects successfully delete from the storage bucket?
 
 Then trace failed keys into local state and retry mechanisms.
 
@@ -937,7 +936,7 @@ There is **only one override** across the entire repository:
 }
 ```
 
-- **Why it exists**: `@expo/cli` (Expo SDK 51) depends on `tar@6` and invokes `tar.extract(...)` during `npx expo prebuild`. `tar@6.2.1` includes all security patches for the v6 tree (CVE-2024-28863, symlink poisoning, path traversal) while preserving the API contract.
+- **Why it exists**: `@expo/cli` in Expo SDK 54 / bare-workflow prebuild invokes `tar.extract(...)` during `npx expo prebuild`. `tar@6.2.1` includes all security patches for the v6 tree (CVE-2024-28863, symlink poisoning, path traversal) while preserving the API contract required by the Expo toolchain.
 - **Verification**: Confirmed zero other `overrides`, `resolutions` (Yarn), or `pnpm.overrides` exist anywhere in `mobile/package.json` or root project manifests.
 - **Rule for Overrides**: Package overrides must never cross major semver boundaries (`v6 -> v7`) without empirical confirmation that every parent toolchain consumer supports the new API export model.
 
@@ -950,23 +949,30 @@ There is **only one override** across the entire repository:
   ```text
   Could not find method autolinkLibrariesWithApp() for arguments [...] on project ':app'
   ```
-- **Root Cause**: React Native 0.75+ introduced `autolinkLibrariesWithApp(dependencies)` in `app/build.gradle`. Our project targets React Native 0.74.5 / Expo SDK 51. Attempting to use 0.75+ syntax on 0.74 crashed Gradle during the configuration phase before any task could execute.
+- **Root Cause**: React Native 0.75+ introduced `autolinkLibrariesWithApp()` in `app/build.gradle`. Legacy versions (RN 0.74) required `applyNativeModulesAppBuildGradle(project)`. Static build scripts that assume a single hardcoded RN version break when upgrading (e.g. from Expo SDK 51 / RN 0.74 to Expo SDK 54 / RN 0.81.5), crashing Gradle during configuration.
 - **Before / After**:
   ```groovy
-  // BROKEN (RN 0.75+ syntax on RN 0.74):
-  apply plugin: "com.facebook.react"
-  // ...
+  // BROKEN (Rigid hardcoded autolinking assumption):
   dependencies {
-      // Gradle failed to resolve autolinkLibrariesWithApp()
+      autolinkLibrariesWithApp() // Crashes if evaluated on RN < 0.75
   }
 
-  // FIXED (RN 0.74 standard autolinking hook):
-  apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
+  // FIXED (Jainune 2.0 Dynamic Version-Adaptive Autolinking in app/build.gradle):
+  def rnVersion = getRNVersion() // Dynamically extracts version from react-native/package.json
+
+  react {
+      if (rnVersion >= versionToNumber(0, 75, 0)) {
+          autolinkLibrariesWithApp()
+      }
+  }
+
+  if (rnVersion < versionToNumber(0, 75, 0)) {
+      apply from: new File(["node", "--print", "require.resolve('@react-native-community/cli-platform-android/package.json', { paths: [require.resolve('react-native/package.json')] })"].execute(null, rootDir).text.trim(), "../native_modules.gradle");
+      applyNativeModulesAppBuildGradle(project)
+  }
   ```
 - **The One-Shot Prevention Rule**:
-  - Check `mobile/package.json` for exact `react-native` version before writing or modifying `build.gradle`:
-    - **RN 0.74.x**: Use legacy autolinking hook `applyNativeModulesAppBuildGradle(project)`.
-    - **RN 0.75.x+**: Use `autolinkLibrariesWithApp()`.
+  - Check `mobile/package.json` for exact `react-native` version (`0.81.5` in Jainune 2.0). Never hardcode static autolinking assumptions into `build.gradle`; always use dynamic version gating (`getRNVersion()`).
 
 ---
 
@@ -1014,7 +1020,7 @@ There is **only one override** across the entire repository:
   2. `res/values/strings.xml`:
      ```xml
      <resources>
-         <string name="app_name">MyApp</string>
+         <string name="app_name">Jainune</string>
      </resources>
      ```
   3. `res/values/colors.xml`:
@@ -1055,24 +1061,24 @@ There is **only one override** across the entire repository:
 ### Case Study 5: Native Pod Namespace & Header Collision
 - **Fatal Error**:
   ```text
-  In file included from /.../ios/<AppName>/main.m:3:
-  /.../ios/<AppName>/AppDelegate.h:3:9: fatal error: 'Expo/Expo.h' file not found
+  In file included from /.../ios/Jainune/main.m:3:
+  /.../ios/Jainune/AppDelegate.h:3:9: fatal error: 'Expo/Expo.h' file not found
   #import <Expo/Expo.h>
   ```
-- **Root Cause**: The custom Config Plugin copied `CustomSecurityModule.podspec`, `.h`, and `.m` directly into `ios/<AppName>/`. Because `ios/<AppName>/` also contained the main application entry files (`main.m`, `AppDelegate.h`, `AppDelegate.mm`), the podspec's wildcard matcher `s.source_files = "*.{h,m}"` caused CocoaPods to compile `main.m` and `AppDelegate.h` inside the `CustomSecurityModule` pod target. Because the security module only declared `React-Core` as a dependency (not `Expo`), compilation failed with `Expo/Expo.h not found`.
+- **Root Cause**: The custom Config Plugin copied `JainuneSecurityModule.podspec`, `.h`, and `.m` directly into `ios/Jainune/`. Because `ios/Jainune/` also contained the main application entry files (`main.m`, `AppDelegate.h`, `AppDelegate.mm`), a podspec with wildcard matcher `s.source_files = "*.{h,m}"` caused CocoaPods to compile `main.m` and `AppDelegate.h` inside the `JainuneSecurityModule` pod target. Because the security module only declared `React-Core` as a dependency (not `Expo`), compilation failed with `Expo/Expo.h not found`.
 - **The Solution**:
-  1. Isolate the pod into its own subdirectory:
+  1. Isolate the pod into its own subdirectory (`mobile/plugins/withIosSecurity.js`):
      ```javascript
-     const targetDir = path.join(iosRoot, "CustomSecurityModule");
+     const targetDir = path.join(iosRoot, "JainuneSecurityModule");
      // ...
      contents = contents.replace(
        insertMarker,
-       `${insertMarker}\n  pod 'CustomSecurityModule', :path => './CustomSecurityModule'`
+       `${insertMarker}\n  pod 'JainuneSecurityModule', :path => './JainuneSecurityModule'`
      );
      ```
-  2. In `CustomSecurityModule.podspec`, restrict the source pattern:
+  2. In `mobile/plugins/ios-security/JainuneSecurityModule.podspec`, restrict the source pattern:
      ```ruby
-     s.source_files = "CustomSecurityModule.{h,m}"
+     s.source_files = "JainuneSecurityModule.{h,m}"
      ```
 - **The One-Shot Prevention Rule**:
   - Custom native modules must reside in their **own dedicated subdirectory** (`ios/<ModuleName>/`, never `ios/<AppName>/` or root `ios/`).
@@ -1087,17 +1093,26 @@ The auditor must actively check for these high-frequency, fatal packaging and ru
 ### Error A: ProGuard / R8 Obfuscation & Reflection Stripping
 * **Trigger**: Release builds enable `minifyEnabled true` and `shrinkResources true`.
 * **Failure Mechanism**: R8 renames or strips model classes, reflection hooks, or JNI entry points because they are not directly referenced in compiled bytecode.
-* **Symptom**: Debug build works perfectly; release build crashes immediately upon opening a screen, serializing JSON, or calling native payment SDKs (e.g. Razorpay, Google Sign-In) with `ClassNotFoundException`, `NoSuchMethodError`, or `NullPointerException`.
+* **Symptom**: Debug build works perfectly; release build crashes immediately upon opening a screen, serializing JSON, or calling native payment SDKs (e.g. Google Play In-App Billing via `react-native-iap`, Google Sign-In) with `ClassNotFoundException`, `NoSuchMethodError`, or `NullPointerException`.
 * **Mandatory Prevention**:
-  * Every native SDK must have its explicit keep rules in `proguard-rules.pro`:
+  * Every native SDK and reflection interface must have explicit keep rules in `proguard-rules.pro`:
     ```proguard
-    # Razorpay SDK
-    -keep class com.razorpay.** { *; }
-    -dontwarn com.razorpay.**
+    # In-App Purchases (react-native-iap) & Play Services
+    -keep class com.dooboolab.rniap.** { *; }
+    -dontwarn com.dooboolab.rniap.**
+    -keep class com.google.android.gms.** { *; }
 
-    # React Native bridge & modules
+    # Application Native Security Module
+    -keep class com.jainune.app.** { *; }
+    -keepclassmembers class com.jainune.app.JainuneSecurityModule {
+        @com.facebook.react.bridge.ReactMethod *;
+        public *;
+    }
+
+    # React Native bridge & Hermes core reflection interfaces
     -keep class com.facebook.react.** { *; }
-    -keep class com.facebook.jni.** { *; }
+    -keep class com.facebook.hermes.** { *; }
+    -keep interface com.facebook.react.bridge.** { *; }
 
     # Data models serialized via reflection
     -keepclassmembers class * implements java.io.Serializable {
@@ -1174,7 +1189,7 @@ The auditor must actively check for these high-frequency, fatal packaging and ru
   * Use `--omit=dev` for production dependencies, and allow non-blocking reporting (`continue-on-error: true`) for build-time CLI scanners.
 
 ### Error H: Native C++ Shared Library (`libc++_shared.so`) Symbol Collision
-* **Trigger**: Multiple third-party native libraries (e.g. React Native, Hermes, Razorpay, OpenCV) bundle their own copy of `libc++_shared.so` or `libfbjni.so`.
+* **Trigger**: Multiple third-party native libraries (e.g. React Native, Hermes, IAP, Reanimated) bundle their own copy of `libc++_shared.so` or `libfbjni.so`.
 * **Failure Mechanism**: Android Gradle Plugin packaging task fails on duplicate file entries across AAR dependencies.
 * **Symptom**: Build fails at `:app:mergeReleaseNativeLibs` with `2 files found with path 'lib/arm64-v8a/libc++_shared.so'`.
 * **Mandatory Prevention**:
@@ -1267,7 +1282,7 @@ The auditor must actively check for these high-frequency, fatal packaging and ru
 * **Trigger**: Declaring `android:autoVerify="true"` on an intent filter without hosting a valid Digital Asset Links file (`https://domain/.well-known/assetlinks.json`) on the target web domain.
 * **Failure Mechanism**: Android OS fails domain verification and silently refuses to route web links into the native application, opening the mobile browser instead.
 * **Mandatory Prevention**:
-  * Ensure separate intent filters for custom URL schemes (`myapp://`) and universal links (`https://example.com`).
+  * Ensure separate intent filters for custom URL schemes (`jainune://`) and universal links (`https://jainune.com`).
   * Verify SHA-256 fingerprint in `assetlinks.json` matches the release signing certificate exactly.
 
 ### Error N: Android 13+ Granular Media Permissions
@@ -1320,8 +1335,8 @@ npx expo config --type public
 ```
 
 ### Phase 4: Native Isolated Subdirectory Verification
-- Verify that custom native modules (e.g. `CustomSecurityModule`) are placed in their own isolated directory (`ios/CustomSecurityModule/`).
-- Verify that `Podfile` points to `./CustomSecurityModule` and podspec declares `s.source_files = "CustomSecurityModule.{h,m}"` (no wildcard `*.{h,m}`).
+- Verify that custom native modules (`JainuneSecurityModule`) are placed in their own isolated directory (`ios/JainuneSecurityModule/`).
+- Verify that `Podfile` points to `./JainuneSecurityModule` and podspec declares `s.source_files = "JainuneSecurityModule.{h,m}"` (no wildcard `*.{h,m}`).
 
 ### Phase 5: Clean Build Dry-Run
 ```bash
@@ -1392,7 +1407,7 @@ This section establishes the operational standard required to prevent superficia
      - Multi-device sessions and concurrent token overwrites.
      - Cross-datastore synchronization divergence (PostgreSQL vs Redis).
      - Time-of-Check to Time-of-Use (TOCTOU) race conditions in state machines.
-     - Unhandled partial failures (e.g. S3 batch deletion errors, payment gateway webhooks).
+     - Unhandled partial failures (e.g. Supabase Storage batch deletion errors, Google Play / Razorpay webhook idempotency).
      - Native toolchain major version breaking changes (e.g. CJS/ESM export rewrites).
 
 3. **Compounding Knowledge Loop**:
