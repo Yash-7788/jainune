@@ -288,11 +288,13 @@ async def sync_subscription(
                     user_id,
                 )
                 v_until = user_row["subscription_valid_until"] if user_row else None
+                from app.services.payment_service import get_effective_user_tier
+                effective_tier = await get_effective_user_tier(user_id, conn)
                 return {
                     "synced": True,
                     "activated": True,
                     "status": "already_captured",
-                    "tier": user_row["subscription_tier"] if user_row else "jainune_plus",
+                    "tier": effective_tier,
                     "expires_at": v_until.isoformat() if v_until else None,
                 }
         else:

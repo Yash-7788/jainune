@@ -230,7 +230,10 @@ class TestRound3DeepAuditHardening(unittest.IsolatedAsyncioTestCase):
             redis=mock_redis,
         )
         self.assertFalse(res.is_moderated)
-        mock_redis.delete.assert_called_once_with(f"chat:safety:single_chars:{chat_id}:{user_id}")
+        # BUG-011 fix: counter must NOT be deleted on normal messages.
+        # Resetting it allowed trivial evasion (single char → any word → repeat).
+        # The key now expires naturally via its 7-day TTL.
+        mock_redis.delete.assert_not_called()
 
     # -------------------------------------------------------------------------
     # 6. Chat Rejection for Banned Recipient

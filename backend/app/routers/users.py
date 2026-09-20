@@ -562,6 +562,7 @@ async def get_public_profile(
                 u.community_sect,
                 u.dietary_strictness,
                 u.subscription_tier,
+                u.subscription_valid_until,
                 u.is_photo_verified,
                 COALESCE((
                     SELECT json_agg(
@@ -601,6 +602,10 @@ async def get_public_profile(
         raise HTTPException(status_code=404, detail="User not found or inactive")
 
     from datetime import date
+    from app.services.payment_service import get_effective_user_tier
+
+    async with pool.acquire() as _tier_conn:
+        effective_tier = await get_effective_user_tier(row["id"], _tier_conn)
 
     dob: date = row["date_of_birth"]
     age = None
@@ -622,7 +627,7 @@ async def get_public_profile(
         "height_cm": row["height_cm"],
         "community_sect": row["community_sect"],
         "dietary_strictness": row["dietary_strictness"],
-        "subscription_tier": row["subscription_tier"],
+        "subscription_tier": effective_tier,
         "is_photo_verified": row["is_photo_verified"],
         "photos": json.loads(row["photos"]) if isinstance(row["photos"], str) else (row["photos"] or []),
         "prompts": [dict(p) for p in (row["prompts"] or [])],

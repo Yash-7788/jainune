@@ -43,6 +43,17 @@ _HOMOGLYPH_MAP = {
     "@": "a", "$": "s",
 }
 
+# BUG-010: ASCII leetspeak digit substitutions applied ONLY for platform-name
+# detection — NOT globally, since phone/address patterns rely on digits being
+# preserved as-is in the normalized string.
+_LEET_MAP: dict[str, str] = {"1": "i", "3": "e", "4": "a", "0": "o", "7": "t"}
+
+
+def _apply_leet(text: str) -> str:
+    """Apply ASCII leetspeak normalization on top of an already-normalized string."""
+    return text.translate(str.maketrans(_LEET_MAP))
+
+
 
 def normalize_text_for_moderation(text: str) -> str:
     norm, _ = normalize_text_with_mapping(text)
@@ -368,36 +379,37 @@ async def filter_chat_content(
                 content=content,
                 is_moderated=False,
             )
-    else:
-        single_char_key = f"chat:safety:single_chars:{chat_id}:{user_id}"
-        try:
-            await redis.delete(single_char_key)
-        except Exception:
-            pass
+    # BUG-011: removed counter reset — resetting on every non-single-char message
+    # allowed trivial evasion (send single char, send any word, repeat indefinitely).
+    # Counter now expires naturally via its 7-day TTL.
 
     # -------------------------------------------------------------------------
     # 2. Scan for Violations
     # -------------------------------------------------------------------------
     detected_types: list[str] = []
 
-    # A. Full platform names (unambiguous in ANY casing)
-    has_full_platform = bool(_RE_FULL_PLATFORMS.search(normalized))
+    # BUG-010: apply leetspeak digit substitution ONLY for platform/shorthand matching.
+    # Phone, address and URL checks use the digit-intact `normalized` string.
+    leet_normalized = _apply_leet(normalized)
+
+    # A. Full platform names (unambiguous in ANY casing + leetspeak digits)
+    has_full_platform = bool(_RE_FULL_PLATFORMS.search(leet_normalized))
 
     # B. Shorthands with contextual intent check
     shorthand_spans: list[tuple[int, int]] = []
-    for m in _RE_SHORTHAND.finditer(normalized):
+    for m in _RE_SHORTHAND.finditer(leet_normalized):
         matched_text = m.group(0).lower()
-        if "snap" in matched_text and _RE_BENIGN_SNAP.search(normalized):
+        if "snap" in matched_text and _RE_BENIGN_SNAP.search(leet_normalized):
             is_benign = any(
                 not (m.end() <= bm.start() or m.start() >= bm.end())
-                for bm in _RE_BENIGN_SNAP.finditer(normalized)
+                for bm in _RE_BENIGN_SNAP.finditer(leet_normalized)
             )
             if is_benign:
                 continue
         shorthand_spans.append(m.span())
     has_shorthand = len(shorthand_spans) > 0
 
-    # C. Phone numbers & word numbers
+    # C. Phone numbers & word numbers (digit-intact normalized — no leet)
     has_phone = bool(_RE_PHONE.search(normalized))
 
     # D. Address with benign idiom check

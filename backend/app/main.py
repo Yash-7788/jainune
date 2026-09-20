@@ -46,9 +46,13 @@ async def _periodic_maintenance_loop() -> None:
     - Pure SQL pruning: downgrades expired subscriptions and reaps stale matches.
     - Daily Gale-Shapley matching: checks if today's batch ran; if not, triggers run_daily_compatible().
     - Flushes in-process impression buffer to PostgreSQL.
+    - Reaper tasks ported from ephemeral_reaper (formerly dead Celery tasks): storage purge,
+      DPDP-compliant user hard-delete, stale payment intent cleanup.
     """
     from datetime import datetime, timezone
     from app.core.database import get_pool
+
+    _mlog = logging.getLogger("app.maintenance")
 
     while True:
         try:
@@ -56,61 +60,149 @@ async def _periodic_maintenance_loop() -> None:
             pool = get_pool()
             needs_daily_batch = False
             async with pool.acquire() as conn:
-                # 1. Downgrade expired subscriptions (Pure SQL)
+                # 1. Downgrade expired subscriptions (BUG-006 fix: subscription_valid_until)
+                # BUG-008 fix: also reset super_connect_credits=0 and NULL out valid_until
                 await conn.execute("""
                     UPDATE users
-                    SET subscription_tier = 'free'
-                    WHERE subscription_expires_at IS NOT NULL
-                      AND subscription_expires_at < NOW()
-                      AND subscription_tier != 'free'
+                       SET subscription_tier       = 'free',
+                           subscription_valid_until = NULL,
+                           super_connect_credits    = 0,
+                           updated_at               = NOW()
+                     WHERE subscription_valid_until IS NOT NULL
+                       AND subscription_valid_until < NOW()
+                       AND subscription_tier != 'free'
                 """)
                 await conn.execute("""
                     UPDATE store_subscriptions
-                    SET status = 'expired'
-                    WHERE expires_at IS NOT NULL
-                      AND expires_at < NOW()
-                      AND status = 'active'
+                       SET status = 'expired'
+                     WHERE expires_at IS NOT NULL
+                       AND expires_at < NOW()
+                       AND status = 'active'
                 """)
 
-                # 2. Reap stale matches (Pure SQL)
-                await conn.execute("""
+                # 2. Reap stale matches (BUG-006 fix: correct column COALESCE + valid status set)
+                # Original had nonexistent matches.expires_at and invalid status 'pending'
+                expired_match_rows = await conn.fetch("""
                     UPDATE matches
-                    SET status = 'expired'
-                    WHERE expires_at IS NOT NULL
-                      AND expires_at < NOW()
-                      AND status IN ('pending', 'active')
+                       SET status     = 'expired',
+                           expired_at = NOW()
+                     WHERE status IN ('active', 'matched')
+                       AND COALESCE(last_message_at, created_at) < NOW() - INTERVAL '7 days'
+                    RETURNING id
                 """)
+                if expired_match_rows:
+                    exp_ids = [r["id"] for r in expired_match_rows]
+                    await conn.execute(
+                        "UPDATE chats SET is_unmatched = TRUE, updated_at = NOW() WHERE match_id = ANY($1::uuid[])",
+                        exp_ids,
+                    )
+                    _mlog.info("maintenance: expired %d stale matches", len(expired_match_rows))
 
                 # 3. Daily 500 MB Auto-Prune Engine (OPTIMIZE.md §3.2)
                 await conn.execute("""
                     DELETE FROM interactions
-                    WHERE action_type = 'pass'
-                      AND created_at < NOW() - INTERVAL '45 days'
+                     WHERE action_type = 'pass'
+                       AND created_at < NOW() - INTERVAL '45 days'
                 """)
                 await conn.execute("""
                     DELETE FROM admin_audit_log
-                    WHERE created_at < NOW() - INTERVAL '90 days'
+                     WHERE created_at < NOW() - INTERVAL '90 days'
                 """)
                 await conn.execute("""
                     DELETE FROM telemetry_events
-                    WHERE created_at < NOW() - INTERVAL '30 days'
+                     WHERE created_at < NOW() - INTERVAL '30 days'
                 """)
 
-                # 4. Check if today's Gale-Shapley matching batch has executed
+                # 4. Mark stranded processing/pending media as rejected (>30 min timeout)
+                await conn.execute("""
+                    UPDATE user_media
+                       SET status = 'rejected', rejection_reason = 'PROCESSING_TIMEOUT'
+                     WHERE status IN ('processing', 'pending')
+                       AND created_at < NOW() - INTERVAL '30 minutes'
+                """)
+
+                # 5. Expire stale payment intents (>24h uncaptured)
+                await conn.execute("""
+                    UPDATE payment_intents
+                       SET status = 'expired', updated_at = NOW()
+                     WHERE status = 'created'
+                       AND created_at < NOW() - INTERVAL '24 hours'
+                """)
+
+                # 6. DPDP-compliant hard-delete of users soft-deleted >30 days ago
+                dpdp_rows = await conn.fetch("""
+                    SELECT id FROM users
+                     WHERE account_status = 'deleted'
+                       AND deleted_at < NOW() - INTERVAL '30 days'
+                       AND (subscription_tier = 'free'
+                            OR subscription_valid_until IS NULL
+                            OR subscription_valid_until < NOW())
+                     LIMIT 100
+                """)
+                if dpdp_rows:
+                    dpdp_ids = [r["id"] for r in dpdp_rows]
+                    await conn.execute(
+                        "DELETE FROM users WHERE id = ANY($1::uuid[])",
+                        dpdp_ids,
+                    )
+                    _mlog.info("maintenance: DPDP hard-deleted %d users", len(dpdp_ids))
+
+                # 7. Purge stale location waitlist entries >90 days
+                try:
+                    await conn.execute("""
+                        DELETE FROM location_waitlist
+                         WHERE created_at < NOW() - INTERVAL '90 days'
+                    """)
+                except Exception as exc:
+                    _mlog.warning("maintenance: location_waitlist purge failed: %s", exc)
+
+                # 8. Purge rejected/pending user_media objects from Supabase Storage
+                purge_rows = await conn.fetch("""
+                    SELECT id, s3_key FROM user_media
+                     WHERE status IN ('rejected', 'pending')
+                       AND created_at < NOW() - INTERVAL '1 hour'
+                       AND s3_purged = FALSE
+                     LIMIT 200
+                """)
+                if purge_rows:
+                    keys_to_delete = [r["s3_key"] for r in purge_rows if r.get("s3_key")]
+                    purged_ids = []
+                    if keys_to_delete:
+                        try:
+                            from app.services.media_processor import _get_supabase
+                            from app.core.config import settings as _cfg
+                            client = _get_supabase()
+                            await asyncio.to_thread(
+                                client.storage.from_(_cfg.supabase_storage_bucket).remove,
+                                keys_to_delete,
+                            )
+                            purged_ids = [r["id"] for r in purge_rows if r.get("s3_key") in keys_to_delete]
+                        except Exception as exc:
+                            _mlog.warning("maintenance: Supabase storage purge failed: %s", exc)
+                    # Mark rows with no s3_key as purged too
+                    purged_ids += [r["id"] for r in purge_rows if not r.get("s3_key")]
+                    if purged_ids:
+                        await conn.execute(
+                            "UPDATE user_media SET s3_purged = TRUE WHERE id = ANY($1::uuid[])",
+                            purged_ids,
+                        )
+                    _mlog.info("maintenance: storage purge attempted %d media rows", len(purge_rows))
+
+                # 9. Check if today's Gale-Shapley matching batch has executed
                 today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
                 latest_run = await conn.fetchval("SELECT MAX(generated_at) FROM feed_queues")
                 needs_daily_batch = (latest_run is None) or (latest_run < today_start)
 
             if needs_daily_batch:
-                logging.getLogger("app.maintenance").info("Executing daily Gale-Shapley matching pipeline...")
+                _mlog.info("Executing daily Gale-Shapley matching pipeline...")
                 from app.workers.daily_compatible import run_daily_compatible
                 await run_daily_compatible()
 
-            # 4. Flush in-process impression buffer
+            # 10. Flush in-process impression buffer
             from app.services.core_people_finder import _async_flush_impressions
             await _async_flush_impressions(pool, force=True)
 
-            # 5. Flush in-process telemetry event buffer + dwell vector queue
+            # 11. Flush in-process telemetry event buffer + dwell vector queue
             from app.routers.telemetry import _async_flush_telemetry
             await _async_flush_telemetry(pool)
 
@@ -118,6 +210,7 @@ async def _periodic_maintenance_loop() -> None:
             break
         except Exception as exc:
             logging.getLogger("app.maintenance").warning("Periodic maintenance cycle encountered error: %s", exc)
+
 
 
 async def _supabase_keepalive_worker() -> None:

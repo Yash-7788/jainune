@@ -182,7 +182,7 @@ async def confirm_upload(
 
     enqueue_task(
         run_photo_moderation(body.media_id, uuid.UUID(str(user_id)), pool=db),
-        task_name=f"moderate_photo_{body.media_id}",
+        name=f"moderate_photo_{body.media_id}",
     )
 
     return {"success": True, "status": "pending", "media_id": body.media_id, "cdn_url": cdn_url}
