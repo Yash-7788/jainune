@@ -284,7 +284,7 @@ export async function apiDelete<T = unknown>(
 }
 
 /**
- * Upload a file directly to a presigned S3 URL (bypasses axios client — no auth header).
+ * Upload a file directly to a presigned storage URL (bypasses axios client — no auth header).
  * Content-Type must exactly match what the presign URL was generated for.
  */
 export async function uploadToPresignedUrl(
@@ -304,7 +304,7 @@ export async function uploadToPresignedUrl(
         parameters: presignedFields,
       });
       if (uploadRes.status >= 400) {
-        throw new Error(`S3 upload failed: ${uploadRes.status}`);
+        throw new Error(`Storage upload failed: ${uploadRes.status}`);
       }
       return;
     }
@@ -315,11 +315,11 @@ export async function uploadToPresignedUrl(
       headers: { "Content-Type": contentType },
     });
     if (uploadRes.status >= 400) {
-      throw new Error(`S3 upload failed: ${uploadRes.status}`);
+      throw new Error(`Storage upload failed: ${uploadRes.status}`);
     }
     return;
   } catch (fsErr: any) {
-    if (fsErr?.message?.includes("S3 upload failed")) throw fsErr;
+    if (fsErr?.message?.includes("Storage upload failed")) throw fsErr;
     // Fallback to fetch blob if FileSystem uploadAsync is unavailable
     const response = await fetch(fileUri);
     const blob = await response.blob();
@@ -335,7 +335,7 @@ export async function uploadToPresignedUrl(
         body: formData,
       });
       if (!uploadResponse.ok) {
-        throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+        throw new Error(`Storage upload failed: ${uploadResponse.status}`);
       }
       return;
     }
@@ -347,7 +347,7 @@ export async function uploadToPresignedUrl(
     });
 
     if (!uploadResponse.ok) {
-      throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+      throw new Error(`Storage upload failed: ${uploadResponse.status}`);
     }
   }
 }

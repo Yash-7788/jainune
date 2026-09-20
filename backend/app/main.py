@@ -81,7 +81,22 @@ async def _periodic_maintenance_loop() -> None:
                       AND status IN ('pending', 'active')
                 """)
 
-                # 3. Check if today's Gale-Shapley matching batch has executed
+                # 3. Daily 500 MB Auto-Prune Engine (OPTIMIZE.md §3.2)
+                await conn.execute("""
+                    DELETE FROM interactions
+                    WHERE action_type = 'pass'
+                      AND created_at < NOW() - INTERVAL '45 days'
+                """)
+                await conn.execute("""
+                    DELETE FROM admin_audit_log
+                    WHERE created_at < NOW() - INTERVAL '90 days'
+                """)
+                await conn.execute("""
+                    DELETE FROM telemetry_events
+                    WHERE created_at < NOW() - INTERVAL '30 days'
+                """)
+
+                # 4. Check if today's Gale-Shapley matching batch has executed
                 today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
                 latest_run = await conn.fetchval("SELECT MAX(generated_at) FROM feed_queues")
                 needs_daily_batch = (latest_run is None) or (latest_run < today_start)
@@ -179,6 +194,8 @@ app.add_middleware(
         "X-Turnstile-Token",
         "X-Client-Platform",
         "X-App-Version",
+        "X-Edge-Secret",
+        "X-Origin-Secret",
     ],
 )
 
@@ -198,6 +215,10 @@ async def add_security_headers(request: Request, call_next):
         "magnetometer=(), microphone=(), payment=(), usb=()"
     )
     req_path = getattr(getattr(request, "url", None), "path", "")
+    if isinstance(req_path, str) and (req_path.startswith("/v1/") or req_path.startswith("/api/")):
+        response.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, private")
+        response.headers.setdefault("Pragma", "no-cache")
+
     if isinstance(req_path, str) and (
         req_path.startswith("/legal") or req_path in (
             "/privacy", "/terms", "/child-safety", "/community-guidelines", "/delete-account"

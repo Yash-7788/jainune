@@ -36,7 +36,6 @@
       ],
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Jainune uses your approximate location to connect you with nearby verified Jain singles in your region.",
-        "NSMicrophoneUsageDescription": "Jainune requires microphone access to record your 7-second voice snapshot and audio sparks.",
         "NSCameraUsageDescription": "Jainune requires camera access for selfie verification.",
         "NSPhotoLibraryUsageDescription": "Jainune needs access to your gallery to upload profile photos."
       }
@@ -51,7 +50,6 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "CAMERA",
-        "RECORD_AUDIO",
         "POST_NOTIFICATIONS",
         "ACCESS_NETWORK_STATE",
         "VIBRATE",

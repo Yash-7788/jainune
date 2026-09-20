@@ -160,7 +160,7 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
     # 3. Single media deletion durable retry
     # -----------------------------------------------------------------------
     async def test_03_single_media_delete_failed_s3_retries(self):
-        """If S3 deletion fails during single media delete, failed keys are enqueued into Redis."""
+        """Single media delete calls delete_user_avatar and cleans up database."""
         from app.routers.media import delete_media
 
         media_id = uuid.uuid4()
@@ -175,28 +175,17 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         mock_db.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_db.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        mock_redis = AsyncMock()
-        sadd_calls = []
-        async def mock_sadd(key, *members):
-            sadd_calls.append((key, members))
-            return len(members)
-        mock_redis.sadd = AsyncMock(side_effect=mock_sadd)
-
-        # Simulate S3 delete failure returning failed keys
-        with patch("app.services.account_service._delete_s3_keys_sync", return_value=["media/user/photo.jpg"]):
-            res = await delete_media(media_id=media_id, current_user=current_user, db=mock_db, redis=mock_redis)
+        with patch("app.services.media_processor.delete_user_avatar", new_callable=AsyncMock) as mock_del:
+            res = await delete_media(media_id=media_id, current_user=current_user, db=mock_db)
 
         self.assertTrue(res["success"])
-        # Verify failed key was enqueued to Redis retry set
-        self.assertEqual(len(sadd_calls), 1)
-        self.assertEqual(sadd_calls[0][0], "s3:failed_deletions")
-        self.assertIn("media/user/photo.jpg", sadd_calls[0][1])
+        mock_del.assert_called_once_with(str(user_id))
 
     # -----------------------------------------------------------------------
-    # 4. Ephemeral reaper S3 partial failure handling
+    # 4. Ephemeral reaper Supabase storage partial failure handling
     # -----------------------------------------------------------------------
     async def test_04_ephemeral_reaper_s3_partial_failure_handling(self):
-        """Media reaper only updates s3_purged = TRUE for confirmed S3 deletions, enqueuing failed keys."""
+        """Media reaper only updates s3_purged = TRUE for confirmed Supabase storage deletions."""
         from app.workers.ephemeral_reaper import reap_ephemeral_media
 
         id1 = uuid.uuid4()
@@ -211,20 +200,6 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         mock_conn.fetch = AsyncMock(return_value=rows)
         mock_conn.close = AsyncMock()
 
-        mock_s3 = MagicMock()
-        # Simulate partial delete response: id1 succeeded, id2 failed
-        mock_s3.delete_objects.return_value = {
-            "Deleted": [{"Key": "quarantine/success.jpg"}],
-            "Errors": [{"Key": "quarantine/failed.jpg", "Code": "InternalError", "Message": "S3 failure"}],
-        }
-
-        mock_redis = AsyncMock()
-        retry_keys_added = []
-        async def mock_sadd(key, *members):
-            retry_keys_added.extend(members)
-            return len(members)
-        mock_redis.sadd = AsyncMock(side_effect=mock_sadd)
-
         updated_purged_ids = []
         async def mock_execute(sql, *args):
             if "UPDATE user_media SET s3_purged = TRUE" in sql:
@@ -234,17 +209,14 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
 
         captured_coros = []
         with patch("app.workers.ephemeral_reaper._get_conn", AsyncMock(return_value=mock_conn)), \
-             patch("app.workers.ephemeral_reaper._s3_client", return_value=mock_s3), \
-             patch("app.core.redis.get_redis", return_value=mock_redis), \
+             patch("app.workers.ephemeral_reaper._supabase_remove_keys", return_value=["quarantine/success.jpg"]), \
              patch("app.workers.ephemeral_reaper.run_worker_task", side_effect=lambda coro: captured_coros.append(coro)):
             reap_ephemeral_media()
             self.assertEqual(len(captured_coros), 1)
             await captured_coros[0]
 
-        # Confirm failed key was persisted to retry set
-        self.assertIn("quarantine/failed.jpg", retry_keys_added)
         # Confirm ONLY id1 was marked s3_purged = TRUE
-        self.assertIn(id1, updated_purged_ids)
+        self.assertEqual(updated_purged_ids, [id1])
         self.assertNotIn(id2, updated_purged_ids)
 
 
@@ -447,12 +419,13 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         mod_mock.moderation_type = None
         mod_mock.moderation_disclaimer = None
 
-        with patch("app.services.chat_safety_filter.filter_chat_content", AsyncMock(return_value=mod_mock)):
+        with patch("app.services.chat_safety_filter.filter_chat_content", AsyncMock(return_value=mod_mock)), \
+             patch("app.routers.chats.ws_manager.broadcast_chat", new_callable=AsyncMock) as mock_broadcast:
             await send_message(chat_id=chat_id, body=body, current_user=current_user, db=mock_db, redis=mock_redis)
 
-        # Confirm message was published exactly once to canonical channel
-        self.assertEqual(len(published_channels), 1)
-        self.assertEqual(published_channels[0], f"chat:{chat_id}")
+        # Confirm message was broadcast via in-process ws_manager to canonical chat
+        mock_broadcast.assert_called_once()
+        self.assertEqual(mock_broadcast.call_args[0][0], str(chat_id))
 
     # -----------------------------------------------------------------------
     # 9. Location waitlist identity binding strictly to authenticated phone
@@ -539,20 +512,8 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
         mock_redis.delete = AsyncMock(return_value=True)
 
         published_messages = []
-        async def mock_publish(channel, payload_str):
-            published_messages.append((channel, json.loads(payload_str)))
-            return 1
-        mock_redis.publish = AsyncMock(side_effect=mock_publish)
-
-        mock_pubsub = MagicMock()
-        mock_pubsub.subscribe = AsyncMock()
-        mock_pubsub.unsubscribe = AsyncMock()
-        mock_pubsub.close = AsyncMock()
-        async def empty_listen():
-            if False:
-                yield {}
-        mock_pubsub.listen = empty_listen
-        mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+        async def mock_broadcast(channel, frame, exclude_user_id=None):
+            published_messages.append((channel, frame))
 
         mock_conn = AsyncMock()
         async def mock_fetchrow(query, *args):
@@ -573,6 +534,7 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.routers.websockets.get_pool", return_value=mock_pool), \
              patch("app.routers.websockets.get_redis", return_value=mock_redis), \
+             patch("app.routers.websockets.ws_manager.broadcast_chat", side_effect=mock_broadcast), \
              patch("app.routers.websockets.sliding_window_rate_limit", AsyncMock()):
             await websocket_chat(websocket=mock_ws, chat_id=chat_id, ticket="valid_ticket")
 
@@ -581,14 +543,14 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
 
         # 1. Typing frame: spoofed sender_id MUST BE OVERWRITTEN by authenticated user_id
         chan1, msg1 = published_messages[0]
-        self.assertEqual(chan1, f"chat:{chat_id}")
+        self.assertEqual(chan1, str(chat_id))
         self.assertEqual(msg1["type"], "typing")
         self.assertEqual(msg1["payload"]["sender_id"], str(user_id))
         self.assertNotEqual(msg1["payload"]["sender_id"], str(spoofed_id))
 
         # 2. Read receipt frame: spoofed sender_id MUST BE OVERWRITTEN and message_id preserved
         chan2, msg2 = published_messages[1]
-        self.assertEqual(chan2, f"chat:{chat_id}")
+        self.assertEqual(chan2, str(chat_id))
         self.assertEqual(msg2["type"], "read_receipt")
         self.assertEqual(msg2["payload"]["sender_id"], str(user_id))
         self.assertEqual(msg2["payload"]["message_id"], "msg-123")
@@ -596,7 +558,7 @@ class TestDeepAuditRound7Hardening(unittest.IsolatedAsyncioTestCase):
 
         # 3. None payload frame: defaults safely to empty dict + authenticated sender_id
         chan3, msg3 = published_messages[2]
-        self.assertEqual(chan3, f"chat:{chat_id}")
+        self.assertEqual(chan3, str(chat_id))
         self.assertEqual(msg3["type"], "typing")
         self.assertEqual(msg3["payload"]["sender_id"], str(user_id))
 

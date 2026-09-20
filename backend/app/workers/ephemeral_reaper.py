@@ -35,9 +35,6 @@ MATCH_EXPIRY_DAYS = 7          # matches auto-expire after 7 days of silence
 EXPIRY_WARN_HOURS = 25         # warn users 25h before expiry (catches the 24h window)
 
 
-def _s3_client():
-    """Legacy AWS S3 client stub; returns None in Supabase mode."""
-    return None
 DELETED_USER_RETENTION_DAYS = 30
 
 

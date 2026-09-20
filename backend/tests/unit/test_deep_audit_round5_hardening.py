@@ -18,12 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 from datetime import datetime, timezone, timedelta
 
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions", "celery", "celery.schedules"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
-
-import app.celery_app
-app.celery_app.celery_app.task = lambda *args, **kwargs: (lambda fn: fn)
 
 from fastapi import HTTPException
 from app.routers.auth import verify_otp_endpoint, refresh_token_endpoint
@@ -113,14 +110,17 @@ class TestDeepAuditRound5Hardening(unittest.IsolatedAsyncioTestCase):
         """Token refresh for banned user raises 403 and immediately deletes refresh tokens from DB."""
         pool, conn = _mock_async_pool_and_conn()
         uid = uuid.uuid4()
-        conn.fetchrow.return_value = {
-            "user_id": uid,
-            "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
-            "u_id": uid,
-            "account_status": "banned",
-            "deleted_at": None,
-            "suspend_until": None,
-        }
+        conn.fetchrow.side_effect = [
+            None,
+            {
+                "user_id": uid,
+                "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+                "u_id": uid,
+                "account_status": "banned",
+                "deleted_at": None,
+                "suspend_until": None,
+            },
+        ]
         mock_redis = MagicMock()
         mock_pipe = MagicMock()
         mock_pipe.execute = AsyncMock(return_value=[0, 1, 1, True])
@@ -256,6 +256,7 @@ class TestDeepAuditRound5Hardening(unittest.IsolatedAsyncioTestCase):
         uid = uuid.uuid4()
         conn.fetchrow.return_value = {
             "id": uid,
+            "phone_number": "+919876543210",
             "onboarding_completed": True,
             "account_status": "banned",
             "deleted_at": None,
@@ -271,9 +272,11 @@ class TestDeepAuditRound5Hardening(unittest.IsolatedAsyncioTestCase):
         mock_redis.get = AsyncMock(return_value=stored_hash.encode())
         mock_redis.delete = AsyncMock(return_value=1)
 
+        mock_request = MagicMock()
+        mock_request.headers = {}
         body = EmailOTPVerifyBody(email=email, otp=otp)
         with self.assertRaises(HTTPException) as ctx:
-            await verify_email_otp(body=body, db=pool, redis=mock_redis)
+            await verify_email_otp(body=body, request=mock_request, db=pool, redis=mock_redis)
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("permanently banned", ctx.exception.detail)
 

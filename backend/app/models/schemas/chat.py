@@ -23,7 +23,6 @@ class ChatThread(BaseModel):
 CANONICAL_MESSAGE_TYPES = frozenset({
     "text",
     "photo",
-    "voice",
     "gif",
     "dilemma_invite",
     "bounty",
@@ -36,7 +35,7 @@ class ChatMessage(BaseModel):
     id: uuid.UUID
     chat_id: uuid.UUID
     sender_id: uuid.UUID
-    message_type: str  # "text" | "photo" | "voice" | "gif" | "dilemma_invite" | "bounty" | "date_card" | "exit"
+    message_type: str  # "text" | "photo" | "gif" | "dilemma_invite" | "bounty" | "date_card" | "exit"
     content: Optional[str] = None
     media_url: Optional[str] = None
     is_read: bool = False
@@ -67,12 +66,15 @@ class SendMessageRequest(BaseModel):
         if self.media_id and not self.media_url:
             self.media_url = self.media_id
 
+        if self.message_type == "voice":
+            raise ValueError("Voice messages are deprecated and disabled in Jainune v2.")
+
         if self.message_type not in CANONICAL_MESSAGE_TYPES:
             raise ValueError(f"Invalid message_type: {self.message_type}. Allowed: {sorted(CANONICAL_MESSAGE_TYPES)}")
 
         if self.message_type == "text" and not (self.content and self.content.strip()):
             raise ValueError("content required for text messages")
-        if self.message_type in ("photo", "voice", "gif") and not (self.media_url or self.media_id):
+        if self.message_type in ("photo", "gif") and not (self.media_url or self.media_id):
             raise ValueError("media_url or media_id required for media messages")
 
 

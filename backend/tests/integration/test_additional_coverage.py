@@ -215,7 +215,7 @@ async def test_media_status_and_delete(authed_client, mock_pool, fake_redis):
     }
     conn.execute.return_value = "DELETE 1"
 
-    with patch("app.services.account_service._delete_s3_keys_sync", return_value=None):
+    with patch("app.services.media_processor.delete_user_avatar", new_callable=AsyncMock):
         resp_status = await client.get(f"/v1/media/status/{mid}")
         assert resp_status.status_code == 200
         assert resp_status.json()["status"] == "approved"
@@ -356,6 +356,23 @@ async def test_chat_messages_read_unmatch(authed_client, mock_pool, fake_redis):
     resp = await client.get(f"/v1/chats/{chat_id}/messages")
     assert resp.status_code == 200
     assert len(resp.json()["messages"]) == 1
+
+    # Test forward delta sync (since_id)
+    delta_msg_id = resp.json()["messages"][0]["id"]
+    conn.fetchrow.return_value = {
+        "id": chat_id,
+        "participant_1_id": user_id,
+        "participant_2_id": other_id,
+        "is_unmatched": False,
+        "is_expired": False,
+        "expires_at": None,
+        "match_id": uuid.uuid4(),
+        "created_at": datetime.now(timezone.utc),
+    }
+    conn.fetch.return_value = []
+    resp_delta = await client.get(f"/v1/chats/{chat_id}/messages?since_id={delta_msg_id}")
+    assert resp_delta.status_code == 200
+    assert len(resp_delta.json()["messages"]) == 0
 
     resp_read = await client.post(f"/v1/chats/{chat_id}/read")
     assert resp_read.status_code == 204

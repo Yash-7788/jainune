@@ -200,9 +200,9 @@ export async function submitStep19(mediaIds: string[]): Promise<OnboardingStatus
 }
 
 // Step 20: voice snapshot media_id
-export async function submitStep20(mediaId: string): Promise<OnboardingStatus> {
+export async function submitStep20(mediaId?: string): Promise<OnboardingStatus> {
   const res = await apiPatch<OnboardingStatus>("/onboarding/step/20", {
-    media_id: mediaId,
+    media_id: mediaId ?? null,
   });
   if (!res.success) throw { _apiError: res.error };
   return res.data;
@@ -239,7 +239,7 @@ export async function submitStep22(): Promise<OnboardingStatus> {
 
 // POST /v1/media/upload/request (Supabase signed URL)
 export async function getPresignedUploadUrl(
-  type: "photo" | "voice",
+  type: "photo" = "photo",
   position?: number,
   fileSizeBytes: number = 15360,
   contentType: string = "image/webp"
@@ -250,7 +250,6 @@ export async function getPresignedUploadUrl(
     presigned_url?: string;
     cdn_url?: string;
     path?: string;
-    s3_key?: string;
     presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
     media_type: "photo",
@@ -264,13 +263,13 @@ export async function getPresignedUploadUrl(
   return {
     media_id: res.data.media_id,
     upload_url: res.data.signed_url || res.data.presigned_url || "",
-    cdn_url: res.data.cdn_url || (res.data.s3_key ? `https://cdn.jainune.com/${res.data.s3_key}` : ""),
+    cdn_url: res.data.cdn_url || "",
     presigned_fields: res.data.presigned_fields,
   };
 }
 
-// Upload to S3 directly via presigned URL (clean binary PUT or multipart POST)
-export async function uploadToS3(
+// Upload to storage directly via signed URL (clean binary PUT or multipart POST)
+export async function uploadToStorage(
   uploadUrl: string,
   fileUri: string,
   mimeType: string,
@@ -278,6 +277,7 @@ export async function uploadToS3(
 ): Promise<void> {
   await uploadToPresignedUrl(uploadUrl, fileUri, mimeType, presignedFields);
 }
+export const uploadToS3 = uploadToStorage;
 
 // POST /v1/media/upload/confirm
 export async function confirmUpload(mediaId: string): Promise<void> {

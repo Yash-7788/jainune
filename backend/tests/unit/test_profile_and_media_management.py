@@ -20,12 +20,8 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = MagicMock()
 if "redis.asyncio" not in sys.modules:
     sys.modules["redis.asyncio"] = MagicMock()
-if "boto3" not in sys.modules:
-    sys.modules["boto3"] = MagicMock()
-if "botocore" not in sys.modules:
-    sys.modules["botocore"] = MagicMock()
-if "botocore.config" not in sys.modules:
-    sys.modules["botocore.config"] = MagicMock()
+if "supabase" not in sys.modules:
+    sys.modules["supabase"] = MagicMock()
 
 from app.models.schemas.user import (
     MediaPositionItem,

@@ -13,8 +13,8 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-if "botocore.config" not in sys.modules:
-    sys.modules["botocore.config"] = MagicMock()
+if "supabase" not in sys.modules:
+    sys.modules["supabase"] = MagicMock()
 
 from app.core.config import Settings
 
@@ -52,84 +52,49 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
     # -----------------------------------------------------------------------
     # R8-2: Media moderation race condition protection
     # -----------------------------------------------------------------------
-    @patch("app.services.media_processor._check_s3_size", return_value=(True, None))
-    @patch("app.services.media_processor.get_pool")
-    @patch("app.services.media_processor._rekognition_check")
-    @patch("app.services.media_processor._delete_from_quarantine")
-    async def test_02_media_moderation_guard_prevents_overwrite(
-        self, mock_del_quarantine, mock_rekog, mock_get_pool, mock_s3_size
-    ):
-        """If media status was already changed, rejection should not downgrade user status."""
-        from app.services.media_processor import _run_moderation
+    async def test_02_media_moderation_guard_prevents_overwrite(self):
+        """If media status was already resolved, moderation guard prevents overwrite."""
+        from app.services.moderation import run_photo_moderation
 
-        mock_rekog.return_value = ("rejected", "EXPLICIT_CONTENT")
+        photo_id = uuid.uuid4()
+        user_id = uuid.uuid4()
 
-        executed_queries = []
         mock_conn = AsyncMock()
-
-        async def track_execute(query, *args):
-            executed_queries.append((query, args))
-            # Simulate race: row is already approved, so 0 rows updated
-            if "UPDATE user_media" in query:
-                return "UPDATE 0"
-            return "UPDATE 1"
-
-        mock_conn.execute.side_effect = track_execute
-        mock_conn.fetchval.return_value = 0
-
+        mock_conn.fetchrow.return_value = {
+            "id": photo_id,
+            "user_id": user_id,
+            "status": "approved",
+            "cdn_url": "https://cdn.jainune.com/avatar.webp",
+        }
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__.return_value = mock_conn
         mock_ctx.__aexit__.return_value = None
-        mock_db = MagicMock()
-        mock_db.acquire.return_value = mock_ctx
-        mock_get_pool.return_value = mock_db
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value = mock_ctx
 
-        media_id = uuid.uuid4()
+        res = await run_photo_moderation(photo_id, user_id, pool=mock_pool)
+        self.assertTrue(res.is_safe)
+        self.assertEqual(res.reason, "Already approved")
+        mock_conn.execute.assert_not_called()
+
+    async def test_02b_s3_size_failure_guard(self):
+        """If photo record does not exist, moderation gracefully returns failure."""
+        from app.services.moderation import run_photo_moderation
+
+        photo_id = uuid.uuid4()
         user_id = uuid.uuid4()
 
-        await _run_moderation(media_id, "uploads/pic.jpg", "photo", user_id)
-
-        # Confirm UPDATE query included AND status = 'processing'
-        media_updates = [q for q, args in executed_queries if "UPDATE user_media" in q and "status = 'rejected'" in q]
-        self.assertTrue(len(media_updates) >= 1)
-        self.assertIn("status = 'processing'", media_updates[0])
-
-        # Confirm users table was NOT downgraded to pending_media because UPDATE returned "UPDATE 0"
-        downgrade_updates = [q for q, args in executed_queries if "pending_media" in q]
-        self.assertEqual(len(downgrade_updates), 0)
-
-    @patch("app.services.media_processor._check_s3_size", return_value=(False, "File too large"))
-    @patch("app.services.media_processor.get_pool")
-    @patch("app.services.media_processor._delete_from_quarantine")
-    async def test_02b_s3_size_failure_guard(
-        self, mock_del_quarantine, mock_get_pool, mock_s3_size
-    ):
-        """S3 size failure rejection query must also include status = 'processing' guard."""
-        from app.services.media_processor import _run_moderation
-
-        executed_queries = []
         mock_conn = AsyncMock()
-
-        async def track_execute(query, *args):
-            executed_queries.append((query, args))
-            return "UPDATE 1"
-
-        mock_conn.execute.side_effect = track_execute
+        mock_conn.fetchrow.return_value = None
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__.return_value = mock_conn
         mock_ctx.__aexit__.return_value = None
-        mock_db = MagicMock()
-        mock_db.acquire.return_value = mock_ctx
-        mock_get_pool.return_value = mock_db
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value = mock_ctx
 
-        media_id = uuid.uuid4()
-        user_id = uuid.uuid4()
-
-        await _run_moderation(media_id, "uploads/pic.jpg", "photo", user_id)
-
-        media_updates = [q for q, args in executed_queries if "UPDATE user_media" in q and "status = 'rejected'" in q]
-        self.assertTrue(len(media_updates) >= 1)
-        self.assertIn("status = 'processing'", media_updates[0])
+        res = await run_photo_moderation(photo_id, user_id, pool=mock_pool)
+        self.assertIsNone(res.is_safe)
+        self.assertEqual(res.reason, "Photo not found")
 
     # -----------------------------------------------------------------------
     # R8-3: Account soft-delete user_devices push notification token purging
@@ -212,114 +177,98 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("man", query_args)
 
     # -----------------------------------------------------------------------
-    # FINDING-01: Auto-assign free slot & prevent slot 1 overwrite
+    # FINDING-01: Supabase avatar signed upload URL and overwrite
     # -----------------------------------------------------------------------
-    @patch("boto3.client")
-    async def test_05_upload_request_auto_assigns_free_slot(self, mock_boto):
-        """When position is None, request_upload auto-assigns next free slot (e.g. 2 when 1 is occupied)."""
+    @patch("app.routers.media.generate_supabase_upload_signed_url")
+    @patch("app.routers.media.sliding_window_rate_limit", AsyncMock())
+    async def test_05_upload_request_auto_assigns_free_slot(self, mock_gen_url):
+        """request_upload assigns avatar slot 1 and returns Supabase signed URL."""
         from app.routers.media import request_upload, UploadRequestBody
 
-        mock_s3 = MagicMock()
-        mock_s3.generate_presigned_post.return_value = {"url": "https://s3.example.com", "fields": {}}
-        mock_boto.return_value = mock_s3
+        mock_gen_url.return_value = {
+            "signed_url": "https://supabase.co/signed/avatar.webp",
+            "path": "user1/avatar.webp",
+            "cdn_url": "https://cdn.jainune.com/avatar.webp",
+        }
 
         executed_inserts = []
         mock_conn = AsyncMock()
 
-        async def track_fetch(query, *args):
-            if "SELECT position, status" in query:
-                return [{"position": 1, "status": "approved", "s3_key": "uploads/u1/photo/m1.jpg"}]
-            return []
-
         async def track_execute(query, *args):
-            if "INSERT INTO user_media" in query:
+            if "INSERT INTO user_photos" in query:
                 executed_inserts.append(args)
             return "INSERT 1"
 
-        mock_conn.fetch.side_effect = track_fetch
         mock_conn.execute.side_effect = track_execute
-        mock_tx = AsyncMock()
-        mock_tx.__aenter__.return_value = mock_tx
-        mock_tx.__aexit__.return_value = None
-        mock_conn.transaction = MagicMock(return_value=mock_tx)
-
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__.return_value = mock_conn
         mock_ctx.__aexit__.return_value = None
         mock_db = MagicMock()
         mock_db.acquire.return_value = mock_ctx
 
-        current_user = {"id": uuid.uuid4(), "role": "user"}
+        user_id = uuid.uuid4()
+        current_user = {"user_id": str(user_id)}
         mock_redis = AsyncMock()
 
         body = UploadRequestBody(
             media_type="photo",
-            content_type="image/jpeg",
-            file_size_bytes=1024 * 500,
-            position=None,
+            content_type="image/webp",
+            file_size_bytes=1024 * 10,
         )
 
         res = await request_upload(body, current_user, mock_db, mock_redis)
         self.assertIsNotNone(res.media_id)
+        self.assertEqual(res.signed_url, "https://supabase.co/signed/avatar.webp")
         self.assertEqual(len(executed_inserts), 1)
-        # Position is argument $5 in INSERT query
-        target_pos = executed_inserts[0][4]
-        self.assertEqual(target_pos, 2)
+        self.assertEqual(executed_inserts[0][2], f"{user_id}/avatar.webp")
 
-    @patch("app.services.media_processor._delete_from_quarantine")
-    @patch("boto3.client")
-    async def test_06_upload_request_cleans_up_replaced_s3_key(self, mock_boto, mock_del_quarantine):
-        """Explicit slot replacement deletes old quarantined S3 object to prevent orphaning."""
+    @patch("app.routers.media.generate_supabase_upload_signed_url")
+    @patch("app.routers.media.sliding_window_rate_limit", AsyncMock())
+    async def test_06_upload_request_cleans_up_replaced_s3_key(self, mock_gen_url):
+        """request_upload upserts avatar slot to overwrite previous upload intent."""
         from app.routers.media import request_upload, UploadRequestBody
 
-        mock_s3 = MagicMock()
-        mock_s3.generate_presigned_post.return_value = {"url": "https://s3.example.com", "fields": {}}
-        mock_boto.return_value = mock_s3
+        mock_gen_url.return_value = {
+            "signed_url": "https://supabase.co/signed/new.webp",
+            "path": "user1/avatar.webp",
+            "cdn_url": "https://cdn.jainune.com/avatar.webp",
+        }
 
+        executed_queries = []
         mock_conn = AsyncMock()
 
-        async def track_fetch(query, *args):
-            if "SELECT position, status" in query:
-                return [{"position": 1, "status": "pending", "s3_key": "uploads/u1/photo/old_pic.jpg"}]
-            return []
+        async def track_execute(query, *args):
+            executed_queries.append(query)
+            return "INSERT 1"
 
-        mock_conn.fetch.side_effect = track_fetch
-        mock_tx = AsyncMock()
-        mock_tx.__aenter__.return_value = mock_tx
-        mock_tx.__aexit__.return_value = None
-        mock_conn.transaction = MagicMock(return_value=mock_tx)
-
+        mock_conn.execute.side_effect = track_execute
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__.return_value = mock_conn
         mock_ctx.__aexit__.return_value = None
         mock_db = MagicMock()
         mock_db.acquire.return_value = mock_ctx
 
-        current_user = {"id": uuid.uuid4(), "role": "user"}
+        user_id = uuid.uuid4()
+        current_user = {"user_id": str(user_id)}
         mock_redis = AsyncMock()
 
         body = UploadRequestBody(
             media_type="photo",
-            content_type="image/jpeg",
-            file_size_bytes=1024 * 500,
-            position=1,
+            content_type="image/webp",
+            file_size_bytes=1024 * 10,
         )
 
         res = await request_upload(body, current_user, mock_db, mock_redis)
         self.assertIsNotNone(res.media_id)
-        mock_del_quarantine.assert_called_once_with("uploads/u1/photo/old_pic.jpg")
+        self.assertTrue(any("ON CONFLICT (user_id, position) DO UPDATE" in q for q in executed_queries))
 
     # -----------------------------------------------------------------------
     # FINDING-03: Proactive session replacement notification
     # -----------------------------------------------------------------------
-    @patch("app.routers.auth.get_redis")
-    async def test_07_login_replaces_session_and_publishes_force_disconnect(self, mock_get_redis):
-        """When user logs in with an existing active session, force_disconnect is published to user commands."""
-        import json
+    @patch("app.routers.auth.ws_manager.disconnect_user", new_callable=AsyncMock)
+    async def test_07_login_replaces_session_and_publishes_force_disconnect(self, mock_disconnect):
+        """When user logs in with an existing active session, force_disconnect is triggered via ws_manager."""
         from app.routers.auth import _issue_token_response
-
-        mock_redis = AsyncMock()
-        mock_get_redis.return_value = mock_redis
 
         mock_conn = AsyncMock()
         mock_conn.fetchval.return_value = "old_token_hash_value"
@@ -331,20 +280,16 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         user_id = uuid.uuid4()
         res = await _issue_token_response(user_id, False, True, mock_conn)
         self.assertIn("access_token", res["data"])
-        mock_redis.set.assert_called()
-        mock_redis.publish.assert_called_once()
-        call_args = mock_redis.publish.call_args[0]
-        self.assertEqual(call_args[0], f"user:{user_id}:commands")
-        payload = json.loads(call_args[1])
-        self.assertEqual(payload["type"], "force_disconnect")
-        self.assertIn("another device", payload["reason"])
+        mock_disconnect.assert_called_once()
+        self.assertEqual(mock_disconnect.call_args[0][0], str(user_id))
+        self.assertIn("another device", mock_disconnect.call_args[1]["reason"])
 
+    @patch("app.routers.auth.ws_manager.disconnect_user", new_callable=AsyncMock)
     @patch("app.routers.auth.validate_access_token")
     @patch("app.routers.auth.sliding_window_rate_limit")
     @patch("app.routers.auth.revoke_token")
-    async def test_08_logout_all_devices_publishes_force_disconnect(self, mock_revoke, mock_rate, mock_val):
-        """When user logs out with all_devices=True, force_disconnect is published to kick all active sessions."""
-        import json
+    async def test_08_logout_all_devices_publishes_force_disconnect(self, mock_revoke, mock_rate, mock_val, mock_disconnect):
+        """When user logs out with all_devices=True, disconnect is triggered on ws_manager."""
         from app.routers.auth import logout_endpoint
         from app.models.schemas.auth import LogoutBody
 
@@ -370,11 +315,9 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(res["success"])
         self.assertIn("message", res["data"])
-        mock_redis.publish.assert_called_once()
-        call_args = mock_redis.publish.call_args[0]
-        self.assertEqual(call_args[0], f"user:{user_id}:commands")
-        payload = json.loads(call_args[1])
-        self.assertEqual(payload["type"], "force_disconnect")
+        mock_disconnect.assert_called_once()
+        self.assertEqual(mock_disconnect.call_args[0][0], str(user_id))
+        self.assertIn("all devices", mock_disconnect.call_args[1]["reason"])
 
     # -----------------------------------------------------------------------
     # FINDING-04: Chat message idempotency key & deduplication
@@ -508,17 +451,18 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         mock_redis = AsyncMock()
         body = SendMessageRequest(content="Hello")
 
-        res = await send_message(
-            chat_id=chat_id,
-            body=body,
-            current_user={"id": str(user_id)},
-            db=mock_db,
-            redis=mock_redis,
-        )
+        with patch("app.routers.chats.ws_manager.broadcast_chat", new_callable=AsyncMock) as mock_broadcast:
+            res = await send_message(
+                chat_id=chat_id,
+                body=body,
+                current_user={"user_id": str(user_id)},
+                db=mock_db,
+                redis=mock_redis,
+            )
 
-        self.assertEqual(res.id, msg_id)
-        self.assertEqual(res.content, "Hello")
-        mock_redis.publish.assert_called_once()
+            self.assertEqual(res.id, msg_id)
+            self.assertEqual(res.content, "Hello")
+            mock_broadcast.assert_called_once()
 
     def test_11_all_migration_files_have_down_migrations(self):
         """All backend/migrations/*.sql files must have matching down/*.down.sql."""
@@ -613,10 +557,9 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".current_backend_image", content)
 
     async def test_15_envelope_and_legal_coverage(self):
-        """Verify response envelopes, legal routes, and voice upload presigning."""
+        """Verify response envelopes and legal routes."""
         from app.core.responses import ok, err
         from app.routers.legal import robots_txt, privacy_policy
-        from app.routers.media import presign_upload_get, UploadRequestResponse
 
         # Responses ok and err branches
         ok_res = ok({"data": 1}, meta={"test": True})
@@ -641,22 +584,15 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
         guidelines = await community_guidelines()
         self.assertIn("Ahimsa", guidelines)
 
-        # Media voice presign adapter
-        mock_user = {"id": uuid.uuid4()}
-        mock_db = MagicMock()
-        mock_redis = MagicMock()
-        with patch("app.routers.media.request_upload", AsyncMock(return_value=UploadRequestResponse(media_id=uuid.uuid4(), presigned_url="http://s3", s3_key="voice_key"))):
-            voice_res = await presign_upload_get(current_user=mock_user, db=mock_db, redis=mock_redis, type="voice")
-            self.assertEqual(voice_res.s3_key, "voice_key")
-
     async def test_16_upload_validation_errors(self):
-        """Verify request_upload validates content-type and size limits for photo and voice."""
+        """Verify request_upload validates content-type and rejects retired media types."""
+        from pydantic import ValidationError
         from fastapi import HTTPException
         from app.routers.media import request_upload, UploadRequestBody
 
-        mock_user = {"id": uuid.uuid4()}
+        mock_user = {"user_id": str(uuid.uuid4())}
         mock_db = MagicMock()
-        mock_redis = MagicMock()
+        mock_redis = AsyncMock()
 
         # Invalid photo content type
         b1 = UploadRequestBody(media_type="photo", content_type="application/pdf", file_size_bytes=1000)
@@ -664,18 +600,9 @@ class TestDeepAuditRound8Hardening(unittest.IsolatedAsyncioTestCase):
             await request_upload(b1, mock_user, mock_db, mock_redis)
         self.assertEqual(ctx.exception.status_code, 400)
 
-        # Invalid voice content type
-        b2 = UploadRequestBody(media_type="voice", content_type="video/mp4", file_size_bytes=1000)
-        with self.assertRaises(HTTPException) as ctx:
-            await request_upload(b2, mock_user, mock_db, mock_redis)
-        self.assertEqual(ctx.exception.status_code, 400)
-
-        # Voice too large (6MB passes model le=10MB but fails voice limit 5MB)
-        b3 = UploadRequestBody(media_type="voice", content_type="audio/m4a", file_size_bytes=6 * 1024 * 1024)
-        with self.assertRaises(HTTPException) as ctx:
-            await request_upload(b3, mock_user, mock_db, mock_redis)
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertIn("5 MB", ctx.exception.detail)
+        # Voice media_type rejected at schema level
+        with self.assertRaises(ValidationError):
+            UploadRequestBody(media_type="voice", content_type="audio/m4a", file_size_bytes=1000)
 
 
 if __name__ == "__main__":

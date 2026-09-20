@@ -38,8 +38,14 @@ import {
 import { getMyProfile } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { SerendipityArcadeModal } from "../../components/arcade";
+import { cacheGet, cacheSet, CACHE_KEYS } from "../../utils/cache";
 
-const PREFETCH_THRESHOLD = 3; // Fetch next batch when ≤3 cards left
+interface CachedFeedDeck {
+  lastSyncedAt: number;
+  candidates: FeedCandidate[];
+}
+
+const PREFETCH_THRESHOLD = 5; // Fetch next batch when ≤5 cards (OPTIMIZE.md §2.2 C)
 
 type UIState = "loading" | "populated" | "empty" | "error" | "offline";
 
@@ -70,6 +76,18 @@ export default function FeedScreen() {
       .catch(() => {});
   }, []);
 
+  // L2 Cache: Read @feed_cards_v1 on mount → paint instantly (OPTIMIZE.md §2.2 C)
+  useEffect(() => {
+    cacheGet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK).then((cached) => {
+      if (cached?.candidates && cached.candidates.length > 0) {
+        setCandidates(cached.candidates);
+        setUiState("populated");
+      }
+      // Always fetch fresh batch in background (even on cache hit)
+      fetchBatch();
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Hardware GPU prefetch for upcoming card photos (zero-flicker swipes)
   useEffect(() => {
     if (candidates.length > 0) {
@@ -103,7 +121,7 @@ export default function FeedScreen() {
 
     setIsFetching(true);
     try {
-      const data = await getFeed(15);
+      const data = await getFeed(20);
       if (data.exhausted && data.candidates.length === 0) {
         setCandidates((prev) => (prev.length === 0 ? [] : prev));
         if (candidates.length === 0) setUiState("empty");
@@ -111,7 +129,13 @@ export default function FeedScreen() {
         setCandidates((prev) => {
           const seen = new Set(prev.map((c) => c.id));
           const uniqueNew = data.candidates.filter((c) => !seen.has(c.id));
-          return [...prev, ...uniqueNew];
+          const merged = [...prev, ...uniqueNew];
+          // L2 cache write-back: persist deck to AsyncStorage
+          cacheSet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK, {
+            lastSyncedAt: Date.now(),
+            candidates: merged,
+          });
+          return merged;
         });
         setUiState("populated");
       }
@@ -146,14 +170,23 @@ export default function FeedScreen() {
     }
   }, [isFetching, candidates.length]);
 
-  useEffect(() => {
-    fetchBatch();
+
+  // L2 Cache helper: remove swiped candidate and immediately persist remaining deck
+  const popCandidate = useCallback((id: string) => {
+    setCandidates((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      cacheSet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK, {
+        lastSyncedAt: Date.now(),
+        candidates: next,
+      });
+      return next;
+    });
   }, []);
 
   const handleSwipeRight = useCallback(
     async (candidate: FeedCandidate, totalMs: number, photoMs: number, promptMs: number) => {
-      // Remove from stack optimistically
-      setCandidates((prev) => prev.filter((c) => c.id !== candidate.id));
+      // Remove from stack optimistically and update L2 cache
+      popCandidate(candidate.id);
 
       // Prefetch if running low
       if (candidates.length <= PREFETCH_THRESHOLD) fetchBatch();
@@ -178,6 +211,9 @@ export default function FeedScreen() {
         });
 
         if (result.is_match) {
+          if (candidate.photos?.[0]?.url) {
+            Image.prefetch(candidate.photos[0].url).catch(() => {});
+          }
           setMatch(result);
           setMatchCandidate(candidate);
         }
@@ -200,7 +236,7 @@ export default function FeedScreen() {
 
   const handleSwipeLeft = useCallback(
     async (candidate: FeedCandidate, totalMs: number, photoMs: number, promptMs: number) => {
-      setCandidates((prev) => prev.filter((c) => c.id !== candidate.id));
+      popCandidate(candidate.id);
       if (candidates.length <= PREFETCH_THRESHOLD) fetchBatch();
 
       sendTelemetry({
@@ -217,12 +253,12 @@ export default function FeedScreen() {
         await postInteraction(candidate.id, "pass", "photo", candidate.id);
       } catch {}
     },
-    [candidates.length, fetchBatch]
+    [candidates.length, fetchBatch, popCandidate]
   );
 
   const handleSuperLike = useCallback(
     async (candidate: FeedCandidate, totalMs: number) => {
-      setCandidates((prev) => prev.filter((c) => c.id !== candidate.id));
+      popCandidate(candidate.id);
       if (candidates.length <= PREFETCH_THRESHOLD) fetchBatch();
 
       sendTelemetry({
@@ -238,6 +274,9 @@ export default function FeedScreen() {
       try {
         const result = await postInteraction(candidate.id, "superlike", "photo", candidate.id);
         if (result.is_match) {
+          if (candidate.photos?.[0]?.url) {
+            Image.prefetch(candidate.photos[0].url).catch(() => {});
+          }
           setMatch(result);
           setMatchCandidate(candidate);
         }
@@ -256,7 +295,7 @@ export default function FeedScreen() {
         }
       }
     },
-    [candidates.length, fetchBatch]
+    [candidates.length, fetchBatch, popCandidate]
   );
 
   const openChat = (chatId: string) => {

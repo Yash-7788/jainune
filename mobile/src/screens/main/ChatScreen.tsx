@@ -40,6 +40,7 @@ import * as SecureStore from "expo-secure-store";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   getMessages,
+  getMessagesDelta,
   getChats,
   sendMessage,
   sendMediaMessage,
@@ -61,6 +62,21 @@ import ContentModerationSheet, {
   scanMessage,
   DetectedType,
 } from "../../components/chat/ContentModerationSheet";
+import {
+  cacheGet,
+  cacheSet,
+  cacheRemove,
+  capMessages,
+  CACHE_KEYS,
+} from "../../utils/cache";
+
+interface CachedChatThread {
+  matchId: string;
+  lastSyncedAt: number;
+  latestMessageId: string;
+  oldestMessageId: string;
+  messages: Message[];
+}
 
 const WS_BASE =
   process.env.EXPO_PUBLIC_WS_URL || "wss://api.jainune.com/v1/ws/chat";
@@ -204,35 +220,113 @@ export default function ChatScreen() {
     }
   }, [matchId]);
 
-  // Load message history
+  // ── L1 Cache helpers ────────────────────────────────────────────────────────
+
+  /** Persist current message list to AsyncStorage (capped at 500). */
+  const writeChatCache = useCallback(
+    (msgs: Message[]) => {
+      if (!matchId || msgs.length === 0) return;
+      const capped = capMessages(msgs);
+      const entry: CachedChatThread = {
+        matchId,
+        lastSyncedAt: Date.now(),
+        latestMessageId: capped[0]?.id ?? "",
+        oldestMessageId: capped[capped.length - 1]?.id ?? "",
+        messages: capped,
+      };
+      cacheSet(CACHE_KEYS.chatThread(matchId), entry);
+    },
+    [matchId]
+  );
+
+  /**
+   * OPTIMIZE.md §2.1 C — Load message history (cache-first):
+   * 1. Read AsyncStorage → paint instantly at 0ms (returning users skip spinner)
+   * 2. Background delta sync: GET messages?since_id=latestId → prepend new msgs
+   * 3. For scroll-up pagination (cursorParam set): network-only, append to tail
+   */
   const loadMessages = useCallback(async (cursorParam?: string) => {
     if (!matchId || !validateUuid(matchId)) {
       setLoading(false);
       setError({ title: "Invalid Chat", message: "Invalid chat identifier." });
       return;
     }
-    try {
-      const msgs = await getMessages(matchId, cursorParam);
-      if (msgs.length < 30) setHasMore(false);
-      if (cursorParam) {
-        setMessages((prev) => [...prev, ...msgs]);
-      } else {
-        setMessages(msgs);
+
+    // Scroll-up pagination: pure network, append to tail — no cache involved
+    if (cursorParam) {
+      setLoadingMore(true);
+      try {
+        const msgs = await getMessages(matchId, cursorParam);
+        if (msgs.length < 20) setHasMore(false);
+        setMessages((prev) => {
+          const merged = [...prev, ...msgs];
+          writeChatCache(merged);
+          return merged;
+        });
+        if (msgs.length > 0) setCursor(msgs[msgs.length - 1].id);
+      } catch (err: any) {
+        const e = err?._apiError;
+        if (e?.code === "CHAT_NOT_ALLOWED") {
+          setChatBlocked(true);
+          cacheRemove(CACHE_KEYS.chatThread(matchId));
+        }
+      } finally {
+        setLoadingMore(false);
       }
+      return;
+    }
+
+    // Initial load — check cache first
+    const cached = await cacheGet<CachedChatThread>(CACHE_KEYS.chatThread(matchId));
+    if (cached?.messages && cached.messages.length > 0) {
+      // Paint instantly from cache — no network latency for returning users
+      setMessages(cached.messages);
+      setCursor(cached.oldestMessageId || undefined);
+      setLoading(false);
+
+      // Background delta sync: fetch only messages newer than latestMessageId
+      if (cached.latestMessageId) {
+        getMessagesDelta(matchId, cached.latestMessageId)
+          .then((newMsgs) => {
+            if (newMsgs.length === 0) return;
+            setMessages((prev) => {
+              const existingIds = new Set(prev.map((m) => m.id));
+              const unique = newMsgs.filter((m) => !existingIds.has(m.id));
+              if (unique.length === 0) return prev;
+              const merged = [...unique, ...prev];
+              writeChatCache(merged);
+              return merged;
+            });
+            triggerMarkRead();
+          })
+          .catch(() => {
+            // Delta sync failure is silent — cache snapshot is still shown
+          });
+      }
+      return;
+    }
+
+    // Cache miss — full network load
+    try {
+      const msgs = await getMessages(matchId);
+      if (msgs.length < 20) setHasMore(false);
+      setMessages(msgs);
       if (msgs.length > 0) {
         setCursor(msgs[msgs.length - 1].id);
+        writeChatCache(msgs);
       }
     } catch (err: any) {
       const e = err?._apiError;
       if (e?.code === "CHAT_NOT_ALLOWED") {
         setChatBlocked(true);
+        cacheRemove(CACHE_KEYS.chatThread(matchId));
       } else {
         setError(extractError(err));
       }
     } finally {
       setLoading(false);
     }
-  }, [matchId]);
+  }, [matchId, writeChatCache, triggerMarkRead]);
 
   const handleWsEvent = useCallback(
     (data: {
@@ -254,8 +348,6 @@ export default function ChatScreen() {
               type:
                 p.message_type === "photo" || p.type === "photo"
                   ? "photo"
-                  : p.message_type === "voice" || p.type === "voice"
-                  ? "voice"
                   : "text",
               content: p.content || null,
               media_url: p.media_url || null,
@@ -272,7 +364,10 @@ export default function ChatScreen() {
                   )
               );
               if (withoutTemp.some((m) => m.id === incoming.id)) return withoutTemp;
-              return [incoming, ...withoutTemp];
+              const merged = [incoming, ...withoutTemp];
+              // L1 cache write-back: persist incoming WS message immediately
+              writeChatCache(merged);
+              return merged;
             });
             triggerMarkRead();
           }
@@ -324,6 +419,7 @@ export default function ChatScreen() {
 
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
+        // App resume: delta sync only — cache already painted, fetch new msgs
         loadMessages();
         triggerMarkRead();
       }
@@ -379,7 +475,12 @@ export default function ChatScreen() {
       const sent = await sendMessage(matchId, content, clientMessageId);
       draftIdRef.current = null;
       lastDraftRef.current = "";
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? sent : m)));
+      setMessages((prev) => {
+        const updated = prev.map((m) => (m.id === tempId ? sent : m));
+        // L1 cache write-back: confirmed message replaces temp bubble in cache
+        writeChatCache(updated);
+        return updated;
+      });
     } catch (err: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setDraft(content);
@@ -387,12 +488,13 @@ export default function ChatScreen() {
       const e = err?._apiError;
       if (e?.code === "CHAT_NOT_ALLOWED") {
         setChatBlocked(true);
+        cacheRemove(CACHE_KEYS.chatThread(matchId));
       }
       Alert.alert("Unable to send message", extractError(err).message);
     } finally {
       setSending(false);
     }
-  }, [matchId]);
+  }, [matchId, writeChatCache]);
 
   const handleReport = useCallback(() => {
     const reasonMap: Record<string, string> = {
@@ -613,23 +715,6 @@ export default function ChatScreen() {
             style={styles.mediaBtn}
             onPress={() => {
               Alert.alert("Send Media", "Choose attachment type:", [
-                {
-                  text: "Voice Spark (60s) 🎙️",
-                  onPress: () => {
-                    if (!isSubscriber) {
-                      Alert.alert(
-                        "Jainune+ Feature",
-                        "Voice Sparks are exclusive to Jainune+ members.",
-                        [
-                          { text: "Cancel", style: "cancel" },
-                          { text: "Upgrade", onPress: () => navigation.navigate("Subscriptions") },
-                        ]
-                      );
-                      return;
-                    }
-                    Alert.alert("Voice Spark", "Recording feature initialized.");
-                  },
-                },
                 {
                   text: "Photo 📷",
                   onPress: () => {

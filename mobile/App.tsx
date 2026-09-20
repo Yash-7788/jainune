@@ -28,6 +28,9 @@ import SecurityBlockScreen from "./src/screens/security/SecurityBlockScreen";
 import ErrorBoundary from "./src/components/core/ErrorBoundary";
 import InstallPromptBanner from "./src/components/InstallPromptBanner";
 import { runSecurityBoot } from "./src/security/securityBoot";
+import { initializeCrashReporting } from "./src/services/crashReporter";
+
+initializeCrashReporting();
 import { setSessionExpiredCallback } from "./src/api/client";
 import { useAuthStore } from "./src/store/authStore";
 import { syncPendingPayment } from "./src/services/billingService";

@@ -41,7 +41,7 @@ const REASONS = [
 const CONSEQUENCES = [
   "Your profile will be removed from all discovery feeds immediately.",
   "All matches and conversations will be permanently deleted within 72 hours.",
-  "Your photos and voice snapshots will be purged from our servers.",
+  "Your photos and account data will be purged from our servers.",
   "Active Jainune+ subscriptions will not be refunded.",
   "Financial transaction logs are retained for 7 years per RBI regulations.",
   "This action cannot be undone.",

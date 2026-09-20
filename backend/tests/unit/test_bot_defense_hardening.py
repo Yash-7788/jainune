@@ -16,7 +16,7 @@ import uuid
 from datetime import date
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.config", "botocore.exceptions"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 

@@ -30,7 +30,6 @@ import {
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
-import { Audio } from "expo-av";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   getMyProfile,
@@ -40,7 +39,6 @@ import {
   addPhoto,
   deletePhoto,
   reorderPhotos,
-  updateVoiceSnapshot,
   MyProfile,
 } from "../../api/profileApi";
 import { uploadToPresignedUrl, extractError } from "../../api/client";
@@ -50,6 +48,12 @@ import {
   enableScreenCaptureProtection,
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
+import { cacheSet, CACHE_KEYS } from "../../utils/cache";
+
+interface CachedUserProfile {
+  lastSyncedAt: number;
+  profile: import("../../api/profileApi").MyProfile;
+}
 
 const SECT_OPTIONS = [
   "Digambara",
@@ -99,19 +103,11 @@ export default function EditProfileScreen() {
   const [photos, setPhotos] = useState<{ id: string; url: string; order: number }[]>([]);
   const [prompts, setPrompts] = useState<{ prompt_id: string; prompt_text: string; response: string }[]>([]);
 
-  const [voiceSnapshotUrl, setVoiceSnapshotUrl] = useState<string | null>(null);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [uploadingVoice, setUploadingVoice] = useState(false);
-
   useEffect(() => {
     enableScreenCaptureProtection();
     loadProfile();
     return () => {
       disableScreenCaptureProtection();
-      if (recording) {
-        recording.stopAndUnloadAsync().catch(() => {});
-      }
     };
   }, []);
 
@@ -150,7 +146,6 @@ export default function EditProfileScreen() {
       setVibeZones(data.vibe_zones || []);
       setPhotos(data.photos || []);
       setPrompts(data.prompts || []);
-      setVoiceSnapshotUrl(data.voice_snapshot_url || null);
     } catch (err) {
       Alert.alert("Error", extractError(err).message);
     } finally {
@@ -158,46 +153,6 @@ export default function EditProfileScreen() {
     }
   };
 
-  const handleToggleVoiceRecording = async () => {
-    if (isRecording) {
-      if (!recording) return;
-      setIsRecording(false);
-      setUploadingVoice(true);
-      try {
-        await recording.stopAndUnloadAsync();
-        const uri = recording.getURI();
-        setRecording(null);
-        if (!uri) throw new Error("Audio recording failed");
-
-        const presign = await presignUpload("audio/m4a", 1024 * 1024, "voice");
-        await uploadToPresignedUrl(presign.upload_url, uri, "audio/m4a", presign.presigned_fields);
-        const res = await updateVoiceSnapshot(presign.media_id);
-        // F-12: use local URI for preview; real CDN URL populates after moderation
-        setVoiceSnapshotUrl(res.voice_snapshot_url || uri);
-        Alert.alert("Voice Snapshot Updated", "Your new 7-second voice snippet is now live on your profile!");
-      } catch (err) {
-        Alert.alert("Voice Upload Error", extractError(err).message);
-      } finally {
-        setUploadingVoice(false);
-      }
-    } else {
-      const { status: perm } = await Audio.requestPermissionsAsync();
-      if (perm !== "granted") {
-        Alert.alert("Microphone Access Required", "Please allow microphone access to record your voice snapshot.");
-        return;
-      }
-      try {
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-        const rec = new Audio.Recording();
-        await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-        await rec.startAsync();
-        setRecording(rec);
-        setIsRecording(true);
-      } catch (err) {
-        Alert.alert("Recording Failed", extractError(err).message);
-      }
-    }
-  };
 
   const uploadPickedAsset = useCallback(async (asset: ImagePicker.ImagePickerAsset) => {
     setUploadingPhoto(true);
@@ -328,6 +283,18 @@ export default function EditProfileScreen() {
         await updatePrompts(prompts);
       }
 
+      // L3 cache write-back: invalidate stale profile so ProfileScreen reloads fresh
+      getMyProfile()
+        .then((fresh) => {
+          cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+            lastSyncedAt: Date.now(),
+            profile: fresh,
+          });
+        })
+        .catch(() => {
+          // Non-critical: ProfileScreen will refetch on focus if cache is missing
+        });
+
       Alert.alert("Profile Updated", "Your changes have been saved.", [
         { text: "Done", onPress: () => navigation.goBack() },
       ]);
@@ -457,13 +424,6 @@ export default function EditProfileScreen() {
         />
       </View>
 
-      {/* Voice Snapshot Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Voice Snapshot</Text>
-        <Text style={styles.sectionHint}>
-          Voice snapshots are retired in Jainune v2.
-        </Text>
-      </View>
 
       {/* Community & Dietary Section */}
       <View style={styles.section}>
@@ -791,22 +751,6 @@ const styles = StyleSheet.create({
   footer: {
     padding: spacing.base,
     marginTop: spacing.base,
-  },
-  voiceBtn: {
-    backgroundColor: colors.saffron,
-    borderRadius: radii.md,
-    paddingVertical: spacing.md,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: spacing.sm,
-  },
-  voiceBtnRecording: {
-    backgroundColor: colors.red,
-  },
-  voiceBtnText: {
-    fontFamily: "Outfit_700Bold",
-    fontSize: 14,
-    color: colors.white,
   },
   saveBtn: {
     backgroundColor: colors.saffron,

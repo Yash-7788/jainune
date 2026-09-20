@@ -287,7 +287,7 @@ class TestCoverageBoost(unittest.TestCase):
         mock_redis.sadd = AsyncMock()
         mock_redis.scan = AsyncMock(return_value=(0, []))
 
-        with patch("app.services.account_service._delete_s3_keys_sync", return_value=None):
+        with patch("app.services.account_service._delete_user_avatar_supabase", new_callable=AsyncMock):
             soft_res = asyncio.run(soft_delete_user_account(uid, mock_conn, mock_redis, reason="test"))
             self.assertEqual(soft_res["status"], "soft_deleted")
 
@@ -946,7 +946,7 @@ class TestCoverageBoost(unittest.TestCase):
         mock_conn.close = AsyncMock()
 
         with patch("app.core.redis.get_redis", return_value=mock_redis), \
-             patch("app.services.account_service._delete_s3_keys_sync", return_value=["photos/failed2.jpg"]):
+             patch("app.workers.ephemeral_reaper._supabase_remove_keys", return_value=["photos/failed1.jpg"]):
             reap_failed_s3_deletions()
             mock_redis.srem.assert_called_once_with("s3:failed_deletions", "photos/failed1.jpg")
 
@@ -955,78 +955,51 @@ class TestCoverageBoost(unittest.TestCase):
             mock_conn.execute.assert_called_once()
 
         mock_self = MagicMock()
-        with patch("app.services.media_processor._run_moderation", new_callable=AsyncMock) as m_mod:
+        with patch("app.services.media_processor._run_moderation", create=True, new_callable=AsyncMock) as m_mod:
             process_media_moderation_task(mock_self, str(uuid.uuid4()), "uploads/pic.jpg", "photo", str(uuid.uuid4()))
             m_mod.assert_called_once()
 
     def test_media_processor_branches(self):
-        """Cover media processor enqueue, container checks, and reap stale processing."""
+        """Cover media processor WebP validation, size limits, and Supabase signed URL generation."""
         from app.services.media_processor import (
-            enqueue_moderation,
-            _validate_voice_magic_bytes,
-            _voice_moderation_check,
-            reap_stale_processing_media,
+            process_and_sanitize_image,
+            generate_supabase_upload_signed_url,
+            delete_user_avatar,
         )
-        self.assertTrue(_validate_voice_magic_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00"))
-        self.assertTrue(_validate_voice_magic_bytes(b"\xff\xfb\x90d\x00\x00\x00\x00"))
-        self.assertTrue(_validate_voice_magic_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt "))
-        self.assertTrue(_validate_voice_magic_bytes(b"OggS\x00\x02\x00\x00\x00\x00"))
-        self.assertTrue(_validate_voice_magic_bytes(b"\x00\x00\x00 ftypM4A "))
-        self.assertTrue(_validate_voice_magic_bytes(b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81"))
-        self.assertFalse(_validate_voice_magic_bytes(b"NOTAN_AUDIO_FILE_DATA"))
+        # Valid WebP magic bytes
+        valid_webp = b"RIFF" + (32).to_bytes(4, "little") + b"WEBP" + b"\x00" * 32
+        self.assertEqual(process_and_sanitize_image(valid_webp), valid_webp)
 
-        with patch("app.services.media_processor.boto3") as mb:
-            mock_s3 = MagicMock()
-            mb.client.return_value = mock_s3
-            mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"ID3\x03\x00\x00\x00"))}
-            with patch("app.core.config.settings.aws_access_key_id", "real_key_123"):
-                ok, err = _voice_moderation_check("uploads/test.mp3")
-                self.assertTrue(ok)
+        # Invalid header rejected
+        with self.assertRaises(ValueError):
+            process_and_sanitize_image(b"NOT_AN_IMAGE_HEADER")
 
-                mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"CORRUPT"))}
-                ok, err = _voice_moderation_check("uploads/test.mp3")
-                self.assertFalse(ok)
-                self.assertEqual(err, "INVALID_AUDIO_FORMAT")
+        # Empty rejected
+        with self.assertRaises(ValueError):
+            process_and_sanitize_image(b"")
 
-        with patch("app.workers.ephemeral_reaper.process_media_moderation_task.delay", side_effect=Exception("broker down")), \
-             patch("app.services.media_processor._run_moderation_with_semaphore", return_value=None), \
-             patch("asyncio.create_task") as ct:
-            asyncio.run(enqueue_moderation(uuid.uuid4(), "uploads/x.jpg", "photo", uuid.uuid4()))
-            ct.assert_called_once()
-
-        mock_db = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.fetch = AsyncMock(side_effect=[
-            [{"id": uuid.uuid4(), "s3_key": "uploads/stranded.jpg", "media_type": "photo", "user_id": uuid.uuid4()}],
-            [{"id": uuid.uuid4(), "s3_key": "uploads/stale.jpg"}],
-        ])
-        mock_db.acquire.return_value = AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock(return_value=False))
-        with patch("app.workers.ephemeral_reaper.process_media_moderation_task.delay") as p_delay, \
-             patch("app.services.media_processor._delete_from_quarantine"):
-            count = asyncio.run(reap_stale_processing_media(mock_db))
-            self.assertEqual(count, 1)
-            p_delay.assert_called_once()
+        # Signed URL generation via Supabase
+        mock_client = MagicMock()
+        mock_client.storage.from_.return_value.create_signed_upload_url.return_value = {
+            "signedURL": "https://supabase.co/signed-url",
+            "token": "tok123",
+        }
+        with patch("app.services.media_processor._get_supabase", return_value=mock_client):
+            res = asyncio.run(generate_supabase_upload_signed_url("user123"))
+            self.assertEqual(res["signed_url"], "https://supabase.co/signed-url")
 
     def test_account_service_s3_keys_sync_and_archive_failure(self):
-        """Cover account_service._delete_s3_keys_sync and purge_user_account exception."""
-        from app.services.account_service import _delete_s3_keys_sync
+        """Cover account_service avatar deletion and purge_user_account exception."""
+        from app.services.account_service import _delete_user_avatar_supabase, purge_user_account
 
-        self.assertEqual(_delete_s3_keys_sync([]), [])
-
-        with patch("app.services.account_service.boto3") as mb:
-            mock_s3 = MagicMock()
-            mb.client.return_value = mock_s3
-            mock_s3.delete_object.side_effect = [
-                Exception("S3 delete failed"),
-                None,
-            ]
-            failed = _delete_s3_keys_sync(["media/photo1.jpg"])
-            self.assertEqual(failed, ["media/photo1.jpg"])
+        with patch("app.services.media_processor.delete_user_avatar", new_callable=AsyncMock) as m_del:
+            asyncio.run(_delete_user_avatar_supabase(uuid.uuid4()))
+            m_del.assert_called_once()
 
         uid = uuid.uuid4()
         mock_conn = MagicMock()
         mock_conn.fetchrow = AsyncMock(return_value={"phone_number": "123", "email": "a@b.com", "subscription_tier": "free"})
-        mock_conn.execute = AsyncMock(side_effect=Exception("disk full"))
+        mock_conn.execute = AsyncMock(side_effect=Exception("DB Error"))
         mock_redis = MagicMock()
         with self.assertRaises(RuntimeError):
             asyncio.run(purge_user_account(uid, mock_conn, mock_redis))

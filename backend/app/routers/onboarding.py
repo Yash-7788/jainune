@@ -649,7 +649,7 @@ async def step19_photos(
             "UPDATE users SET onboarding_step = 19, updated_at = NOW() WHERE id = $1",
             current_user.id,
         )
-    return _status(19, False, "Upload your 7-second voice snapshot on step 20.")
+    return _status(19, False, "Proceed to step 20.")
 
 
 # ---------------------------------------------------------------------------

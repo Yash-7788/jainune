@@ -15,12 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 from datetime import datetime, timezone, timedelta
 
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions", "celery", "celery.schedules"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
-
-import app.celery_app
-app.celery_app.celery_app.task = lambda *args, **kwargs: (lambda fn: fn)
 
 from app.routers.interactions import get_users_who_liked_me, get_my_matches
 from app.routers.arcade import spin_serendipity_wheel
@@ -238,27 +235,25 @@ class TestDeepAuditRound4Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("com//media", cdn_url)
 
     def test_08_purge_deleted_users_uses_asyncio_to_thread_for_s3_delete(self):
-        """purge_deleted_users must delegate blocking S3 deletion to threadpool."""
-        from app.workers.ephemeral_reaper import purge_deleted_users
+        """purge_deleted_users must delegate blocking Supabase storage deletion to threadpool."""
+        from app.workers.ephemeral_reaper import purge_deleted_users, _supabase_remove_keys
         import asyncio
 
         mock_conn = _mock_async_conn()
         user_id = uuid.uuid4()
         mock_conn.fetch.side_effect = [
             [{"id": user_id}],  # SELECT id FROM users WHERE account_status = 'deleted'...
-            [{"s3_key": "user_photos/test.webp"}],  # SELECT s3_key FROM user_media...
         ]
         mock_conn.execute.return_value = "DELETE 1"
 
         with patch("app.workers.ephemeral_reaper._get_conn", new_callable=AsyncMock) as mock_get_conn, \
-             patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread, \
-             patch("app.services.account_service._delete_s3_keys_sync") as mock_delete_s3:
+             patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
             mock_get_conn.return_value = mock_conn
+            mock_to_thread.return_value = [f"{user_id}/avatar.webp"]
             purge_deleted_users()
             self.assertTrue(mock_to_thread.called)
-            # Verify the target function was _delete_s3_keys_sync and keys were passed
-            self.assertEqual(mock_to_thread.call_args[0][0], mock_delete_s3)
-            self.assertEqual(mock_to_thread.call_args[0][1], ["user_photos/test.webp"])
+            self.assertEqual(mock_to_thread.call_args[0][0], _supabase_remove_keys)
+            self.assertEqual(mock_to_thread.call_args[0][1], [f"{user_id}/avatar.webp"])
 
     async def test_09_daily_likes_redis_ttl_refreshed_on_every_incr(self):
         """record_interaction_action must refresh Redis TTL on every like increment."""

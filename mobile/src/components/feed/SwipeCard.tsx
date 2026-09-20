@@ -164,6 +164,7 @@ function SwipeCard({
         {currentPhoto ? (
           <Image
             source={{ uri: currentPhoto.url }}
+            placeholder={{ blurhash: (currentPhoto as any)?.blurhash || "L6PZfSi_.AyE_3t7t7R**0o#DgR4" }}
             style={styles.photo}
             contentFit="cover"
             cachePolicy="memory-disk"

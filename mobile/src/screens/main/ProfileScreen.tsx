@@ -29,6 +29,12 @@ import {
   enableScreenCaptureProtection,
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
+import { cacheGet, cacheSet, CACHE_KEYS, isStale, PROFILE_TTL_MS } from "../../utils/cache";
+
+interface CachedUserProfile {
+  lastSyncedAt: number;
+  profile: MyProfile;
+}
 
 function calcAge(dob: string): number {
   const birth = new Date(dob);
@@ -58,12 +64,53 @@ export default function ProfileScreen() {
     return () => disableScreenCaptureProtection();
   }, []);
 
+  /**
+   * OPTIMIZE.md §2.3 — SWR (Stale-While-Revalidate) load:
+   * 1. Read @user_profile cache → paint screen immediately (0ms)
+   * 2. Check lastSyncedAt: if > 30 min stale, background-fetch fresh profile
+   * 3. On every hard refresh (pull-to-refresh), always force network
+   */
   const load = useCallback(async (isRefresh = false) => {
-    if (!isRefresh) setLoading(true);
     setError(null);
+
+    if (!isRefresh) {
+      // Check cache first
+      const cached = await cacheGet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE);
+      if (cached?.profile) {
+        setProfile(cached.profile);
+        setLoading(false);
+
+        if (!isStale(cached.lastSyncedAt, PROFILE_TTL_MS)) {
+          // Cache is fresh (< 30 min) — skip network entirely
+          return;
+        }
+        // Cache is stale: background revalidate without showing loading state
+        getMyProfile()
+          .then((data) => {
+            setProfile(data);
+            cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+              lastSyncedAt: Date.now(),
+              profile: data,
+            });
+          })
+          .catch(() => {
+            // Stale cache still shown — silent background failure
+          });
+        return;
+      }
+      // Cache miss — fall through to full load
+      setLoading(true);
+    } else {
+      setRefreshing(true);
+    }
+
     try {
       const data = await getMyProfile();
       setProfile(data);
+      cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+        lastSyncedAt: Date.now(),
+        profile: data,
+      });
     } catch (err) {
       setError(extractError(err).message);
     } finally {
@@ -84,6 +131,11 @@ export default function ProfileScreen() {
     try {
       const updated = await updateProfile({ paryushan_mode: val });
       setProfile(updated);
+      // L3 cache write-back: optimistic profile update
+      cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+        lastSyncedAt: Date.now(),
+        profile: updated,
+      });
     } catch {
       Alert.alert("Error", "Could not update Paryushan mode.");
     } finally {
@@ -231,11 +283,6 @@ export default function ProfileScreen() {
             {profile.prompts.length < 3 && (
               <Text style={styles.healthCardTip}>
                 — Add 3 prompts with detailed responses to give matches a conversation hook.
-              </Text>
-            )}
-            {!profile.voice_snapshot_url && (
-              <Text style={styles.healthCardTip}>
-                — Record a 7-second voice snapshot. Voice profiles get 3x more matches.
               </Text>
             )}
           </View>

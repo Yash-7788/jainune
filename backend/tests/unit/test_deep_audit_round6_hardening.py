@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions", "celery", "celery.schedules"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 
@@ -103,7 +103,7 @@ class TestDeepAuditRound6Hardening(unittest.IsolatedAsyncioTestCase):
 
         redis.scan_iter.return_value = empty_async_gen()
 
-        with patch("app.services.account_service._delete_s3_keys_sync"):
+        with patch("app.services.account_service._delete_user_avatar_supabase", new_callable=AsyncMock):
             result = await purge_user_account(user_id, conn, redis)
 
         self.assertEqual(result["status"], "purged")
@@ -274,27 +274,24 @@ class TestDeepAuditRound6Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("d.created_at < $2" in s for s in executed_sqls), "Cursor condition missing from query")
 
     async def test_08_presign_upload_get_max_limits(self):
-        """Verify presign_upload_get sets file_size_bytes to 10MB for photo and 5MB for voice (BUG-055)."""
-        from app.routers.media import presign_upload_get, _MAX_PHOTO_BYTES, _MAX_VOICE_BYTES
-        mock_user = {"id": uuid.uuid4()}
+        """Verify request_upload enforces 10MB photo limit and rejects voice notes per roadmap."""
+        from pydantic import ValidationError
+        from fastapi import HTTPException
+        from app.routers.media import request_upload, UploadRequestBody, _MAX_PHOTO_BYTES
+
+        mock_user = {"user_id": uuid.uuid4()}
         mock_db = MagicMock()
-        mock_redis = MagicMock()
+        mock_redis = AsyncMock()
 
-        captured_requests = []
-        async def fake_request_upload(body, user, db, redis):
-            captured_requests.append(body)
-            from app.routers.media import UploadRequestResponse
-            return UploadRequestResponse(media_id=uuid.uuid4(), presigned_url="https://s3...", s3_key="test")
+        # Enforces photo limit
+        with self.assertRaises(ValidationError):
+            UploadRequestBody(media_type="photo", content_type="image/webp", file_size_bytes=_MAX_PHOTO_BYTES + 1)
 
-        with patch("app.routers.media.request_upload", side_effect=fake_request_upload):
-            await presign_upload_get(current_user=mock_user, db=mock_db, redis=mock_redis, type="photo")
-            await presign_upload_get(current_user=mock_user, db=mock_db, redis=mock_redis, type="voice")
+        # Rejects voice note at schema validation level
+        with self.assertRaises(ValidationError):
+            UploadRequestBody(media_type="voice", content_type="audio/m4a", file_size_bytes=1024)
 
-        self.assertEqual(len(captured_requests), 2)
-        self.assertEqual(captured_requests[0].file_size_bytes, _MAX_PHOTO_BYTES)
-        self.assertEqual(captured_requests[1].file_size_bytes, _MAX_VOICE_BYTES)
-
-    def test_09_notification_worker_send_daily_digest_multicast_batching(self):
+    async def test_09_notification_worker_send_daily_digest_multicast_batching(self):
         """Verify send_daily_digest batches tokens via send_push_multicast in chunks of 500 (BUG-051)."""
         from app.workers.notification_worker import send_daily_digest
         mock_rows = [
@@ -312,7 +309,7 @@ class TestDeepAuditRound6Hardening(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.workers.notification_worker._get_conn", new_callable=AsyncMock, return_value=mock_conn), \
              patch("app.workers.notification_worker.send_push_multicast", side_effect=fake_multicast):
-            send_daily_digest()
+            await send_daily_digest._async_fn()
 
         # 1200 tokens with like_count=3 should be split into batches of 500, 500, 200
         self.assertEqual(len(multicast_calls), 3)

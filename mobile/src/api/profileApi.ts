@@ -204,14 +204,6 @@ export async function addPhoto(media_id: string): Promise<void> {
   await confirmUpload(media_id);
 }
 
-export async function updateVoiceSnapshot(media_id: string): Promise<{ voice_snapshot_url: string | null }> {
-  await confirmUpload(media_id);
-  // F-12: real CDN URL is only valid after moderation passes (backend copies
-  // from quarantine → production bucket). Return null so the caller uses the
-  // local recording URI for immediate preview.
-  return { voice_snapshot_url: null };
-}
-
 export interface PresignUploadResponse {
   upload_url: string;
   media_id: string;
@@ -223,7 +215,7 @@ export interface PresignUploadResponse {
 export async function presignUpload(
   mimeType: string,
   fileSizeBytes: number,
-  mediaType: "photo" | "voice" = "photo",
+  mediaType: "photo" = "photo",
   position?: number
 ): Promise<PresignUploadResponse> {
   const res = await apiPost<{
@@ -232,7 +224,6 @@ export async function presignUpload(
     presigned_url?: string;
     cdn_url?: string;
     path?: string;
-    s3_key?: string;
     presigned_fields?: Record<string, string> | null;
   }>("/media/upload/request", {
     media_type: mediaType,
@@ -246,7 +237,7 @@ export async function presignUpload(
   return {
     upload_url: res.data.signed_url || res.data.presigned_url || "",
     media_id: res.data.media_id,
-    cdn_url: res.data.cdn_url || (res.data.s3_key ? `https://cdn.jainune.com/${res.data.s3_key}` : undefined),
+    cdn_url: res.data.cdn_url || "",
     path: res.data.path,
     presigned_fields: res.data.presigned_fields,
   };

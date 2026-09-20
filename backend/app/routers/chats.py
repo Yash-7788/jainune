@@ -202,6 +202,8 @@ async def get_messages(
     limit: int = Query(default=30, ge=1, le=100),
     before: Optional[str] = Query(default=None, description="Cursor: message UUID for pagination"),
     cursor: Optional[str] = Query(default=None, description="Cursor alias for pagination"),
+    since_id: Optional[str] = Query(default=None, description="Forward sync: message UUID to fetch messages newer than"),
+    after: Optional[str] = Query(default=None, description="Alias for since_id"),
     redis: RedisDep = None,
 ) -> ChatHistoryResponse:
     user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
@@ -219,10 +221,36 @@ async def get_messages(
             detail="This chat has expired.",
         )
     actual_chat_id = chat["id"]
-    cursor_val = before or cursor
+    cursor_val = before if isinstance(before, str) else (cursor if isinstance(cursor, str) else None)
+    since_val = since_id if isinstance(since_id, str) else (after if isinstance(after, str) else None)
 
     async with db.acquire() as conn:
-        if cursor_val:
+        if since_val:
+            # Forward delta sync: fetch messages newer than since_id
+            try:
+                since_uuid = uuid.UUID(since_val)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid since_id cursor.")
+            since_row = await conn.fetchrow(
+                "SELECT created_at, id FROM messages WHERE id = $1 AND chat_id = $2",
+                since_uuid, actual_chat_id,
+            )
+            if not since_row:
+                rows = []
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, chat_id, sender_id, message_type, content,
+                           media_url, is_read, created_at,
+                           is_moderated, moderation_type, moderation_disclaimer
+                    FROM messages
+                    WHERE chat_id = $1 AND (created_at, id) > ($2, $3)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    """,
+                    actual_chat_id, since_row["created_at"], since_row["id"], limit + 1,
+                )
+        elif cursor_val:
             # Cursor-based: fetch messages older than cursor message id
             try:
                 before_uuid = uuid.UUID(cursor_val)
@@ -435,7 +463,12 @@ async def send_message(
 
             # Validate media attachment provenance and approval (NEW-003)
             final_media_url = body.media_url
-            if body.message_type in ("photo", "voice"):
+            if body.message_type == "voice":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Voice messages are deprecated and disabled in Jainune v2.",
+                )
+            if body.message_type == "photo":
                 target_media_id = None
                 if body.media_id:
                     try:

@@ -37,7 +37,7 @@ async def purge_user_account(
 ) -> dict:
     """
     Permanently purges all user data:
-    1. Fetches all media files and deletes them from S3 storage.
+    1. Deletes avatar from Supabase Storage.
     2. Nullifies administrative reviewer/resolver references.
     3. Physically deletes user rows from PostgreSQL database tables.
     4. Clears all Redis cache, quota, feed, and rate limit keys.

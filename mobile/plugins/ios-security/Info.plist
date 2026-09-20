@@ -76,8 +76,6 @@
 	<string>Jainune requires camera access for selfie verification.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Jainune uses your approximate location to connect you with nearby verified Jain singles in your region.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Jainune requires microphone access to record your 7-second voice snapshot and audio sparks.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Jainune needs access to your gallery to upload profile photos.</string>
 	<key>UILaunchStoryboardName</key>

@@ -43,7 +43,7 @@ const WHEEL_REWARDS = [
 
 const DICE_REWARDS = [
   "Reveal A Shared Value",
-  "Free Voice Spark Pass",
+  "Free Super Connect Pass",
   "Unlock Question Bounty",
   "Bangalore Vibe Map Boost",
   "Priority In Mutual Feed",

@@ -101,10 +101,6 @@ class Settings(BaseSettings):
     fcm_service_account_json: str = ""
     fcm_project_id: str = "jainune-prod"
 
-    # Celery
-    celery_broker_url: str = "redis://localhost:6379/1"
-    celery_result_backend: str = "redis://localhost:6379/2"
-
     # Cloudflare Turnstile & Origin Protection
     turnstile_secret_key: str = ""
     cloudflare_origin_secret: str = ""

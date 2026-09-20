@@ -280,9 +280,7 @@ async def recompute_trust_score(
         SELECT
             u.is_photo_verified,
             u.created_at,
-            (SELECT COUNT(*) FROM user_media
-             WHERE user_id = u.id AND media_type = 'voice' AND status = 'approved'
-            ) AS has_voice,
+            0 AS has_voice,
             (SELECT COUNT(*) FROM reports
              WHERE reported_id = u.id
                AND resolved = TRUE

@@ -206,8 +206,15 @@ async def fetch_recommended_feed(
                     "SELECT candidate_ids FROM feed_queues WHERE user_id = $1",
                     user_id,
                 )
-                if queue_row and queue_row.get("candidate_ids"):
-                    q_ids = queue_row["candidate_ids"]
+                q_ids = None
+                if queue_row:
+                    try:
+                        q_ids = queue_row.get("candidate_ids") if hasattr(queue_row, "get") else queue_row["candidate_ids"]
+                        if asyncio.iscoroutine(q_ids):
+                            q_ids = await q_ids
+                    except Exception:
+                        q_ids = None
+                if q_ids:
                     if q_ids:
                         swiped_ids = await conn.fetch(
                             "SELECT target_id FROM interactions WHERE actor_id = $1",
@@ -532,26 +539,21 @@ async def _run_pipeline(
                 SELECT user_id, media_type, cdn_url, s3_key, position, duration_seconds
                 FROM user_media
                 WHERE user_id = ANY($1::uuid[])
+                  AND media_type = 'photo'
                   AND is_processed = TRUE
                   AND status = 'approved'
-                ORDER BY user_id, media_type, position ASC
+                ORDER BY user_id, position ASC
                 """,
                 candidate_ids,
             )
             for m in media_rows:
                 uid = str(m["user_id"])
                 url = m["cdn_url"] or m["s3_key"]
-                if m["media_type"] == "photo":
-                    media_by_user.setdefault(uid, []).append({
-                        "id": str(m["user_id"]) + f"_p{m['position']}",
-                        "url": url,
-                        "order": m["position"],
-                    })
-                elif m["media_type"] == "voice":
-                    voice_by_user[uid] = {
-                        "audio_url": url,
-                        "duration_seconds": float(m["duration_seconds"] or 0),
-                    }
+                media_by_user.setdefault(uid, []).append({
+                    "id": str(m["user_id"]) + f"_p{m['position']}",
+                    "url": url,
+                    "order": m["position"],
+                })
 
             # Batch-load prompts
             prompt_rows = await conn.fetch(
@@ -726,12 +728,13 @@ async def fetch_daily_compatible(
             return None
 
         cand_id = row["id"]
-        # Batch load photos and voice note
+        # Batch load photos
         media_rows = await conn.fetch(
             """
             SELECT media_type, cdn_url, s3_key, position, duration_seconds
             FROM user_media
             WHERE user_id = $1
+              AND media_type = 'photo'
               AND is_processed = TRUE
               AND status = 'approved'
             ORDER BY position ASC
@@ -742,17 +745,11 @@ async def fetch_daily_compatible(
         voice_snapshot = None
         for m in media_rows:
             url = m["cdn_url"] or m["s3_key"]
-            if m["media_type"] == "photo":
-                photos.append({
-                    "id": f"{cand_id}_p{m['position']}",
-                    "url": url,
-                    "order": m["position"],
-                })
-            elif m["media_type"] == "voice" and not voice_snapshot:
-                voice_snapshot = {
-                    "audio_url": url,
-                    "duration_seconds": float(m["duration_seconds"] or 0),
-                }
+            photos.append({
+                "id": f"{cand_id}_p{m['position']}",
+                "url": url,
+                "order": m["position"],
+            })
 
         # Batch load prompts
         prompt_rows = await conn.fetch(

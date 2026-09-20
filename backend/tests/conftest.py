@@ -17,30 +17,8 @@ from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
-if "celery" not in sys.modules:
-    celery_mock = MagicMock()
-    class MockCelery:
-        def __init__(self, *args, **kwargs):
-            self.conf = MagicMock()
-        def task(self, *args, **kwargs):
-            def decorator(fn):
-                fn.delay = MagicMock()
-                fn.apply_async = MagicMock()
-                return fn
-            if len(args) == 1 and callable(args[0]):
-                return decorator(args[0])
-            return decorator
-    celery_mock.Celery = MockCelery
-    sys.modules["celery"] = celery_mock
-    sys.modules["celery.schedules"] = MagicMock()
-
 if "supabase" not in sys.modules:
     sys.modules["supabase"] = MagicMock()
-if "boto3" not in sys.modules:
-    sys.modules["boto3"] = MagicMock()
-    sys.modules["botocore"] = MagicMock()
-    sys.modules["botocore.config"] = MagicMock()
-    sys.modules["botocore.exceptions"] = MagicMock()
 
 import jwt
 import pytest

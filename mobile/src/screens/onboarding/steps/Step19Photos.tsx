@@ -21,7 +21,7 @@ import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import OnboardingStep from "../OnboardingStep";
 import { colors, spacing, typography, radii } from "../../../theme/tokens";
 import { useOnboardingStore } from "../../../store/onboardingStore";
-import { submitStep19, getPresignedUploadUrl, uploadToS3, confirmUpload } from "../../../api/onboardingApi";
+import { submitStep19, getPresignedUploadUrl, uploadToStorage, confirmUpload } from "../../../api/onboardingApi";
 import { extractError } from "../../../api/client";
 import { optimizeProfilePhoto } from "../../../utils/imageOptimizer";
 import type { OnboardingStackParams } from "../OnboardingNavigator";
@@ -53,7 +53,7 @@ export default function Step19Screen() {
         optimized.fileSizeBytes,
         "image/webp"
       );
-      await uploadToS3(upload_url, optimized.uri, "image/webp", presigned_fields);
+      await uploadToStorage(upload_url, optimized.uri, "image/webp", presigned_fields);
       await confirmUpload(media_id);
       setPhotos([{ mediaId: media_id, localUri: optimized.uri, cdnUrl: cdn_url }]);
     } catch (err: any) {

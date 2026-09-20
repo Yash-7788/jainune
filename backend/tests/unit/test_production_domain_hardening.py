@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 

@@ -1,8 +1,12 @@
 /**
- * Phase 5 — Chat API additions
+ * Chat API
  * sendMediaMessage: POST /v1/chats/:matchId/messages (type: photo/voice)
  * reportMessage: POST /v1/reports
  * blockUser: POST /v1/users/block
+ *
+ * OPTIMIZE.md §8.3 B — Delta Synchronization via Monotonic Cursors:
+ *   getMessages(matchId, cursor)       → backward pagination (scroll-up history)
+ *   getMessagesDelta(matchId, sinceId) → forward delta sync (new messages only)
  */
 
 import { apiGet, apiPost, apiPut, apiDelete } from "./client";
@@ -12,7 +16,7 @@ export interface Message {
   id: string;
   match_id: string;
   sender_id: string;
-  type: "text" | "voice" | "photo";
+  type: "text" | "photo";
   content: string | null;
   media_url: string | null;
   is_read: boolean;
@@ -69,7 +73,7 @@ export async function getMessages(matchId: string, cursor?: string): Promise<Mes
   const res = await apiGet<{ messages: any[] }>(`/chats/${matchId}/messages`, {
     cursor,
     before: cursor,
-    limit: 30,
+    limit: 20,
   });
   if (!res.success) throw { _apiError: res.error };
   const rawMsgs = res.data?.messages || [];
@@ -77,7 +81,36 @@ export async function getMessages(matchId: string, cursor?: string): Promise<Mes
     id: String(m.id),
     match_id: String(m.chat_id || matchId),
     sender_id: String(m.sender_id),
-    type: (m.message_type === "photo" || m.type === "photo") ? "photo" : (m.message_type === "voice" || m.type === "voice") ? "voice" : "text",
+    type: (m.message_type === "photo" || m.type === "photo") ? "photo" : "text",
+    content: m.content || null,
+    media_url: m.media_url || null,
+    is_read: Boolean(m.is_read),
+    created_at: m.created_at || new Date().toISOString(),
+  }));
+}
+
+/**
+ * GET /v1/chats/:match_id/messages?since_id=${sinceId}
+ * Forward delta sync — returns ONLY messages newer than sinceId.
+ * OPTIMIZE.md §8.3 B: uses B-tree index WHERE id > $1; O(log N) cost.
+ * Returns [] when no new messages (200 but empty array) — zero network cost.
+ */
+export async function getMessagesDelta(
+  matchId: string,
+  sinceId: string
+): Promise<Message[]> {
+  const res = await apiGet<{ messages: any[] }>(`/chats/${matchId}/messages`, {
+    since_id: sinceId,
+    after: sinceId,
+    limit: 50,
+  });
+  if (!res.success) throw { _apiError: res.error };
+  const rawMsgs = res.data?.messages || [];
+  return rawMsgs.map((m: any) => ({
+    id: String(m.id),
+    match_id: String(m.chat_id || matchId),
+    sender_id: String(m.sender_id),
+    type: (m.message_type === "photo" || m.type === "photo") ? "photo" : "text",
     content: m.content || null,
     media_url: m.media_url || null,
     is_read: Boolean(m.is_read),
@@ -118,10 +151,10 @@ export async function sendMessage(
   };
 }
 
-/** POST /v1/chats/:match_id/messages — media (photo or voice) */
+/** POST /v1/chats/:match_id/messages — media (photo) */
 export async function sendMediaMessage(
   matchId: string,
-  type: "photo" | "voice",
+  type: "photo",
   mediaUrl: string,
   mediaId?: string,
   idempotencyKey?: string

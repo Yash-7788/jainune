@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
-for mod in ["asyncpg", "redis", "redis.asyncio", "boto3", "botocore", "botocore.exceptions", "celery", "celery.schedules", "razorpay"]:
+for mod in ["asyncpg", "redis", "redis.asyncio", "supabase", "razorpay"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 

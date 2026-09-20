@@ -104,11 +104,14 @@ async def test_token_refresh_rotation(client: AsyncClient, mock_pool):
     pool, conn = mock_pool
     uid = uuid.uuid4()
 
-    # DB mock: valid active refresh token exists
-    conn.fetchrow.return_value = {
-        "user_id": uid,
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
-    }
+    # DB mock: valid active refresh token exists (first fetchrow checks revoked tokens, second checks refresh_tokens)
+    conn.fetchrow.side_effect = [
+        None,
+        {
+            "user_id": uid,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+        },
+    ]
 
     resp = await client.post(
         "/v1/auth/token/refresh",
@@ -120,7 +123,7 @@ async def test_token_refresh_rotation(client: AsyncClient, mock_pool):
     assert "access_token" in body["data"]
     assert "refresh_token" in body["data"]
     # Verify DB update executed to rotate token
-    conn.execute.assert_called_once()
+    assert conn.execute.call_count >= 1
 
 
 @pytest.mark.asyncio

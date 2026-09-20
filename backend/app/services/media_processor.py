@@ -139,6 +139,8 @@ async def enqueue_moderation(media_id: uuid.UUID, *_args, **_kwargs) -> None:
 # Image payload validator (no server-side resize/transcode — client sends WebP)
 # ---------------------------------------------------------------------------
 
+import struct
+
 # Recognised magic bytes: RIFF....WEBP, JPEG (FF D8 FF), PNG (89 50 4E 47)
 _MAGIC_WEBP = (b"RIFF", b"WEBP")
 _MAGIC_JPEG = b"\xff\xd8\xff"
@@ -149,7 +151,7 @@ _MAX_BYTES   = 10 * 1024 * 1024  # 10 MB hard cap
 def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:
     """
     Lightweight server-side guard: validates magic bytes and enforces size cap.
-    No image loading, no resize, no transcode — that happens client-side (WebP/480px).
+    No heavy image decode or resize — that happens client-side (WebP/480px) to protect 512MB RAM.
     Raises ValueError for invalid or oversized payloads.
     Returns the original bytes unchanged.
     """
@@ -158,20 +160,15 @@ def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:
     if len(data) > _MAX_BYTES:
         raise ValueError(f"Image exceeds {_MAX_BYTES // (1024*1024)} MB limit")
     # Validate magic bytes — accept WebP, JPEG, PNG
-    if not (
-        (data[:4] == _MAGIC_WEBP[0] and data[8:12] == _MAGIC_WEBP[1])
-        or data[:3] == _MAGIC_JPEG
-        or data[:4] == _MAGIC_PNG
-    ):
-        raise ValueError("Unsupported image format: must be WebP, JPEG, or PNG")
-    return data
+    if data[:4] == b"RIFF":
+        if len(data) < 12 or data[8:12] != b"WEBP":
+            raise ValueError("Corrupted image header: Invalid WebP header")
+        expected_size = struct.unpack("<I", data[4:8])[0] + 8
+        if len(data) < expected_size:
+            raise ValueError("Corrupted image header: Truncated WebP payload")
+        return data
 
+    if data[:3] == _MAGIC_JPEG or data[:4] == _MAGIC_PNG:
+        return data
 
-def _check_s3_size(key: str, media_type: str = "photo") -> tuple[bool, Optional[str]]:
-    """Legacy check fallback for S3 compatibility tests."""
-    return True, None
-
-
-def _rekognition_check(key: str) -> tuple[bool, Optional[str]]:
-    """Legacy check fallback for Rekognition compatibility tests."""
-    return True, None
+    raise ValueError("Corrupted image header: Unsupported image format (must be WebP, JPEG, or PNG)")
