@@ -469,7 +469,7 @@ async def get_metrics(
     request: Request,
     x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token"),
 ):
-    if settings.environment == "production":
+    if settings.environment.lower() == "production":
         expected = getattr(settings, "metrics_secret_token", "") or settings.secret_key if hasattr(settings, "secret_key") else getattr(settings, "metrics_secret_token", "")
         if not expected or not x_metrics_token or not hmac.compare_digest(x_metrics_token, expected):
             raise HTTPException(status_code=403, detail="Forbidden")

@@ -126,11 +126,11 @@ async def child_safety_standards():
     <h2>1. Strict Age Gate Enforcement</h2>
     <p>Users must authenticate that they are 18 years of age or older. Accounts discovered or suspected of being underage are immediately banned and permanently purged.</p>
 
-    <h2>2. Automated & Human Moderation</h2>
-    <p>All uploaded photos and media are analyzed prior to publication for policy compliance, including automated perceptual hash detection against known CSAM databases. Violative content is blocked instantly.</p>
+    <h2>2. Content Moderation & Safety</h2>
+    <p>All uploaded photos and media are screened prior to publication for policy compliance. Content violating child safety or community standards is blocked immediately.</p>
 
-    <h2>3. Mandatory Legal Reporting</h2>
-    <p>In compliance with international and national laws, Jainune immediately reports any identified child exploitation material or grooming attempts to the <strong>National Center for Missing & Exploited Children (NCMEC)</strong> and Indian law enforcement authorities.</p>
+    <h2>3. Legal Compliance</h2>
+    <p>Jainune complies with applicable child protection laws and cooperates with law enforcement authorities as required by law.</p>
 
     <h2>4. Child Safety Contact & Urgent Reporting</h2>
     <p>If you encounter content or conduct involving minors on our platform, report it immediately in-app or via our 24/7 dedicated safety response contact:</p>

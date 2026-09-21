@@ -85,5 +85,8 @@ def test_config_production_validator_accepts_raw_json():
         cloudflare_origin_secret="live_cf_origin_secret",
         fcm_service_account_path="/nonexistent/path/on/render.json",
         fcm_service_account_json=raw_json,
+        otp_pepper_secret="a_very_secure_otp_pepper_secret_32_chars",
+        msg91_auth_key="live_msg91_auth_key_12345",
+        metrics_secret_token="live_metrics_secret_token_12345",
     )
     assert s.fcm_service_account_json == raw_json

@@ -23,7 +23,8 @@ try:
     with open(settings.jwt_private_key_path, "rb") as f:
         _RSA_PRIVATE_KEY = f.read()
 except (FileNotFoundError, OSError):
-    if settings.environment == "production":
+    # Case-insensitive: "Production", "PRODUCTION", "production" all trigger the fatal guard
+    if settings.environment.lower() == "production":
         raise RuntimeError(f"FATAL: Production JWT private key missing at {settings.jwt_private_key_path}")
     _RSA_PRIVATE_KEY = b""
 
@@ -31,11 +32,11 @@ try:
     with open(settings.jwt_public_key_path, "rb") as f:
         _RSA_PUBLIC_KEY = f.read()
 except (FileNotFoundError, OSError):
-    if settings.environment == "production":
+    if settings.environment.lower() == "production":
         raise RuntimeError(f"FATAL: Production JWT public key missing at {settings.jwt_public_key_path}")
     _RSA_PUBLIC_KEY = b""
 
-if settings.environment == "production":
+if settings.environment.lower() == "production":
     if not settings.otp_pepper_secret or settings.otp_pepper_secret == "default_test_pepper_secret_32_bytes_len":
         raise RuntimeError("FATAL: Insecure or default otp_pepper_secret in production environment.")
 

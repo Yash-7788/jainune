@@ -29,6 +29,7 @@ import {
   spinArcadeWheel,
   rollArcadeDice,
 } from "../../api/profileApi";
+import DilemmaVoteModal from "./DilemmaVoteModal";
 import { validatePaymentResponse } from "../../security/inputValidation";
 import { extractError } from "../../api/client";
 
@@ -41,13 +42,19 @@ const WHEEL_REWARDS = [
   { label: "5 Intentional Likes", icon: "💫" },
 ];
 
+// BUG-7: backend pools by total (sum of 2 dice, range 2-12) — need 11 reward labels indexed by total-2
 const DICE_REWARDS = [
-  "Reveal A Shared Value",
-  "Free Super Connect Pass",
-  "Unlock Question Bounty",
-  "Bangalore Vibe Map Boost",
-  "Priority In Mutual Feed",
-  "Serendipity Match Highlight",
+  "Reveal A Shared Value",          // total 2
+  "Free Voice Spark Pass",           // total 3
+  "Unlock Question Bounty",          // total 4
+  "Bangalore Vibe Map Boost",        // total 5
+  "Priority In Mutual Feed",         // total 6
+  "Serendipity Match Highlight",     // total 7
+  "Double Karma Week",               // total 8
+  "Icebreaker Unlock",               // total 9
+  "10 Bonus Intentional Likes",      // total 10
+  "Revival Pass",                    // total 11
+  "Instant Serendipity Match",       // total 12
 ];
 
 interface Props {
@@ -57,9 +64,10 @@ interface Props {
 }
 
 export default function SerendipityArcadeModal({ visible, onClose, onNavigateToChat }: Props) {
-  const [activeTab, setActiveTab] = useState<"wheel" | "dice">("wheel");
-  const [spins, setSpins] = useState(0);
-  const [rolls, setRolls] = useState(0);
+  const [activeTab, setActiveTab] = useState<"wheel" | "dice" | "dilemmas">("wheel");
+  const [dilemmaVisible, setDilemmaVisible] = useState(false);
+  const [spins, setSpins] = useState(1);
+  const [rolls, setRolls] = useState(1);
   const [isSpinning, setIsSpinning] = useState(false);
   const [isRolling, setIsRolling] = useState(false);
   const [lastWon, setLastWon] = useState<string | null>(null);
@@ -149,7 +157,11 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
 
     try {
       const res = await rollArcadeDice();
-      const rolled = (res as any).dice?.[0] || (res as any).roll_outcome?.[0] || 1;
+      // BUG-7: use total (sum of both dice, 2-12), not dice[0] (1-6)
+      const diceArr: number[] = (res as any).dice || [];
+      const d1 = diceArr[0] || 1;
+      const d2 = diceArr[1] || 1;
+      const total: number = (res as any).total ?? (d1 + d2);
       diceRollAnim.setValue(0);
       Animated.sequence([
         Animated.timing(diceRollAnim, {
@@ -160,26 +172,9 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
         }),
       ]).start(() => {
         setIsRolling(false);
-        setDiceNumber(rolled);
+        setDiceNumber(d1); // visual die face shows first die
         setRolls(res.remaining_dice_rolls);
-        setLastWon(`🎲 Rolled ${rolled}: ${DICE_REWARDS[rolled - 1]}`);
-
-        if (res.chat_id && res.paired_user) {
-          Alert.alert(
-            "Lucky Match! 🎲",
-            `You've been paired with ${res.paired_user.first_name} from ${res.paired_user.city}! 30-minute momentum window active.`,
-            [
-              { text: "Later", style: "cancel" },
-              {
-                text: "Chat Now",
-                onPress: () => {
-                  onClose();
-                  onNavigateToChat?.(res.chat_id!);
-                },
-              },
-            ]
-          );
-        }
+        setLastWon(`🎲 Rolled ${d1}+${d2}=${total}: ${DICE_REWARDS[total - 2] ?? DICE_REWARDS[DICE_REWARDS.length - 1]}`);
       });
     } catch (err: any) {
       setIsRolling(false);
@@ -255,6 +250,14 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
                 Karma Dice
               </Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.tabBtn, activeTab === "dilemmas" && styles.tabBtnActive]}
+              onPress={() => setDilemmaVisible(true)}
+            >
+              <Text style={[styles.tabBtnText, activeTab === "dilemmas" && styles.tabBtnTextActive]}>
+                🧩 Dilemmas
+              </Text>
+            </TouchableOpacity>
           </View>
 
           {/* Interactive Game Area */}
@@ -274,7 +277,7 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
                 disabled={isSpinning}
               >
                 <Text style={styles.actionBtnText}>
-                  {isSpinning ? "Spinning..." : spins > 0 ? `Spin Wheel (${spins} Left)` : "Get Spins to Play"}
+                  {isSpinning ? "Spinning..." : `Spin Wheel (${spins} Left)`}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -289,7 +292,7 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
                 disabled={isRolling}
               >
                 <Text style={styles.actionBtnText}>
-                  {isRolling ? "Rolling..." : rolls > 0 ? `Roll Dice (${rolls} Left)` : "Get Rolls to Play"}
+                  {isRolling ? "Rolling..." : `Roll Dice (${rolls} Left)`}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -319,6 +322,12 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
           </View>
         </View>
       </View>
+
+      {/* BUG-008: Dilemma voting sub-modal */}
+      <DilemmaVoteModal
+        visible={dilemmaVisible}
+        onClose={() => setDilemmaVisible(false)}
+      />
     </Modal>
   );
 }

@@ -520,7 +520,12 @@ async def spin_serendipity_wheel(
             pass
 
         try:
-            await redis.delete(f"feed:{user_id}", f"feed:{candidate['id']}")
+            await redis.delete(
+                f"feed:{user_id}",
+                f"feed:{candidate['id']}",
+                f"feed:cache:{user_id}",
+                f"feed:cache:{candidate['id']}",
+            )
         except Exception:
             pass
 
@@ -704,14 +709,20 @@ async def roll_lucky_dice(
             pass
 
         try:
-            await redis.delete(f"feed:{user_id}", f"feed:{candidate['id']}")
+            await redis.delete(
+                f"feed:{user_id}",
+                f"feed:{candidate['id']}",
+                f"feed:cache:{user_id}",
+                f"feed:cache:{candidate['id']}",
+            )
         except Exception:
             pass
 
-    # Register in Redis active dice pool with 30m TTL
+    # Register in Redis active dice pool with 30m TTL and invalidate feed cache (BUG-006)
     try:
         await redis.sadd(f"arcade:dice_pool:{total}", str(user_id))
         await redis.expire(f"arcade:dice_pool:{total}", 1800)
+        await redis.delete(f"feed:cache:{user_id}")
     except Exception:
         pass
 

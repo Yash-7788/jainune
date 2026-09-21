@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 import uuid
 from uuid import UUID
 
@@ -58,6 +58,7 @@ class UpdateProfileBody(BaseModel):
     eats_onion_garlic: Optional[bool] = None
     paryushan_mode: Optional[bool] = None
     fcm_token: Optional[str] = Field(None, max_length=256)
+    vibe_zones: Optional[List[str]] = Field(None, max_length=7)
     model_config = {"extra": "forbid"}
 
     @field_validator("first_name", "bio", "job_title", "company", "education", "city", "state", mode="before")
@@ -68,7 +69,10 @@ class UpdateProfileBody(BaseModel):
             cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", v.strip())
             cleaned = re.sub(r"<\s*script[^>]*>.*?<\s*/\s*script\s*>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
             cleaned = re.sub(r"[<>]", "", cleaned)
-            return cleaned
+            # BUG-R11-1: blank string after strip is not None, so exclude_none=True won't
+            # filter it — it flows through to SET job_title = '' and silently erases the field.
+            # Return None so the field is excluded from the UPDATE entirely.
+            return cleaned if cleaned else None
         return v
 
 
@@ -124,7 +128,7 @@ async def _get_user_row(user_id: UUID, conn: asyncpg.Connection) -> dict:
             dietary_strictness, eats_root_vegetables, eats_onion_garlic,
             community_sect, paryushan_mode, job_title, company, education,
             height_cm, bio, subscription_tier, is_photo_verified, account_status,
-            onboarding_completed, super_connect_credits,
+            onboarding_completed, super_connect_credits, vibe_zones,
             COALESCE((
                 SELECT json_agg(
                     json_build_object(

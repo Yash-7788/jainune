@@ -1120,9 +1120,11 @@ async def logout_endpoint(
                     remaining_token,
                     user_id,
                 )
-            else:
+            elif body and body.all_devices:
+                # Explicit all-devices logout: wipe all push registrations
                 await conn.execute("DELETE FROM user_devices WHERE user_id = $1", user_id)
                 await conn.execute("UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1", user_id)
+            # else: plain logout with no device_id — leave other devices' push tokens intact
         except Exception as exc:
             log.warning("Failed to clean up user_devices on logout for %s: %s", user_id, exc)
 

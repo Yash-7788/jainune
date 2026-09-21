@@ -117,7 +117,7 @@ export default function EditProfileScreen() {
       const data = await getMyProfile();
       setFirstName(data.first_name || "");
       setCity(data.city || "");
-      setProfession(data.profession || "");
+      setProfession(data.job_title || data.profession || "");
       setEducation(data.education || "");
       setCommunitySect(data.community_sect || "");
       setDietaryStrictness(data.dietary_strictness || "");
@@ -265,7 +265,7 @@ export default function EditProfileScreen() {
 
     setSaving(true);
     try {
-      await updateProfile({
+      const updated = await updateProfile({
         first_name: firstName.trim(),
         city: city.trim(),
         profession: profession.trim(),
@@ -283,17 +283,16 @@ export default function EditProfileScreen() {
         await updatePrompts(prompts);
       }
 
-      // L3 cache write-back: invalidate stale profile so ProfileScreen reloads fresh
-      getMyProfile()
-        .then((fresh) => {
-          cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
-            lastSyncedAt: Date.now(),
-            profile: fresh,
-          });
-        })
-        .catch(() => {
-          // Non-critical: ProfileScreen will refetch on focus if cache is missing
-        });
+      // Sync state and cache from server response so ProfileScreen focus-load gets fresh data
+      if (updated) {
+        setFirstName(updated.first_name || firstName);
+        setCity(updated.city || city);
+        setProfession(updated.job_title || updated.profession || profession);
+        cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+          lastSyncedAt: Date.now(),
+          profile: updated,
+        }).catch(() => {});
+      }
 
       Alert.alert("Profile Updated", "Your changes have been saved.", [
         { text: "Done", onPress: () => navigation.goBack() },

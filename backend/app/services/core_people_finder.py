@@ -627,6 +627,31 @@ async def _run_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# Compatibility helper (mirrors interactions._calc_compatibility without import)
+# ---------------------------------------------------------------------------
+
+
+def _compute_compatibility(caller: dict, candidate) -> dict:
+    """Compute per-pair values alignment score from revealed cultural attributes."""
+    score = 72
+    shared = ["Jain Values"]
+    caller_sect = (caller.get("community_sect") if isinstance(caller, dict) else getattr(caller, "community_sect", None))
+    cand_sect = candidate.get("community_sect") if isinstance(candidate, dict) else getattr(candidate, "community_sect", None)
+    if caller_sect and cand_sect and caller_sect == cand_sect:
+        score += 14
+        shared.append("Same Sect")
+    caller_diet = (caller.get("dietary_strictness") if isinstance(caller, dict) else getattr(caller, "dietary_strictness", None))
+    cand_diet = candidate.get("dietary_strictness") if isinstance(candidate, dict) else getattr(candidate, "dietary_strictness", None)
+    if caller_diet and cand_diet and caller_diet == cand_diet:
+        score += 10
+        shared.append("Shared Dietary Practice")
+    cand_verified = candidate.get("is_photo_verified") if isinstance(candidate, dict) else getattr(candidate, "is_photo_verified", None)
+    if cand_verified:
+        score += 4
+    return {"values_alignment_percentage": min(score, 99), "shared_traditions": shared}
+
+
+# ---------------------------------------------------------------------------
 # Nightly Gale-Shapley: fetch today's pre-computed "Daily Compatible" pair
 # ---------------------------------------------------------------------------
 
@@ -652,6 +677,15 @@ async def fetch_daily_compatible(
     rationale = "Highest reciprocal behavioral affinity in your region."
 
     async with db.acquire() as conn:
+        # Fetch caller's cultural attributes for real compatibility scoring (BUG-001)
+        caller_row = await conn.fetchrow(
+            """
+            SELECT community_sect, dietary_strictness
+            FROM users WHERE id = $1
+            """,
+            user_id,
+        )
+
         # Check nightly GS proposal for today first
         row = await conn.fetchrow(
             """
@@ -798,10 +832,7 @@ async def fetch_daily_compatible(
         "photos": photos,
         "prompts": prompts,
         "voice_snapshot": voice_snapshot,
-        "compatibility": {
-            "values_alignment_percentage": 94,
-            "shared_traditions": ["Jain Values", "Ahimsa"],
-        },
+        "compatibility": _compute_compatibility(caller_row, row),
         "compatibility_rationale": rationale,
         "pairing_algorithm": algo,
     }

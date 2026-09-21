@@ -203,8 +203,10 @@ export default function ChatScreen() {
     getSubscriptionStatus()
       .then((sub) => {
         setIsSubscriber(
-          sub.tier === "jainune_plus" ||
-            sub.tier === "plus" ||
+          sub.tier === "base_399" ||
+            sub.tier === "premium_799" ||
+            sub.tier === "ultra_1499" ||
+            sub.tier === "jainune_plus" ||
             sub.is_active === true
         );
       })
@@ -419,8 +421,27 @@ export default function ChatScreen() {
 
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
-        // App resume: delta sync only — cache already painted, fetch new msgs
-        loadMessages();
+        const latestId = messages[0]?.id;
+        if (latestId) {
+          getMessagesDelta(matchId, latestId)
+            .then((newMsgs) => {
+              if (newMsgs.length === 0) return;
+              setMessages((prev) => {
+                const existingIds = new Set(prev.map((m) => m.id));
+                const unique = newMsgs.filter((m) => !existingIds.has(m.id));
+                if (unique.length === 0) return prev;
+                const merged = [...unique, ...prev];
+                writeChatCache(merged);
+                return merged;
+              });
+              triggerMarkRead();
+            })
+            .catch(() => {
+              loadMessages();
+            });
+        } else {
+          loadMessages();
+        }
         triggerMarkRead();
       }
     });
@@ -428,7 +449,7 @@ export default function ChatScreen() {
     return () => {
       appStateSub.remove();
     };
-  }, [loadMessages, triggerMarkRead]);
+  }, [loadMessages, triggerMarkRead, matchId, messages, writeChatCache]);
 
   const sendDraft = useCallback(async (content: string) => {
     const trimmed = content.trim();
@@ -481,6 +502,13 @@ export default function ChatScreen() {
         writeChatCache(updated);
         return updated;
       });
+      if (sent.is_moderated) {
+        Alert.alert(
+          "Message Modified",
+          sent.moderation_disclaimer ||
+            "Your message contained contact information. Upgrade your plan to send contact details."
+        );
+      }
     } catch (err: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setDraft(content);

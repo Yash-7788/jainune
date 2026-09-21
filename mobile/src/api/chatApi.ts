@@ -21,6 +21,8 @@ export interface Message {
   media_url: string | null;
   is_read: boolean;
   created_at: string;
+  is_moderated?: boolean;
+  moderation_disclaimer?: string | null;
 }
 
 export interface ChatThread {
@@ -86,6 +88,8 @@ export async function getMessages(matchId: string, cursor?: string): Promise<Mes
     media_url: m.media_url || null,
     is_read: Boolean(m.is_read),
     created_at: m.created_at || new Date().toISOString(),
+    is_moderated: Boolean(m.is_moderated),
+    moderation_disclaimer: m.moderation_disclaimer || null,
   }));
 }
 
@@ -102,6 +106,7 @@ export async function getMessagesDelta(
   const res = await apiGet<{ messages: any[] }>(`/chats/${matchId}/messages`, {
     since_id: sinceId,
     after: sinceId,
+    since: sinceId,
     limit: 50,
   });
   if (!res.success) throw { _apiError: res.error };
@@ -115,6 +120,8 @@ export async function getMessagesDelta(
     media_url: m.media_url || null,
     is_read: Boolean(m.is_read),
     created_at: m.created_at || new Date().toISOString(),
+    is_moderated: Boolean(m.is_moderated),
+    moderation_disclaimer: m.moderation_disclaimer || null,
   }));
 }
 
@@ -148,6 +155,8 @@ export async function sendMessage(
     media_url: m.media_url || null,
     is_read: Boolean(m.is_read),
     created_at: m.created_at,
+    is_moderated: Boolean(m.is_moderated),
+    moderation_disclaimer: m.moderation_disclaimer || null,
   };
 }
 

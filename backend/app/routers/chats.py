@@ -204,6 +204,7 @@ async def get_messages(
     cursor: Optional[str] = Query(default=None, description="Cursor alias for pagination"),
     since_id: Optional[str] = Query(default=None, description="Forward sync: message UUID to fetch messages newer than"),
     after: Optional[str] = Query(default=None, description="Alias for since_id"),
+    since: Optional[str] = Query(default=None, description="Alias for since_id"),
     redis: RedisDep = None,
 ) -> ChatHistoryResponse:
     user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
@@ -222,7 +223,7 @@ async def get_messages(
         )
     actual_chat_id = chat["id"]
     cursor_val = before if isinstance(before, str) else (cursor if isinstance(cursor, str) else None)
-    since_val = since_id if isinstance(since_id, str) else (after if isinstance(after, str) else None)
+    since_val = since_id if isinstance(since_id, str) else (after if isinstance(after, str) else (since if isinstance(since, str) else None))
 
     async with db.acquire() as conn:
         if since_val:
@@ -438,7 +439,7 @@ async def send_message(
                 )
 
             effective_tier = await get_effective_user_tier(user_id, conn)
-            is_subscribed = effective_tier in ("premium_799", "ultra_1499", "jainune_plus", "gold", "platinum")
+            is_subscribed = effective_tier in ("base_399", "premium_799", "ultra_1499", "jainune_plus", "gold", "platinum")
 
             # Filter content for ALL message types (not just text) — F-016
             final_content = body.content

@@ -25,7 +25,10 @@ export interface MyProfile {
   gender: string;
   city: string;
   state: string;
+  // Backend returns job_title; profession is kept as alias for backward compat
   profession: string;
+  job_title?: string;
+  bio?: string;
   education: string;
   dietary_strictness: string;
   eats_root_vegetables: boolean;
@@ -38,9 +41,12 @@ export interface MyProfile {
   prompts: { prompt_id: string; prompt_text: string; response: string }[];
   voice_snapshot_url: string | null;
   is_verified: boolean;
+  // backend field name for verification
+  is_photo_verified?: boolean;
   account_status: string;
   paryushan_mode: boolean;
-  subscription_tier: "free" | "plus" | "gold" | "platinum" | "jainune_plus";
+  // Real PLAN_CATALOGUE tiers + legacy values
+  subscription_tier: "free" | "base_399" | "premium_799" | "ultra_1499" | "plus" | "gold" | "platinum" | "jainune_plus";
   subscription_expires_at: string | null;
   liked_by_count: number;
   profile_health_score: number;
@@ -106,10 +112,26 @@ export async function getMyProfile(): Promise<MyProfile> {
     prompt_key: p.prompt_key || p.prompt_text || "",
     response_text: p.response_text || p.response || "",
   }));
+  // BUG-004: backend returns is_photo_verified; mobile expects is_verified
+  const is_verified: boolean = Boolean(d.is_verified ?? d.is_photo_verified);
+
+  // BUG-005: backend never returns profile_health_score; compute client-side
+  const photoScore = Math.min((photos.length / 3) * 0.4, 0.4);
+  const promptScore = Math.min((prompts.length / 3) * 0.3, 0.3);
+  const voiceScore = d.voice_snapshot_url ? 0.2 : 0;
+  const bioScore = d.bio && d.bio.length >= 20 ? 0.1 : 0;
+  const profile_health_score = photoScore + promptScore + voiceScore + bioScore;
+
   return {
     ...d,
     photos,
     prompts,
+    is_verified,
+    profile_health_score,
+    // BUG-R11-1: server returns job_title, never profession. Without this remap
+    // MyProfile.profession is always undefined despite the required type annotation,
+    // causing EditProfileScreen to init blank and silently overwrite DB on every save.
+    profession: d.job_title || d.profession || "",
   };
 }
 
@@ -167,6 +189,7 @@ export async function updateProfile(payload: Partial<{
   if (payload.bio !== undefined) sanitized.bio = payload.bio;
   if (payload.height_cm !== undefined) sanitized.height_cm = payload.height_cm;
   if (payload.max_distance_km !== undefined) sanitized.max_distance_km = payload.max_distance_km;
+  if (payload.vibe_zones !== undefined) sanitized.vibe_zones = payload.vibe_zones;
   if (lookingForStr) {
     const raw = String(lookingForStr).toLowerCase().replace(/[\s-]+/g, "_");
     let normalized = raw;
@@ -500,4 +523,43 @@ export async function verifyArcadePayment(payload: {
   );
   if (!res.success) throw { _apiError: res.error };
   return { spins_added: 1, rolls_added: 1 };
+}
+
+// Dilemma (Arcade) — BUG-008: no mobile API existed for these backend endpoints
+export interface Dilemma {
+  id: string;
+  question_text: string;
+  option_a: string;
+  option_b: string;
+  tags: string[];
+  total_votes_a?: number | null;
+  total_votes_b?: number | null;
+  user_choice?: "A" | "B" | null;
+}
+
+export interface DilemmaResults extends Dilemma {
+  pct_a: number;
+  pct_b: number;
+  total_votes: number;
+}
+
+export async function getDilemmas(limit = 10, offset = 0): Promise<Dilemma[]> {
+  const res = await apiGet<Dilemma[]>(`/arcade/dilemmas?limit=${limit}&offset=${offset}`);
+  if (!res.success) throw { _apiError: res.error };
+  return res.data ?? [];
+}
+
+export async function voteDilemma(dilemma_id: string, choice: "A" | "B"): Promise<{ voted: boolean; choice: string; already_voted?: boolean }> {
+  const res = await apiPost<{ voted: boolean; choice: string; already_voted?: boolean }>(
+    `/arcade/dilemmas/${dilemma_id}/vote`,
+    { choice }
+  );
+  if (!res.success) throw { _apiError: res.error };
+  return res.data!;
+}
+
+export async function getDilemmaResults(dilemma_id: string): Promise<DilemmaResults> {
+  const res = await apiGet<DilemmaResults>(`/arcade/dilemmas/${dilemma_id}/results`);
+  if (!res.success) throw { _apiError: res.error };
+  return res.data!;
 }

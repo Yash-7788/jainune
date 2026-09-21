@@ -333,6 +333,7 @@ class UserProfileResponse(BaseModel):
     super_connect_credits: int = 0
     photos: List[dict] = Field(default_factory=list)
     prompts: List[dict] = Field(default_factory=list)
+    vibe_zones: List[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
