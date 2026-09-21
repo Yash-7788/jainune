@@ -441,7 +441,7 @@ async def health(
     is_healthy = db_ok and redis_ok
     status_str = "healthy" if is_healthy else "degraded"
 
-    expected = getattr(settings, "metrics_secret_token", "") or (getattr(settings, "secret_key", "") if hasattr(settings, "secret_key") else "")
+    expected = getattr(settings, "metrics_secret_token", "")
     has_token = bool(expected and x_metrics_token and hmac.compare_digest(x_metrics_token, expected))
 
     if has_token:
@@ -470,7 +470,7 @@ async def get_metrics(
     x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token"),
 ):
     if settings.environment.lower() == "production":
-        expected = getattr(settings, "metrics_secret_token", "") or settings.secret_key if hasattr(settings, "secret_key") else getattr(settings, "metrics_secret_token", "")
+        expected = getattr(settings, "metrics_secret_token", "")
         if not expected or not x_metrics_token or not hmac.compare_digest(x_metrics_token, expected):
             raise HTTPException(status_code=403, detail="Forbidden")
 

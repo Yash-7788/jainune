@@ -277,8 +277,6 @@ async def run_photo_moderation(
                     logger.error("run_photo_moderation: DB pool not initialized")
                     return ModerationResult(is_safe=None, reason="DB pool uninitialized", confidence=0.0)
 
-            cdn_url = avatar_public_url(user_id)
-
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     "SELECT id, user_id, status, cdn_url FROM user_media WHERE id = $1 AND user_id = $2",
@@ -288,6 +286,12 @@ async def run_photo_moderation(
                 if not row:
                     logger.warning("run_photo_moderation: Photo %s not found in DB", photo_id)
                     return ModerationResult(is_safe=None, reason="Photo not found", confidence=0.0)
+
+                # Preserve versioned cdn_url stored during confirm_upload or generate with version token
+                if row.get("cdn_url"):
+                    cdn_url = row["cdn_url"]
+                else:
+                    cdn_url = avatar_public_url(user_id, version=str(photo_id).replace("-", "")[:8])
 
                 # Idempotency guard: already resolved
                 if row["status"] in ("approved", "rejected"):

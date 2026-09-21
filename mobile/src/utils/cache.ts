@@ -13,6 +13,7 @@
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Image as ExpoImage } from "expo-image";
 
 // ── Cache key constants ────────────────────────────────────────────────────────
 
@@ -77,4 +78,21 @@ export function capMessages<T extends { created_at: string }>(
 /** Returns true if the cached snapshot is older than `ttlMs`. */
 export function isStale(lastSyncedAt: number, ttlMs: number): boolean {
   return Date.now() - lastSyncedAt > ttlMs;
+}
+
+// ── L4 Cache Invalidation ──────────────────────────────────────────────────────
+
+/**
+ * Purges expo-image memory and disk caches.
+ * Call on photo upload, replacement, or deletion to prevent stale on-device image persistence.
+ */
+export async function clearImageCache(): Promise<void> {
+  try {
+    if (ExpoImage && typeof ExpoImage.clearMemoryCache === "function") {
+      await ExpoImage.clearMemoryCache();
+    }
+    if (ExpoImage && typeof ExpoImage.clearDiskCache === "function") {
+      await ExpoImage.clearDiskCache();
+    }
+  } catch {}
 }

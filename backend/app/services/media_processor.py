@@ -52,10 +52,13 @@ def avatar_storage_path(user_id: str | uuid.UUID) -> str:
     return f"{user_id}/avatar.webp"
 
 
-def avatar_public_url(user_id: str | uuid.UUID) -> str:
+def avatar_public_url(user_id: str | uuid.UUID, version: Optional[str] = None) -> str:
     base = (settings.supabase_url or "https://supabase.local").rstrip("/")
     bucket = getattr(settings, "supabase_storage_bucket", "avatars")
-    return f"{base}/storage/v1/object/public/{bucket}/{avatar_storage_path(user_id)}"
+    url = f"{base}/storage/v1/object/public/{bucket}/{avatar_storage_path(user_id)}"
+    if version:
+        url = f"{url}?v={version}"
+    return url
 
 
 # ---------------------------------------------------------------------------

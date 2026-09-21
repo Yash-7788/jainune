@@ -16,8 +16,20 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify CI Passed for Commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONCLUSION=$(gh run list --workflow=ci.yml --commit="${{ github.sha }}" --json conclusion --jq '.[0].conclusion')
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::Deployment blocked! CI workflow has not passed for commit ${{ github.sha }} (status: $CONCLUSION)."
+            exit 1
+          fi
+          echo "CI verified: success for commit ${{ github.sha }}"
 
       - name: Set up Docker Buildx
         uses: actions/setup-buildx-action@v3

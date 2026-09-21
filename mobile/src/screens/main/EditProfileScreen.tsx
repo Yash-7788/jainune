@@ -48,7 +48,7 @@ import {
   enableScreenCaptureProtection,
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
-import { cacheSet, CACHE_KEYS } from "../../utils/cache";
+import { cacheSet, CACHE_KEYS, clearImageCache } from "../../utils/cache";
 
 interface CachedUserProfile {
   lastSyncedAt: number;
@@ -161,6 +161,7 @@ export default function EditProfileScreen() {
       const presign = await presignUpload("image/webp", optimized.fileSizeBytes, "photo", 1);
       await uploadToPresignedUrl(presign.upload_url, optimized.uri, "image/webp", presign.presigned_fields);
       await addPhoto(presign.media_id);
+      await clearImageCache();
       setPhotos([{ id: presign.media_id, url: optimized.uri, order: 0 }]);
     } catch (err: any) {
       Alert.alert("Upload Failed", extractError(err).message);
@@ -229,6 +230,7 @@ export default function EditProfileScreen() {
         onPress: async () => {
           try {
             await deletePhoto(photoId);
+            await clearImageCache();
             const remaining = photos.filter((p) => p.id !== photoId);
             setPhotos(remaining);
             if (remaining.length > 0) {

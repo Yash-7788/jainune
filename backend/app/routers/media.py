@@ -110,12 +110,14 @@ async def request_upload(
 
     # Generate Supabase signed upload URL
     res = await generate_supabase_upload_signed_url(user_id)
+    version_token = str(media_id).replace("-", "")[:8]
+    versioned_cdn_url = avatar_public_url(user_id, version=version_token)
 
     return UploadRequestResponse(
         media_id=media_id,
         signed_url=res["signed_url"],
         path=res["path"],
-        cdn_url=res["cdn_url"],
+        cdn_url=versioned_cdn_url,
         expires_in_seconds=300,
     )
 
@@ -149,7 +151,8 @@ async def confirm_upload(
             detail="Avatar not found in storage. Ensure upload completed before calling confirm.",
         )
 
-    cdn_url = avatar_public_url(user_id)
+    version_token = str(body.media_id).replace("-", "")[:8]
+    cdn_url = avatar_public_url(user_id, version=version_token)
 
     # Store CDN URL and retain status='pending' until moderation completes
     async with db.acquire() as conn:

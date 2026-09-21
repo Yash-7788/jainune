@@ -210,6 +210,9 @@ async def websocket_chat(
     ws_manager.register(real_chat_id, str(user_id), websocket)
 
     # ── 5. Real-time Consumer Loop (60s zombie heartbeat timeout) ────────────
+    _FRAME_RATE_LIMIT = 60  # max 60 frames
+    _FRAME_RATE_WINDOW = 10.0  # per 10 seconds (burst headroom, prevents CPU exhaustion)
+    frame_timestamps: list[float] = []
     try:
         while True:
             try:
@@ -221,6 +224,21 @@ async def websocket_chat(
 
             if not isinstance(data, dict):
                 continue
+
+            now_mono = asyncio.get_event_loop().time()
+            frame_timestamps = [t for t in frame_timestamps if now_mono - t < _FRAME_RATE_WINDOW]
+            if len(frame_timestamps) >= _FRAME_RATE_LIMIT:
+                log.warning("WebSocket frame rate limit exceeded for user %s on chat %s", user_id, real_chat_id)
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_json({"type": "error", "error": "RATE_LIMIT_EXCEEDED"}),
+                        timeout=2.0,
+                    )
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Frame rate limit exceeded.")
+                except Exception:
+                    pass
+                break
+            frame_timestamps.append(now_mono)
 
             ws_manager.refresh_presence(real_chat_id, str(user_id))
 
