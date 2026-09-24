@@ -492,8 +492,8 @@ async def export_my_data(
         profile = await conn.fetchrow(
             """
             SELECT id, phone_number, email, first_name, date_of_birth, gender,
-                   community_sect, dietary_strictness, temple_visit_frequency,
-                   city, state, country, bio, job_title, company, education,
+                   community_sect, dietary_strictness,
+                   city, state, bio, job_title, company, education,
                    height_cm, open_to_relocation, looking_for, show_me,
                    is_photo_verified, subscription_tier, subscription_valid_until,
                    super_connect_credits, is_paused, account_status, created_at, updated_at

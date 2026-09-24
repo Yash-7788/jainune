@@ -199,7 +199,7 @@ async def vote_on_dilemma(
                 INSERT INTO dilemma_votes (dilemma_id, user_id, choice)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (dilemma_id, user_id) DO NOTHING
-                RETURNING id
+                RETURNING user_id
                 """,
                 dilemma_id,
                 user_id,

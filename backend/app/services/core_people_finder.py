@@ -71,6 +71,7 @@ def _format_distance(distance_km: float, user_a_id: str, user_b_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 _POP_FEED_SCRIPT = """
+pcall(cjson.encode_empty_table_as_object, false)
 local raw = redis.call('get', KEYS[1])
 if not raw then return nil end
 local ok, candidates = pcall(cjson.decode, raw)
@@ -173,6 +174,11 @@ async def fetch_recommended_feed(
             if cached_json:
                 batch = json.loads(cached_json)
                 if isinstance(batch, list) and (not batch or isinstance(batch[0], dict)):
+                    for c in batch:
+                        if not isinstance(c.get("prompts"), list):
+                            c["prompts"] = []
+                        if not isinstance(c.get("photos"), list):
+                            c["photos"] = []
                     return {
                         "candidates": batch,
                         "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
@@ -188,6 +194,11 @@ async def fetch_recommended_feed(
                     raw_batch = json.loads(cached_json)
                     if isinstance(raw_batch, list) and (not raw_batch or isinstance(raw_batch[0], dict)):
                         batch = raw_batch[:limit]
+                        for c in batch:
+                            if not isinstance(c.get("prompts"), list):
+                                c["prompts"] = []
+                            if not isinstance(c.get("photos"), list):
+                                c["photos"] = []
                         return {
                             "candidates": batch,
                             "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
@@ -225,16 +236,100 @@ async def fetch_recommended_feed(
                         if eligible_ids:
                             candidate_rows = await conn.fetch(
                                 """
-                                SELECT id, first_name, date_of_birth, gender, city, photos,
-                                       bio, prompt_question_1, prompt_answer_1, is_verified,
-                                       looking_for, dietary_strictness, community_sect
+                                SELECT id, first_name, date_of_birth, gender, city, state,
+                                       bio, looking_for, dietary_strictness, community_sect,
+                                       job_title, height_cm, open_to_relocation, is_photo_verified,
+                                       eats_root_vegetables, eats_onion_garlic, paryushan_mode, education
                                 FROM users
                                 WHERE id = ANY($1::uuid[]) AND account_status = 'active'
                                 """,
                                 eligible_ids,
                             )
-                            c_dict = {r["id"]: dict(r) for r in candidate_rows}
-                            candidates = [c_dict[cid] for cid in eligible_ids if cid in c_dict]
+                            c_ids = [r["id"] for r in candidate_rows]
+                            media_rows = await conn.fetch(
+                                """
+                                SELECT user_id, cdn_url, s3_key, position
+                                FROM user_media
+                                WHERE user_id = ANY($1::uuid[])
+                                  AND media_type = 'photo'
+                                  AND status = 'approved'
+                                ORDER BY user_id, position ASC
+                                """,
+                                c_ids,
+                            )
+                            media_by_user = {}
+                            for m in media_rows:
+                                uid = str(m["user_id"])
+                                url = m["cdn_url"] or m["s3_key"]
+                                media_by_user.setdefault(uid, []).append({
+                                    "id": str(m["user_id"]) + f"_p{m['position']}",
+                                    "url": url,
+                                    "order": m["position"],
+                                })
+
+                            prompt_rows = await conn.fetch(
+                                """
+                                SELECT id, user_id, prompt_key, response_text, position
+                                FROM user_prompts
+                                WHERE user_id = ANY($1::uuid[])
+                                ORDER BY user_id, position ASC
+                                """,
+                                c_ids,
+                            )
+                            prompts_by_user = {}
+                            for p in prompt_rows:
+                                uid = str(p["user_id"])
+                                prompts_by_user.setdefault(uid, []).append({
+                                    "id": str(p["id"]),
+                                    "question": p["prompt_key"],
+                                    "answer": p["response_text"],
+                                    "position": p["position"],
+                                })
+
+                            caller_data = await conn.fetchrow(
+                                "SELECT dietary_strictness, community_sect, eats_root_vegetables, eats_onion_garlic, paryushan_mode FROM users WHERE id = $1",
+                                user_id,
+                            )
+                            caller_dict = dict(caller_data) if caller_data else {}
+
+                            from datetime import date
+                            today = date.today()
+                            candidates = []
+                            for r in candidate_rows:
+                                uid = str(r["id"])
+                                photos = media_by_user.get(uid, [])
+                                if not photos:
+                                    continue
+                                age = None
+                                if r["date_of_birth"]:
+                                    dob = r["date_of_birth"]
+                                    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+                                candidates.append({
+                                    "id": uid,
+                                    "first_name": r["first_name"],
+                                    "age": age,
+                                    "city": r["city"],
+                                    "state": r["state"],
+                                    "distance_display": "Nearby",
+                                    "dietary_strictness": r["dietary_strictness"],
+                                    "eats_root_vegetables": r["eats_root_vegetables"],
+                                    "eats_onion_garlic": r["eats_onion_garlic"],
+                                    "community_sect": r["community_sect"],
+                                    "paryushan_mode": r["paryushan_mode"],
+                                    "education": r["education"],
+                                    "job_title": r["job_title"],
+                                    "profession": r["job_title"],
+                                    "height_cm": r["height_cm"],
+                                    "bio": r["bio"],
+                                    "open_to_relocation": r["open_to_relocation"],
+                                    "is_photo_verified": r["is_photo_verified"],
+                                    "is_verified": r["is_photo_verified"],
+                                    "photos": photos,
+                                    "prompts": prompts_by_user.get(uid, []),
+                                    "compatibility": _compute_compatibility(caller_dict, r),
+                                })
+
                             if candidates:
                                 if len(candidates) > limit:
                                     await _cache_feed(user_id, candidates[limit:], redis)
@@ -558,7 +653,7 @@ async def _run_pipeline(
             # Batch-load prompts
             prompt_rows = await conn.fetch(
                 """
-                SELECT user_id, prompt_key, response_text, position
+                SELECT id, user_id, prompt_key, response_text, position
                 FROM user_prompts
                 WHERE user_id = ANY($1::uuid[])
                 ORDER BY user_id, position ASC
@@ -569,6 +664,7 @@ async def _run_pipeline(
             for p in prompt_rows:
                 uid = str(p["user_id"])
                 prompts_by_user.setdefault(uid, []).append({
+                    "id": str(p["id"]),
                     "question": p["prompt_key"],
                     "answer": p["response_text"],
                     "position": p["position"],
@@ -611,12 +707,15 @@ async def _run_pipeline(
             "paryushan_mode": r["paryushan_mode"],
             "education": r["education"],
             "job_title": r["job_title"],
+            "profession": r["job_title"],
             "height_cm": r["height_cm"],
             "bio": r["bio"],
             "open_to_relocation": r["open_to_relocation"],
             "is_photo_verified": r["is_photo_verified"],
+            "is_verified": r["is_photo_verified"],
             "photos": media_by_user.get(uid, []),
             "prompts": prompts_by_user.get(uid, []),
+            "compatibility": _compute_compatibility(user_data, r),
             "voice_snapshot": voice_by_user.get(uid),
             # Internal scoring (stripped before API response in router)
             "_behavioral_affinity": float(r.get("behavioral_affinity") or 0),

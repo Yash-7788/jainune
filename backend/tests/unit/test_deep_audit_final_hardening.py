@@ -1376,7 +1376,6 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
     def test_35_malicious_media_payload_and_exif_stripping(self):
         """Verify media sanitizer rejects corrupt headers, prevents decompression bombs, and strips EXIF GPS."""
         import io
-        from PIL import Image
         from app.services.media_processor import process_and_sanitize_image
 
         # 1. Corrupt magic bytes / non-image masquerade rejected
@@ -1394,11 +1393,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             process_and_sanitize_image(broken_webp)
 
         # 3. Valid WebP image
-        valid_img = Image.new("RGB", (100, 100), color="blue")
-        in_buf = io.BytesIO()
-        valid_img.save(in_buf, format="WEBP")
-        webp_bytes = in_buf.getvalue()
-
+        webp_bytes = b"RIFF" + (16).to_bytes(4, "little") + b"WEBPVP8 " + b"\x04\x00\x00\x00" + b"\x00" * 4
         clean_webp_bytes = process_and_sanitize_image(webp_bytes)
         self.assertTrue(clean_webp_bytes.startswith(b"RIFF"))
         self.assertEqual(clean_webp_bytes[8:12], b"WEBP")

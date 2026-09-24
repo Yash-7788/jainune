@@ -208,7 +208,7 @@ function SwipeCard({
         <View style={styles.photoInfo}>
           <View style={styles.nameRow}>
             <Text style={styles.name}>{candidate.first_name}, {candidate.age}</Text>
-            {candidate.is_verified && (
+            {(candidate.is_verified || (candidate as any).is_photo_verified) && (
               <View style={styles.verifiedBadge}>
                 <Text style={styles.verifiedBadgeText}>✓</Text>
               </View>
@@ -234,8 +234,8 @@ function SwipeCard({
         )}
 
         {/* Prompts */}
-        {(candidate.prompts ?? []).slice(0, 2).map((prompt) => (
-          <View key={prompt.id} style={styles.promptCard}>
+        {(Array.isArray(candidate.prompts) ? candidate.prompts : []).slice(0, 2).map((prompt, pIdx) => (
+          <View key={prompt.id || `prompt-${pIdx}`} style={styles.promptCard}>
             <Text style={styles.promptQ}>{prompt.question}</Text>
             <Text style={styles.promptA}>{prompt.answer}</Text>
           </View>

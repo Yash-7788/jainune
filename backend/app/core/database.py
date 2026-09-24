@@ -42,7 +42,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 server_settings={"application_name": "jainune-api-primary"},
             )
             log.info("Primary database connection pool initialized successfully.")
-            return _pool
+            break
         except Exception as exc:
             log.warning(
                 "Primary database connection attempt %s/%s failed: %s",
@@ -52,7 +52,7 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 await asyncio.sleep(attempt * 1.5)
 
     # If primary exhausted and fallback configured, attempt fallback server
-    if fallback_dsn:
+    if _pool is None and fallback_dsn:
         log.warning("Primary database unreachable. Attempting graceful fallback to secondary database server...")
         try:
             _pool = await asyncpg.create_pool(
@@ -65,7 +65,6 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
                 server_settings={"application_name": "jainune-api-fallback"},
             )
             log.info("Fallback database connection pool established.")
-            return _pool
         except Exception as exc:
             log.critical("Fallback database connection failed: %s", exc)
 
@@ -76,6 +75,8 @@ async def create_pool(max_retries: int = 3) -> asyncpg.Pool:
     try:
         async with _pool.acquire() as conn:
             await conn.execute("""
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(512);
+
                 CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
                     token_hash VARCHAR(64) PRIMARY KEY,
                     user_id UUID NOT NULL,

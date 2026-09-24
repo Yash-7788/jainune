@@ -101,7 +101,7 @@ async def request_upload(
             INSERT INTO user_media (id, user_id, media_type, status, s3_key, position)
             VALUES ($1, $2, 'photo', 'pending', $3, 1)
             ON CONFLICT (user_id, media_type, position) DO UPDATE
-                SET id = $1, status = 'pending', s3_key = $3, cdn_url = NULL, is_processed = FALSE
+                SET id = $1, status = 'pending', s3_key = $3, cdn_url = NULL, is_processed = FALSE, created_at = NOW()
             """,
             media_id,
             uuid.UUID(str(user_id)),

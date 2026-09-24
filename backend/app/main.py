@@ -110,7 +110,7 @@ async def _periodic_maintenance_loop() -> None:
                 """)
                 await conn.execute("""
                     DELETE FROM telemetry_events
-                     WHERE created_at < NOW() - INTERVAL '30 days'
+                     WHERE occurred_at < NOW() - INTERVAL '30 days'
                 """)
 
                 # 4. Mark stranded processing/pending media as rejected (>30 min timeout)
