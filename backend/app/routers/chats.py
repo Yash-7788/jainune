@@ -237,7 +237,20 @@ async def get_messages(
                 since_uuid, actual_chat_id,
             )
             if not since_row:
-                rows = []
+                # Retention may remove an offline client's anchor. Replay the
+                # surviving history in forward order; clients deduplicate IDs.
+                rows = await conn.fetch(
+                    """
+                    SELECT id, chat_id, sender_id, message_type, content,
+                           media_url, is_read, created_at,
+                           is_moderated, moderation_type, moderation_disclaimer
+                    FROM messages
+                    WHERE chat_id = $1
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT $2
+                    """,
+                    actual_chat_id, limit + 1,
+                )
             else:
                 rows = await conn.fetch(
                     """

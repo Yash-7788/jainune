@@ -1018,6 +1018,10 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
 
         async def mock_execute(sql, *args):
             executed_sqls.append(sql)
+            # Model the billing-state writes made by the lifecycle producer.
+            for state in ("in_grace_period", "account_hold"):
+                if f"SET billing_status = '{state}'" in sql:
+                    mock_conn.fetchrow.return_value["billing_status"] = state
 
         mock_conn.execute = AsyncMock(side_effect=mock_execute)
         mock_conn.fetchrow.return_value = {
@@ -1025,6 +1029,7 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             "subscription_tier": "jainune_plus",
             "subscription_valid_until": datetime.now(timezone.utc) + timedelta(days=20),
             "super_connect_credits": 5,
+            "billing_status": "active",
         }
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 

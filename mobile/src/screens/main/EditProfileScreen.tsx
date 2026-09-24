@@ -48,6 +48,7 @@ import {
   enableScreenCaptureProtection,
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
+import { useAuthStore } from "../../store/authStore";
 import { cacheSet, CACHE_KEYS, clearImageCache } from "../../utils/cache";
 
 interface CachedUserProfile {
@@ -83,6 +84,8 @@ const VIBE_ZONE_OPTIONS = [
 ];
 
 export default function EditProfileScreen() {
+  const userId = useAuthStore((s) => s.userId);
+  const profileCacheKey = CACHE_KEYS.userProfile(userId);
   const navigation = useNavigation<any>();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -290,7 +293,7 @@ export default function EditProfileScreen() {
         setFirstName(updated.first_name || firstName);
         setCity(updated.city || city);
         setProfession(updated.job_title || updated.profession || profession);
-        cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+        cacheSet<CachedUserProfile>(profileCacheKey, {
           lastSyncedAt: Date.now(),
           profile: updated,
         }).catch(() => {});

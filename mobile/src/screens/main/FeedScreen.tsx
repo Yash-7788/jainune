@@ -38,6 +38,7 @@ import {
 import { getMyProfile } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { SerendipityArcadeModal } from "../../components/arcade";
+import { useAuthStore } from "../../store/authStore";
 import { cacheGet, cacheSet, CACHE_KEYS } from "../../utils/cache";
 
 interface CachedFeedDeck {
@@ -50,6 +51,8 @@ const PREFETCH_THRESHOLD = 5; // Fetch next batch when ≤5 cards (OPTIMIZE.md �
 type UIState = "loading" | "populated" | "empty" | "error" | "offline";
 
 export default function FeedScreen() {
+  const userId = useAuthStore((s) => s.userId);
+  const feedCacheKey = CACHE_KEYS.feedDeck(userId);
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const [uiState, setUiState] = useState<UIState>("loading");
@@ -76,9 +79,9 @@ export default function FeedScreen() {
       .catch(() => {});
   }, []);
 
-  // L2 Cache: Read @feed_cards_v1 on mount → paint instantly (OPTIMIZE.md §2.2 C)
+  // L2 Cache: Read the current account's feed cache on mount → paint instantly (OPTIMIZE.md §2.2 C)
   useEffect(() => {
-    cacheGet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK).then((cached) => {
+    cacheGet<CachedFeedDeck>(feedCacheKey).then((cached) => {
       if (cached?.candidates && cached.candidates.length > 0) {
         setCandidates(cached.candidates);
         setUiState("populated");
@@ -131,7 +134,7 @@ export default function FeedScreen() {
           const uniqueNew = data.candidates.filter((c) => !seen.has(c.id));
           const merged = [...prev, ...uniqueNew];
           // L2 cache write-back: persist deck to AsyncStorage
-          cacheSet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK, {
+          cacheSet<CachedFeedDeck>(feedCacheKey, {
             lastSyncedAt: Date.now(),
             candidates: merged,
           });
@@ -168,20 +171,20 @@ export default function FeedScreen() {
     } finally {
       setIsFetching(false);
     }
-  }, [isFetching, candidates.length]);
+  }, [isFetching, candidates.length, feedCacheKey]);
 
 
   // L2 Cache helper: remove swiped candidate and immediately persist remaining deck
   const popCandidate = useCallback((id: string) => {
     setCandidates((prev) => {
       const next = prev.filter((c) => c.id !== id);
-      cacheSet<CachedFeedDeck>(CACHE_KEYS.FEED_DECK, {
+      cacheSet<CachedFeedDeck>(feedCacheKey, {
         lastSyncedAt: Date.now(),
         candidates: next,
       });
       return next;
     });
-  }, []);
+  }, [feedCacheKey]);
 
   const handleSwipeRight = useCallback(
     async (candidate: FeedCandidate, totalMs: number, photoMs: number, promptMs: number) => {

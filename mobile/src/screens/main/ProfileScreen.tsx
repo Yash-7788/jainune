@@ -50,6 +50,8 @@ function calcAge(dob: string): number {
 }
 
 export default function ProfileScreen() {
+  const userId = useAuthStore((s) => s.userId);
+  const profileCacheKey = CACHE_KEYS.userProfile(userId);
   const navigation = useNavigation<any>();
   const logout = useAuthStore((s) => s.logout);
   const [profile, setProfile] = useState<MyProfile | null>(null);
@@ -66,7 +68,7 @@ export default function ProfileScreen() {
 
   /**
    * OPTIMIZE.md §2.3 — SWR (Stale-While-Revalidate) load:
-   * 1. Read @user_profile cache → paint screen immediately (0ms)
+   * 1. Read the current account's profile cache → paint screen immediately (0ms)
    * 2. Check lastSyncedAt: if > 30 min stale, background-fetch fresh profile
    * 3. On every hard refresh (pull-to-refresh), always force network
    */
@@ -75,7 +77,7 @@ export default function ProfileScreen() {
 
     if (!isRefresh) {
       // Check cache first
-      const cached = await cacheGet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE);
+      const cached = await cacheGet<CachedUserProfile>(profileCacheKey);
       if (cached?.profile) {
         setProfile(cached.profile);
         setLoading(false);
@@ -88,7 +90,7 @@ export default function ProfileScreen() {
         getMyProfile()
           .then((data) => {
             setProfile(data);
-            cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+            cacheSet<CachedUserProfile>(profileCacheKey, {
               lastSyncedAt: Date.now(),
               profile: data,
             });
@@ -107,7 +109,7 @@ export default function ProfileScreen() {
     try {
       const data = await getMyProfile();
       setProfile(data);
-      cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+      cacheSet<CachedUserProfile>(profileCacheKey, {
         lastSyncedAt: Date.now(),
         profile: data,
       });
@@ -117,7 +119,7 @@ export default function ProfileScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [profileCacheKey]);
 
   useFocusEffect(
     useCallback(() => {
@@ -132,7 +134,7 @@ export default function ProfileScreen() {
       const updated = await updateProfile({ paryushan_mode: val });
       setProfile(updated);
       // L3 cache write-back: optimistic profile update
-      cacheSet<CachedUserProfile>(CACHE_KEYS.USER_PROFILE, {
+      cacheSet<CachedUserProfile>(profileCacheKey, {
         lastSyncedAt: Date.now(),
         profile: updated,
       });

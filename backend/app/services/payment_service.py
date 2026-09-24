@@ -415,6 +415,7 @@ async def process_payment_captured(
                     UPDATE users
                        SET subscription_tier        = $1,
                            subscription_valid_until = $2,
+                           billing_status           = 'active',
                            super_connect_credits    = COALESCE(super_connect_credits, 0) + $3,
                            updated_at               = NOW()
                      WHERE id = $4
@@ -517,6 +518,18 @@ async def process_payment_captured(
                 payment_id,
                 order_id,
             )
+
+    # Invalidate only after the new entitlement has committed.
+    if plan_type == "subscription":
+        try:
+            from app.core.redis import get_redis
+            await get_redis().delete(
+                f"user:{intent['user_id']}:billing_status",
+                f"user:{intent['user_id']}:tier",
+                f"user:{intent['user_id']}:subscription",
+            )
+        except Exception:
+            log.warning("Subscription cache invalidation failed for user=%s", intent["user_id"])
 
 
 async def process_refund(
@@ -737,15 +750,8 @@ async def get_effective_user_tier(
     If valid_until has expired, lazily auto-downgrades to 'free'.
     If account is on hold (store billing retry failed), suspends access to 'free'.
     """
-    from app.core.redis import get_redis
-    try:
-        r = get_redis()
-        billing_status = await r.get(f"user:{user_id}:billing_status")
-        if billing_status in (b"account_hold", "account_hold", b"expired", "expired", b"revoked", "revoked"):
-            return "free"
-    except Exception:
-        pass
-
+    # The DB is authoritative: a stale cached hold must not veto a newly
+    # purchased entitlement when post-commit cache invalidation fails.
     row = await conn.fetchrow(
         "SELECT subscription_tier, subscription_valid_until, COALESCE(billing_status, 'active') AS billing_status FROM users WHERE id = $1",
         user_id,

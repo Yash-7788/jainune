@@ -3,8 +3,8 @@
  *
  * Typed AsyncStorage wrapper for Layers 1-3:
  *   L1  @chat_msgs_${matchId}   — per-thread message arrays (capped at 500)
- *   L2  @feed_cards_v1          — discover feed deck
- *   L3  @user_profile           — own profile stale-while-revalidate (30 min TTL)
+ *   L2  @user:${userId}:feed_cards_v1 — discover feed deck
+ *   L3  @user:${userId}:profile       — own profile stale-while-revalidate (30 min TTL)
  *
  * Security invariants (OPTIMIZE.md §7):
  *   - Cache is a read-only display projection of Supabase ground truth.
@@ -17,9 +17,11 @@ import { Image as ExpoImage } from "expo-image";
 
 // ── Cache key constants ────────────────────────────────────────────────────────
 
+// Capture these keys before async work starts; never select a new owner at write time.
+// Legacy global profile/feed entries are intentionally not read or migrated.
 export const CACHE_KEYS = {
-  FEED_DECK: "@feed_cards_v1",
-  USER_PROFILE: "@user_profile",
+  feedDeck: (userId: string | null) => userId ? `@user:${userId}:feed_cards_v1` : null,
+  userProfile: (userId: string | null) => userId ? `@user:${userId}:profile` : null,
   chatThread: (matchId: string) => `@chat_msgs_${matchId}`,
 } as const;
 
@@ -30,7 +32,8 @@ export const PROFILE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 // ── Generic typed read/write ───────────────────────────────────────────────────
 
 /** Returns parsed value or null (never throws). */
-export async function cacheGet<T>(key: string): Promise<T | null> {
+export async function cacheGet<T>(key: string | null): Promise<T | null> {
+  if (!key) return null;
   try {
     const raw = await AsyncStorage.getItem(key);
     if (!raw) return null;
@@ -41,7 +44,8 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
 }
 
 /** Serialises value to JSON and persists. Silently swallows storage errors. */
-export async function cacheSet<T>(key: string, value: T): Promise<void> {
+export async function cacheSet<T>(key: string | null, value: T): Promise<void> {
+  if (!key) return;
   try {
     await AsyncStorage.setItem(key, JSON.stringify(value));
   } catch {
