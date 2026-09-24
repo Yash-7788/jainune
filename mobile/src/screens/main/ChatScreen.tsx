@@ -1,7 +1,7 @@
 /**
  * Phase 5 — ChatScreen
  * Full real-time chat using WebSocket via single-use ticket.
- * - POST /v1/ws/ticket → wss://api.jainune.com/v1/ws/chat/{match_id}?ticket={ticket}
+ * - POST /v1/ws/ticket → production WebSocket host from EXPO_PUBLIC_WS_URL
  * - Cursor-paginated message history (GET /v1/chats/:match_id/messages)
  * - Auto mark-read on focus (PUT /v1/chats/:match_id/read)
  * - Read receipts: incoming WS events update message.is_read
@@ -79,7 +79,7 @@ interface CachedChatThread {
 }
 
 const WS_BASE =
-  process.env.EXPO_PUBLIC_WS_URL || "wss://api.jainune.com/v1/ws/chat";
+  process.env.EXPO_PUBLIC_WS_URL || "wss://jainune-backend-api.onrender.com/v1/ws/chat";
 
 interface RouteParams {
   matchId: string;
@@ -124,6 +124,7 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ title: string; message: string } | null>(null);
   const [chatBlocked, setChatBlocked] = useState(false);
+  const [reporting, setReporting] = useState(false);
 
   const draftIdRef = useRef<string | null>(null);
   const lastDraftRef = useRef<string>("");
@@ -529,7 +530,21 @@ export default function ChatScreen() {
     }
   }, [matchId, writeChatCache]);
 
+  const submitReport = useCallback(async (reason: string) => {
+    if (reporting) return;
+    setReporting(true);
+    try {
+      await reportMessage(otherUser.id, reason);
+      Alert.alert("Report Submitted", "Our team will review this within 24 hours.");
+    } catch (err) {
+      Alert.alert("Report Not Submitted", extractError(err).message || "Please try again.");
+    } finally {
+      setReporting(false);
+    }
+  }, [otherUser.id, reporting]);
+
   const handleReport = useCallback(() => {
+    if (reporting) return;
     const reasonMap: Record<string, string> = {
       "Harassment": "harassment",
       "Fake Profile": "fake_profile",
@@ -543,21 +558,20 @@ export default function ChatScreen() {
         (idx) => {
           if (idx < 4) {
             const canonicalReason = reasonMap[options[idx]] || "other";
-            reportMessage(otherUser.id, canonicalReason).catch(() => {});
-            Alert.alert("Report Submitted", "Our team will review this within 24 hours.");
+            void submitReport(canonicalReason);
           }
         }
       );
     } else {
       Alert.alert("Report User", "Choose a reason:", [
-        { text: "Harassment", onPress: () => reportMessage(otherUser.id, "harassment").catch(() => {}) },
-        { text: "Fake Profile", onPress: () => reportMessage(otherUser.id, "fake_profile").catch(() => {}) },
-        { text: "Inappropriate Content", onPress: () => reportMessage(otherUser.id, "inappropriate_content").catch(() => {}) },
-        { text: "Spam", onPress: () => reportMessage(otherUser.id, "spam").catch(() => {}) },
+        { text: "Harassment", onPress: () => void submitReport("harassment") },
+        { text: "Fake Profile", onPress: () => void submitReport("fake_profile") },
+        { text: "Inappropriate Content", onPress: () => void submitReport("inappropriate_content") },
+        { text: "Spam", onPress: () => void submitReport("spam") },
         { text: "Cancel", style: "cancel" },
       ]);
     }
-  }, [otherUser.id]);
+  }, [reporting, submitReport]);
 
   const handleBlock = useCallback(() => {
     Alert.alert(

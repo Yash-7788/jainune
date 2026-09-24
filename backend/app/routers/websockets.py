@@ -169,7 +169,7 @@ async def websocket_chat(
 
         row = await conn.fetchrow(
             """
-            SELECT c.id, c.match_id, c.is_unmatched,
+            SELECT c.id, c.match_id, c.is_unmatched, c.is_ephemeral, c.expires_at,
                    CASE WHEN c.participant_1_id = $2 THEN c.participant_2_id ELSE c.participant_1_id END AS other_id
             FROM chats c
             WHERE (c.id = $1 OR c.match_id = $1)
@@ -183,6 +183,12 @@ async def websocket_chat(
 
         if row.get("is_unmatched"):
             await websocket.close(code=4003, reason="Chat has been unmatched and closed.")
+            return
+
+        from datetime import datetime, timezone
+        chat_expires_at = row.get("expires_at") if row.get("is_ephemeral") else None
+        if chat_expires_at and chat_expires_at <= datetime.now(timezone.utc):
+            await websocket.close(code=4003, reason="This chat has expired.")
             return
 
         other_row = await conn.fetchrow(
@@ -215,9 +221,26 @@ async def websocket_chat(
     frame_timestamps: list[float] = []
     try:
         while True:
+            receive_timeout = 60.0
+            if chat_expires_at:
+                seconds_until_expiry = (chat_expires_at - datetime.now(timezone.utc)).total_seconds()
+                if seconds_until_expiry <= 0:
+                    try:
+                        await websocket.close(code=4003, reason="This chat has expired.")
+                    except Exception:
+                        pass
+                    break
+                receive_timeout = min(receive_timeout, seconds_until_expiry)
             try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
-            except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=receive_timeout)
+            except asyncio.TimeoutError:
+                if chat_expires_at and datetime.now(timezone.utc) >= chat_expires_at:
+                    try:
+                        await websocket.close(code=4003, reason="This chat has expired.")
+                    except Exception:
+                        pass
+                break
+            except (WebSocketDisconnect, RuntimeError):
                 break
             except (json.JSONDecodeError, ValueError):
                 continue

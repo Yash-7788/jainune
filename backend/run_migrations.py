@@ -44,9 +44,22 @@ async def run_migrations():
             CREATE EXTENSION IF NOT EXISTS "postgis";
             CREATE EXTENSION IF NOT EXISTS "vector";
             CREATE SCHEMA IF NOT EXISTS auth;
-            CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid AS $$
-                SELECT NULL::uuid;
-            $$ LANGUAGE sql STABLE;
+            DO $$
+            BEGIN
+                IF to_regprocedure('auth.uid()') IS NULL THEN
+                    EXECUTE $uid$
+                        CREATE FUNCTION auth.uid() RETURNS uuid
+                        LANGUAGE sql STABLE
+                        AS $body$
+                            SELECT COALESCE(
+                                NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+                                NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
+                            )::uuid
+                        $body$
+                    $uid$;
+                END IF;
+            END
+            $$;
             DO $$
             BEGIN
                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN

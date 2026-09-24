@@ -371,7 +371,7 @@ def purge_deleted_users() -> None:
                 archived_ids,
             )
             count = int(result.split()[-1])
-            log.info("purge_deleted_users: hard-deleted %d users after 72h retention", count)
+            log.info("purge_deleted_users: hard-deleted %d users after %d-day retention", count, DELETED_USER_RETENTION_DAYS)
 
             # Purge location waitlist entries older than 90 days (Finding 11)
             try:

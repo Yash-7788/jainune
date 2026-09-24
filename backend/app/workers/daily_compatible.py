@@ -95,9 +95,12 @@ async def _run_async() -> None:
                     ST_Y(location::geometry) AS latitude,
                     max_distance_km, open_to_relocation,
                     subscription_tier, trust_score,
-                    paryushan_mode, eats_root_vegetables, eats_onion_garlic
+                    paryushan_mode, eats_root_vegetables, eats_onion_garlic,
+                    is_paused
                 FROM users
                 WHERE account_status = 'active'
+                  AND deleted_at IS NULL
+                  AND is_paused = FALSE
                   AND onboarding_completed = TRUE
                   AND location IS NOT NULL
                   AND id > $1

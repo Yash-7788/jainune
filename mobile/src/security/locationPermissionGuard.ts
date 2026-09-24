@@ -40,7 +40,7 @@ export type LocationGateState =
 
 type float = number;
 
-const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || "https://api.jainune.com/v1").replace(/\/v1\/?$/, "");
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || "https://jainune-backend-api.onrender.com/v1").replace(/\/v1\/?$/, "");
 
 /**
  * Validates GPS coordinate integrity against client-side spoofers and mock location apps.

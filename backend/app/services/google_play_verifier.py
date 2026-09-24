@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -133,12 +134,20 @@ async def verify_google_play_purchase(
     if not creds:
         if not is_prod:
             log.warning("Google Play service account unset in dev/test. Mocking verification for token %s", purchase_token[:10])
-            return {
+            mock_data = {
                 "verified": True,
                 "mock": True,
                 "orderId": f"GPA.mock-{int(time.time())}",
                 "purchaseState": 0,
+                "paymentState": 1,
+                "expiryTimeMillis": str(int((time.time() + 30 * 24 * 60 * 60) * 1000)),
             }
+            if is_subscription:
+                mock_data["_verified_expires_at"] = datetime.fromtimestamp(
+                    int(mock_data["expiryTimeMillis"]) / 1000,
+                    tz=timezone.utc,
+                )
+            return mock_data
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google Play verification service is not configured on this server.",
@@ -146,12 +155,20 @@ async def verify_google_play_purchase(
 
     # In development/testing, permit explicitly tagged test tokens
     if not is_prod and purchase_token.startswith("test_"):
-        return {
+        mock_data = {
             "verified": True,
             "mock": True,
             "orderId": f"GPA.test-{purchase_token}",
             "purchaseState": 0,
+            "paymentState": 1,
+            "expiryTimeMillis": str(int((time.time() + 30 * 24 * 60 * 60) * 1000)),
         }
+        if is_subscription:
+            mock_data["_verified_expires_at"] = datetime.fromtimestamp(
+                int(mock_data["expiryTimeMillis"]) / 1000,
+                tz=timezone.utc,
+            )
+        return mock_data
 
     token = await get_google_publisher_token()
     headers = {"Authorization": f"Bearer {token}"}
@@ -198,17 +215,36 @@ async def verify_google_play_purchase(
 
         # Validate purchase states
         if is_subscription:
-            # paymentState: 0 = Pending, 1 = Payment received, 2 = Free trial, 3 = Pending deferred
-            # In v3: acknowledgmentState == 1 or paymentState == 1
-            payment_state = data.get("paymentState", 1)
-            if payment_state == 0:
+            try:
+                expires_at_ms = int(data["expiryTimeMillis"])
+                verified_expires_at = datetime.fromtimestamp(expires_at_ms / 1000, tz=timezone.utc)
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Google Play did not return a valid subscription expiry.",
+                ) from exc
+            if verified_expires_at <= datetime.now(timezone.utc):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Google Play subscription has expired.",
+                )
+
+            # paymentState 1/2 means paid/free trial; 3 means a deferred
+            # plan change while the existing paid term remains active. Google
+            # omits paymentState for canceled subscriptions even when the user
+            # retains access through expiryTimeMillis, so accept that response
+            # only when it explicitly includes a cancellation reason.
+            payment_state = data.get("paymentState")
+            canceled_but_unexpired = payment_state is None and data.get("cancelReason") in (0, 1, 2, 3)
+            if payment_state not in (1, 2, 3) and not canceled_but_unexpired:
                 raise HTTPException(
                     status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                    detail="Google Play payment is still pending authorization.",
+                    detail="Google Play subscription is not paid, in a free trial, or currently entitled.",
                 )
+            data["_verified_expires_at"] = verified_expires_at
         else:
             # purchaseState: 0 = Purchased, 1 = Canceled, 2 = Pending
-            purchase_state = data.get("purchaseState", 0)
+            purchase_state = data.get("purchaseState")
             if purchase_state != 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,

@@ -14,7 +14,7 @@ import hashlib
 import hmac
 import json
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -86,14 +86,24 @@ async def test_verify_payment_signature_valid(authed_client, mock_pool):
         "subscription_valid_until": None,
     }
 
-    resp = await client.post(
-        "/v1/subscriptions/verify",
-        json={
-            "razorpay_order_id": order_id,
-            "razorpay_payment_id": payment_id,
-            "razorpay_signature": valid_sig,
+    with patch(
+        "app.routers.subscriptions._fetch_captured_razorpay_payment",
+        new_callable=AsyncMock,
+        return_value={
+            "id": payment_id,
+            "order_id": order_id,
+            "status": "captured",
+            "amount": 29900,
         },
-    )
+    ):
+        resp = await client.post(
+            "/v1/subscriptions/verify",
+            json={
+                "razorpay_order_id": order_id,
+                "razorpay_payment_id": payment_id,
+                "razorpay_signature": valid_sig,
+            },
+        )
     assert resp.status_code == 200
     assert resp.json()["success"] is True
 
@@ -125,6 +135,8 @@ async def test_webhook_payment_captured(client: AsyncClient, mock_pool):
                 "entity": {
                     "order_id": order_id,
                     "id": "pay_webhook_test_1",
+                    "status": "captured",
+                    "amount": 39900,
                 }
             }
         },
@@ -138,8 +150,9 @@ async def test_webhook_payment_captured(client: AsyncClient, mock_pool):
 
     conn.fetchrow.return_value = {
         "user_id": target_user_id,
-        "plan_id": "platinum_monthly",
+        "plan_id": "jainune_base_399",
         "status": "created",
+        "amount": 39900,
         "subscription_valid_until": None,
     }
 

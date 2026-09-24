@@ -114,6 +114,8 @@ class TestMonetizationSecurity(unittest.IsolatedAsyncioTestCase):
                     "entity": {
                         "order_id": "order_spin_1",
                         "id": "pay_spin_1",
+                        "status": "captured",
+                        "amount": PLAN_CATALOGUE["arcade_wheel_spin"]["amount"],
                     }
                 }
             }

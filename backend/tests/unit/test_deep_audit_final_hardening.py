@@ -332,7 +332,8 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
             mock_soft.assert_called_once_with(user_id, mock_conn, mock_redis)
             self.assertTrue(res["success"])
             self.assertEqual(res["data"]["status"], "deactivated")
-            self.assertIn("72 hours", res["data"]["message"])
+            self.assertIn("30 days", res["data"]["message"])
+            self.assertIn("active paid subscription ends", res["data"]["message"])
 
     async def test_12_arcade_purchases_non_refundable_self_service(self):
         """Arcade spin/roll purchases cannot be refunded self-service (B-1)."""

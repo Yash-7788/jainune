@@ -37,6 +37,8 @@ async def test_feed_cache_hit(authed_client, fake_redis, mock_pool):
 
     # Pre-seed Redis feed cache
     candidate_id = str(uuid.uuid4())
+    # Current-visibility revalidation should retain eligible cached candidates.
+    conn.fetch.return_value = [{"id": uuid.UUID(candidate_id)}]
     cached_candidates = [
         {
             "id": candidate_id,
@@ -92,6 +94,9 @@ async def test_daily_compatible_cached(authed_client, fake_redis, mock_pool):
     client, user_id = authed_client
 
     pair_id = str(uuid.uuid4())
+    # A cached pairing is served only while its candidate remains eligible.
+    pool, conn = mock_pool
+    conn.fetch.return_value = [{"id": uuid.UUID(pair_id)}]
     pairing = {
         "id": pair_id,
         "first_name": "Aarav",

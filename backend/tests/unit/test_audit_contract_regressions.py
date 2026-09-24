@@ -49,7 +49,7 @@ async def test_new_subscription_restores_access(prior_status, cache_failure):
     if cache_failure:
         redis.delete = AsyncMock(side_effect=ConnectionError("cache unavailable"))
     event = {"payload": {"payment": {"entity": {
-        "order_id": "order_new", "id": "pay_new", "amount": 39900,
+        "order_id": "order_new", "id": "pay_new", "amount": 39900, "status": "captured",
     }}}}
     with patch("app.core.redis.get_redis", return_value=redis):
         await process_payment_captured(event, pool)

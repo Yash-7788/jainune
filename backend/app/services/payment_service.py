@@ -361,6 +361,11 @@ async def process_payment_captured(
     order_id: str = payment.get("order_id", "") or event.get("payload", {}).get("order", {}).get("entity", {}).get("id", "")
     payment_id: str = payment.get("id", "")
 
+    if payment.get("status") != "captured":
+        raise ValueError("Razorpay payment is not confirmed as captured")
+    if not payment_id:
+        raise ValueError("Captured Razorpay payment is missing its payment ID")
+
     if not order_id:
         log.warning("payment.captured missing order_id")
         return
@@ -393,7 +398,7 @@ async def process_payment_captured(
 
             # Re-verify captured payment amount matches plan price (O-4)
             captured_amount = payment.get("amount")
-            if captured_amount is not None and int(captured_amount) != expected_amount:
+            if captured_amount is None or int(captured_amount) != expected_amount:
                 log.error("Captured amount %s differs from plan %s price %s", captured_amount, intent["plan_id"], expected_amount)
                 raise ValueError(f"Captured payment amount {captured_amount} does not match expected plan price {expected_amount}")
 
@@ -427,20 +432,17 @@ async def process_payment_captured(
                 )
                 spins_to_add = plan.get("spins", 0)
                 if spins_to_add > 0:
-                    try:
-                        await conn.execute(
-                            """
-                            INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
-                            VALUES ($1, $2, NOW())
-                            ON CONFLICT (user_id) DO UPDATE
-                               SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
-                                   updated_at      = NOW()
-                            """,
-                            intent["user_id"],
-                            spins_to_add,
-                        )
-                    except Exception:
-                        pass
+                    await conn.execute(
+                        """
+                        INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (user_id) DO UPDATE
+                           SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                               updated_at      = NOW()
+                        """,
+                        intent["user_id"],
+                        spins_to_add,
+                    )
                 log.info(
                     "Subscription upgraded: user=%s tier=%s credits=+%s spins=+%s until=%s",
                     intent["user_id"],

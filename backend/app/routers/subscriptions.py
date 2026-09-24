@@ -40,6 +40,33 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/subscriptions", tags=["Subscriptions"])
 
 
+async def _fetch_captured_razorpay_payment(payment_id: str, order_id: str) -> dict[str, Any]:
+    """Fetch authoritative payment state; a signed checkout callback alone is not proof of capture."""
+    try:
+        fetched = await asyncio.to_thread(_rzp_payment_fetch, payment_id)
+    except Exception as exc:
+        log.warning("Razorpay payment status lookup failed for %s: %s", payment_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to confirm payment capture with Razorpay. Please retry shortly.",
+        ) from exc
+
+    if not isinstance(fetched, dict):
+        fetched = dict(fetched)
+    if fetched.get("order_id") != order_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment does not belong to this order.")
+    if fetched.get("status") != "captured":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payment has not been captured by Razorpay.")
+    if fetched.get("amount") is None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Razorpay did not return a captured amount.")
+    return fetched
+
+
+def _rzp_payment_fetch(payment_id: str) -> Any:
+    """Synchronous SDK access isolated for asyncio.to_thread and easy unit testing."""
+    return payment_service._rzp_client().payment.fetch(payment_id)
+
+
 # ---------------------------------------------------------------------------
 # Plans catalogue
 # ---------------------------------------------------------------------------
@@ -178,20 +205,21 @@ async def verify_payment(
     if not lock_acquired:
         raise HTTPException(status_code=409, detail="Payment verification is already in progress")
 
-    payment_entity: dict[str, Any] = {
-        "order_id": body.razorpay_order_id,
-        "id": body.razorpay_payment_id,
-    }
-    if intent.get("amount") is not None:
-        payment_entity["amount"] = intent["amount"]
-
     try:
-        rzp = payment_service._rzp_client()
-        fetched = await asyncio.to_thread(rzp.payment.fetch, body.razorpay_payment_id)
-        if fetched and "amount" in fetched:
-            payment_entity["amount"] = fetched["amount"]
-    except Exception:
-        pass  # Fallback to intent amount if offline or rzp client unavailable
+        payment_entity = await _fetch_captured_razorpay_payment(
+            body.razorpay_payment_id,
+            body.razorpay_order_id,
+        )
+    except HTTPException:
+        if r and lock_acquired:
+            try:
+                await r.eval(
+                    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+                    1, lock_key, lock_token,
+                )
+            except Exception:
+                pass
+        raise
 
     try:
         await payment_service.process_payment_captured(
@@ -615,11 +643,11 @@ async def cancel_subscription(
 
 
 class GooglePlayVerifyBody(BaseModel):
-    orderId: str
+    orderId: str = Field(..., min_length=1, max_length=128)
     packageName: Optional[str] = "com.jainune.app"
-    productId: str
+    productId: str = Field(..., min_length=1, max_length=64)
     purchaseTime: Optional[Any] = None
-    purchaseToken: str
+    purchaseToken: str = Field(..., min_length=1, max_length=4096)
 
 
 @router.post("/verify-google-play", status_code=status.HTTP_200_OK)
@@ -631,7 +659,8 @@ async def verify_google_play(
 ):
     """
     Validates Google Play Billing purchases and activates subscriptions or credits consumables.
-    Protected against receipt replay via database store_subscriptions record checks.
+    Google purchase tokens are the server-enforced identity. Subscription renewals
+    on the same token only grant renewal bonuses when Google's verified expiry advances.
     """
     raw_uid = current_user.get("user_id") or current_user.get("id")
     try:
@@ -665,79 +694,84 @@ async def verify_google_play(
     # Server-to-Server Google Android Publisher API verification (prevents forged receipts)
     from app.services.google_play_verifier import verify_google_play_purchase
     pkg = body.packageName or "com.jainune.app"
-    await verify_google_play_purchase(
+    verified = await verify_google_play_purchase(
         package_name=pkg,
         product_id=sku,
         purchase_token=purchase_token,
         is_subscription=is_subscription,
     )
+    provider_order_id = str(verified.get("orderId") or order_id).strip()
+    if not provider_order_id:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Google Play did not return a transaction identifier.")
+    if len(provider_order_id) > 128:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Google Play returned a transaction identifier that cannot be stored safely.")
 
+    verified_expiry = verified.get("_verified_expires_at") if is_subscription else None
+    if is_subscription and not isinstance(verified_expiry, datetime):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Google Play did not return a verified subscription expiry.")
     async with pool.acquire() as conn:
-        # Replay Defense: Check if this original_transaction_id has already been processed
-        existing_sub = await conn.fetchrow(
-            "SELECT id, user_id, status, expires_at FROM store_subscriptions WHERE store = 'google' AND original_transaction_id = $1",
-            order_id,
-        )
-        if existing_sub:
-            if existing_sub["user_id"] != user_uuid:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="This transaction receipt has already been claimed by another account.",
-                )
-            exp = existing_sub["expires_at"]
-            return {
-                "success": True,
-                "activated": True,
-                "idempotent": True,
-                "expires_at": exp.isoformat() if exp else None,
-                "tier": plan_info.get("tier") if plan_info else "base_399",
-            }
-
-        now_utc = datetime.now(timezone.utc)
-
-        if is_subscription:
-            target_tier = "base_399"
-            if "ultra" in sku_lower or "1499" in sku_lower:
-                target_tier = "ultra_1499"
-            elif "premium" in sku_lower or "799" in sku_lower:
-                target_tier = "premium_799"
-            elif "base" in sku_lower or "399" in sku_lower:
-                target_tier = "base_399"
-            elif plan_info and plan_info.get("tier"):
-                target_tier = plan_info["tier"]
-
-            duration_days = plan_info.get("validity_days", 30) if plan_info else 30
-            spins_to_grant = plan_info.get("spins", 5 if "base" in sku_lower else (15 if "premium" in sku_lower else 30)) if plan_info else (5 if "base" in sku_lower else (15 if "premium" in sku_lower else 30))
-            roses_to_grant = plan_info.get("roses", 1 if "base" in sku_lower else (3 if "premium" in sku_lower else 7)) if plan_info else (1 if "base" in sku_lower else (3 if "premium" in sku_lower else 7))
-
-            user_row = await conn.fetchrow(
-                "SELECT subscription_valid_until FROM users WHERE id = $1",
-                user_uuid,
+        async with conn.transaction():
+            # Serialize provider-token processing across API workers and webhook callers.
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"google-play:{purchase_token}",
             )
-            current_valid = user_row["subscription_valid_until"] if user_row else None
-            base_time = current_valid if (current_valid and current_valid > now_utc) else now_utc
-            new_valid = base_time + timedelta(days=duration_days)
-
-            # Atomically update user subscription status and credit roses
-            await conn.execute(
+            existing_rows = await conn.fetch(
                 """
-                UPDATE users
-                   SET subscription_tier = $1,
-                       subscription_valid_until = $2,
-                       billing_status = 'active',
-                       super_connect_credits = COALESCE(super_connect_credits, 0) + $3,
-                       last_active_at = NOW()
-                 WHERE id = $4
+                SELECT id, user_id, original_transaction_id, latest_transaction_id,
+                       status, expires_at, sku
+                FROM store_subscriptions
+                WHERE store = 'google'
+                  AND (
+                      original_transaction_id = $1
+                      OR latest_transaction_id = $1
+                      OR (length(latest_transaction_id) = 128
+                          AND left($1, 128) = latest_transaction_id)
+                  )
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE
                 """,
-                target_tier,
-                new_valid,
-                roses_to_grant,
-                user_uuid,
+                purchase_token,
             )
+            if existing_rows:
+                owners = {str(row["user_id"]) for row in existing_rows}
+                if owners != {str(user_uuid)}:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="This purchase token has already been claimed by another account.",
+                    )
+                existing_sub = existing_rows[0]
+                if existing_sub.get("sku") and existing_sub["sku"] != sku:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This purchase token belongs to a different product.")
 
-            # Grant bonus arcade spins
-            if spins_to_grant > 0:
-                try:
+                if not is_subscription:
+                    return {
+                        "success": True,
+                        "activated": True,
+                        "consumable": True,
+                        "idempotent": True,
+                        "message": "Purchase was already applied.",
+                    }
+
+                previous_expiry = existing_sub.get("expires_at")
+                new_period = previous_expiry is None or verified_expiry > previous_expiry
+                effective_expiry = max(previous_expiry, verified_expiry) if previous_expiry else verified_expiry
+                target_tier = plan_info.get("tier") if plan_info else "base_399"
+                spins_to_grant = int(plan_info.get("spins", 0)) if plan_info else 0
+                roses_to_grant = int(plan_info.get("roses", 0)) if plan_info else 0
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier = $1,
+                           subscription_valid_until = GREATEST(COALESCE(subscription_valid_until, $2), $2),
+                           billing_status = 'active',
+                           super_connect_credits = COALESCE(super_connect_credits, 0) + $3,
+                           last_active_at = NOW()
+                     WHERE id = $4
+                    """,
+                    target_tier, effective_expiry, roses_to_grant if new_period else 0, user_uuid,
+                )
+                if new_period and spins_to_grant:
                     await conn.execute(
                         """
                         INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
@@ -746,47 +780,86 @@ async def verify_google_play(
                         SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
                             updated_at = NOW()
                         """,
-                        user_uuid,
-                        spins_to_grant,
+                        user_uuid, spins_to_grant,
                     )
-                except Exception:
-                    pass
+                await conn.execute(
+                    """
+                    UPDATE store_subscriptions
+                       SET original_transaction_id = $1,
+                           latest_transaction_id = CASE WHEN $2 THEN $3 ELSE latest_transaction_id END,
+                           sku = $4,
+                           status = 'active',
+                           expires_at = $5,
+                           last_event_type = CASE WHEN $2 THEN 'renewed' ELSE last_event_type END,
+                           last_event_timestamp = CASE WHEN $2 THEN GREATEST(COALESCE(last_event_timestamp, 0), $6) ELSE last_event_timestamp END,
+                           updated_at = NOW()
+                     WHERE id = $7
+                    """,
+                    purchase_token, new_period, provider_order_id, sku, effective_expiry,
+                    int(datetime.now(timezone.utc).timestamp()), existing_sub["id"],
+                )
+                return {
+                    "success": True,
+                    "activated": True,
+                    "idempotent": not new_period,
+                    "tier": target_tier,
+                    "expires_at": effective_expiry.isoformat(),
+                    "spins_granted": spins_to_grant if new_period else 0,
+                    "roses_granted": roses_to_grant if new_period else 0,
+                }
 
-            # Record in store_subscriptions
-            await conn.execute(
-                """
-                INSERT INTO store_subscriptions (
-                    user_id, store, original_transaction_id, latest_transaction_id,
-                    sku, status, expires_at, created_at, updated_at
-                ) VALUES ($1, 'google', $2, $3, $4, 'active', $5, NOW(), NOW())
-                ON CONFLICT (store, original_transaction_id)
-                DO UPDATE SET
-                    latest_transaction_id = EXCLUDED.latest_transaction_id,
-                    status = 'active',
-                    expires_at = EXCLUDED.expires_at,
-                    updated_at = NOW()
-                """,
-                user_uuid,
-                order_id,
-                purchase_token[:128],
-                sku,
-                new_valid,
-            )
+            user_row = await conn.fetchrow("SELECT id FROM users WHERE id = $1 FOR UPDATE", user_uuid)
+            if not user_row:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
-            log.info("Activated Google Play subscription for user %s: sku=%s, tier=%s, roses=+%d, spins=+%d, valid_until=%s", user_uuid, sku, target_tier, roses_to_grant, spins_to_grant, new_valid)
-            return {
-                "success": True,
-                "activated": True,
-                "tier": target_tier,
-                "expires_at": new_valid.isoformat(),
-                "spins_granted": spins_to_grant,
-                "roses_granted": roses_to_grant,
-            }
-
-        elif is_arcade:
-            spins_to_add = 3 if "3" in sku_lower else (10 if "10" in sku_lower else 1)
-            if plan_info and plan_info.get("spins"):
-                spins_to_add = plan_info["spins"]
+            now_utc = datetime.now(timezone.utc)
+            if is_subscription:
+                new_valid = verified_expiry
+                target_tier = plan_info.get("tier") if plan_info else "base_399"
+                spins_to_grant = int(plan_info.get("spins", 0)) if plan_info else 0
+                roses_to_grant = int(plan_info.get("roses", 0)) if plan_info else 0
+                await conn.execute(
+                    """
+                    INSERT INTO store_subscriptions (
+                        user_id, store, original_transaction_id, latest_transaction_id,
+                        sku, status, expires_at, last_event_type, last_event_timestamp,
+                        created_at, updated_at
+                    ) VALUES ($1, 'google', $2, $3, $4, 'active', $5, 'active', $6, NOW(), NOW())
+                    """,
+                    user_uuid, purchase_token, provider_order_id, sku, new_valid, int(now_utc.timestamp()),
+                )
+                await conn.execute(
+                    """
+                    UPDATE users
+                       SET subscription_tier = $1,
+                           subscription_valid_until = GREATEST(COALESCE(subscription_valid_until, $2), $2),
+                           billing_status = 'active',
+                           super_connect_credits = COALESCE(super_connect_credits, 0) + $3,
+                           last_active_at = NOW()
+                     WHERE id = $4
+                    """,
+                    target_tier, new_valid, roses_to_grant, user_uuid,
+                )
+                if spins_to_grant:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (user_id) DO UPDATE
+                        SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                            updated_at = NOW()
+                        """,
+                        user_uuid, spins_to_grant,
+                    )
+                log.info("Activated Google Play subscription for user %s: sku=%s, tier=%s, roses=+%d, spins=+%d, valid_until=%s", user_uuid, sku, target_tier, roses_to_grant, spins_to_grant, new_valid)
+                return {
+                    "success": True,
+                    "activated": True,
+                    "tier": target_tier,
+                    "expires_at": new_valid.isoformat(),
+                    "spins_granted": spins_to_grant,
+                    "roses_granted": roses_to_grant,
+                }
 
             await conn.execute(
                 """
@@ -794,15 +867,12 @@ async def verify_google_play(
                     user_id, store, original_transaction_id, latest_transaction_id,
                     sku, status, created_at, updated_at
                 ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
-                ON CONFLICT (store, original_transaction_id) DO NOTHING
                 """,
-                user_uuid,
-                order_id,
-                purchase_token[:128],
-                sku,
+                user_uuid, purchase_token, provider_order_id, sku,
             )
 
-            try:
+            if is_arcade:
+                spins_to_add = int(plan_info.get("spins", 1)) if plan_info else (3 if "3" in sku_lower else (10 if "10" in sku_lower else 1))
                 await conn.execute(
                     """
                     INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
@@ -811,85 +881,25 @@ async def verify_google_play(
                     SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
                         updated_at = NOW()
                     """,
-                    user_uuid,
-                    spins_to_add,
+                    user_uuid, spins_to_add,
                 )
-            except Exception:
-                pass
+                return {"success": True, "activated": True, "consumable": True, "spins_added": spins_to_add}
 
-            log.info("Credited %d arcade spins via Google Play for user %s", spins_to_add, user_uuid)
-            return {
-                "success": True,
-                "activated": True,
-                "consumable": True,
-                "spins_added": spins_to_add,
-            }
+            if is_rose:
+                roses_to_add = int(plan_info.get("roses", 1)) if plan_info else 1
+                await conn.execute(
+                    "UPDATE users SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1, last_active_at = NOW() WHERE id = $2",
+                    roses_to_add, user_uuid,
+                )
+                return {"success": True, "activated": True, "consumable": True, "roses_added": roses_to_add}
 
-        elif is_rose:
-            roses_to_add = plan_info.get("roses", 1) if plan_info else 1
-            await conn.execute(
-                """
-                INSERT INTO store_subscriptions (
-                    user_id, store, original_transaction_id, latest_transaction_id,
-                    sku, status, created_at, updated_at
-                ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
-                ON CONFLICT (store, original_transaction_id) DO NOTHING
-                """,
-                user_uuid,
-                order_id,
-                purchase_token[:128],
-                sku,
-            )
-            await conn.execute(
-                """
-                UPDATE users
-                   SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1,
-                       last_active_at = NOW()
-                 WHERE id = $2
-                """,
-                roses_to_add,
-                user_uuid,
-            )
-            log.info("Credited %d roses via Google Play for user %s", roses_to_add, user_uuid)
-            return {
-                "success": True,
-                "activated": True,
-                "consumable": True,
-                "roses_added": roses_to_add,
-            }
-
-        elif is_superlike:
-            superlikes_to_add = plan_info.get("superlikes", 1) if plan_info else 1
-            await conn.execute(
-                """
-                INSERT INTO store_subscriptions (
-                    user_id, store, original_transaction_id, latest_transaction_id,
-                    sku, status, created_at, updated_at
-                ) VALUES ($1, 'google', $2, $3, $4, 'consumed', NOW(), NOW())
-                ON CONFLICT (store, original_transaction_id) DO NOTHING
-                """,
-                user_uuid,
-                order_id,
-                purchase_token[:128],
-                sku,
-            )
-            await conn.execute(
-                """
-                UPDATE users
-                   SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1,
-                       last_active_at = NOW()
-                 WHERE id = $2
-                """,
-                superlikes_to_add,
-                user_uuid,
-            )
-            log.info("Credited %d superlikes via Google Play for user %s", superlikes_to_add, user_uuid)
-            return {
-                "success": True,
-                "activated": True,
-                "consumable": True,
-                "superlikes_added": superlikes_to_add,
-            }
+            if is_superlike:
+                superlikes_to_add = int(plan_info.get("superlikes", 1)) if plan_info else 1
+                await conn.execute(
+                    "UPDATE users SET super_connect_credits = COALESCE(super_connect_credits, 0) + $1, last_active_at = NOW() WHERE id = $2",
+                    superlikes_to_add, user_uuid,
+                )
+                return {"success": True, "activated": True, "consumable": True, "superlikes_added": superlikes_to_add}
 
 
 # ---------------------------------------------------------------------------
@@ -1051,20 +1061,21 @@ async def razorpay_web_verify(
     if not lock_acquired:
         raise HTTPException(status_code=409, detail="Payment verification is already in progress")
 
-    payment_entity: dict[str, Any] = {
-        "order_id": body.razorpay_order_id,
-        "id": body.razorpay_payment_id,
-    }
-    if intent.get("amount") is not None:
-        payment_entity["amount"] = intent["amount"]
-
     try:
-        rzp = payment_service._rzp_client()
-        fetched = await asyncio.to_thread(rzp.payment.fetch, body.razorpay_payment_id)
-        if fetched and "amount" in fetched:
-            payment_entity["amount"] = fetched["amount"]
-    except Exception:
-        pass
+        payment_entity = await _fetch_captured_razorpay_payment(
+            body.razorpay_payment_id,
+            body.razorpay_order_id,
+        )
+    except HTTPException:
+        if r and lock_acquired:
+            try:
+                await r.eval(
+                    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+                    1, lock_key, lock_token,
+                )
+            except Exception:
+                pass
+        raise
 
     try:
         await payment_service.process_payment_captured(

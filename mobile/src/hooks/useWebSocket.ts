@@ -11,7 +11,7 @@ import { AppState, AppStateStatus } from "react-native";
 import { getAccessToken, apiPost } from "../api/client";
 
 const WS_BASE_URL =
-  process.env.EXPO_PUBLIC_WS_URL || "wss://api.jainune.com/v1/ws/chat";
+  process.env.EXPO_PUBLIC_WS_URL || "wss://jainune-backend-api.onrender.com/v1/ws/chat";
 
 export type WebSocketStatus = "connecting" | "connected" | "disconnected";
 
@@ -87,7 +87,7 @@ export function useWebSocket({
     setStatus("connecting");
 
     const authParam = await getAuthParam();
-    if (!authParam || !isMounted.current) {
+    if (!authParam || !isMounted.current || !enabled) {
       setStatus("disconnected");
       return;
     }
@@ -165,7 +165,7 @@ export function useWebSocket({
         socket.close();
       }
     };
-  }, [chatId, cleanup]);
+  }, [chatId, cleanup, enabled]);
 
   useEffect(() => {
     reconnectAttempts.current = 0;

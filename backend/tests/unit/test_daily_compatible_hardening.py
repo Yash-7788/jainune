@@ -65,8 +65,8 @@ class TestDailyCompatibleHardening:
         assert 60 <= ttl <= 86400
 
     @pytest.mark.asyncio
-    async def test_02_cached_read_returns_without_db_query(self):
-        """When Redis cache hits, returns immediately without acquiring DB."""
+    async def test_02_cached_read_revalidates_current_candidate_visibility(self):
+        """A cached daily candidate is returned only if it remains eligible in the database."""
         user_id = uuid.uuid4()
         cand_id = uuid.uuid4()
 
@@ -79,13 +79,43 @@ class TestDailyCompatibleHardening:
 
         mock_redis = AsyncMock()
         mock_redis.get = AsyncMock(return_value=json.dumps(cached_data))
+        mock_conn = AsyncMock()
+        mock_conn.fetch = AsyncMock(return_value=[{"id": cand_id}])
         mock_db = MagicMock()
+        mock_acquire = AsyncMock()
+        mock_acquire.__aenter__.return_value = mock_conn
+        mock_acquire.__aexit__.return_value = None
+        mock_db.acquire.return_value = mock_acquire
 
         result = await fetch_daily_compatible(user_id=user_id, db=mock_db, redis=mock_redis)
 
         assert result is not None
         assert result["first_name"] == "Riya"
-        mock_db.acquire.assert_not_called()
+        mock_conn.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_02b_cached_read_discards_candidate_who_is_no_longer_eligible(self):
+        """A cached candidate is purged when deletion, pause, blocks, or swipes invalidate it."""
+        user_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+        cached_data = {"id": str(cand_id), "first_name": "Riya"}
+
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=json.dumps(cached_data))
+        mock_redis.delete = AsyncMock()
+        mock_conn = AsyncMock()
+        mock_conn.fetch = AsyncMock(return_value=[])
+        mock_conn.fetchrow = AsyncMock(return_value=None)
+        mock_db = MagicMock()
+        mock_acquire = AsyncMock()
+        mock_acquire.__aenter__.return_value = mock_conn
+        mock_acquire.__aexit__.return_value = None
+        mock_db.acquire.return_value = mock_acquire
+
+        result = await fetch_daily_compatible(user_id=user_id, db=mock_db, redis=mock_redis)
+
+        assert result is None
+        mock_redis.delete.assert_awaited_once_with(f"daily_compatible:{user_id}")
 
     @pytest.mark.asyncio
     async def test_03_daily_compatible_endpoint_contract(self):

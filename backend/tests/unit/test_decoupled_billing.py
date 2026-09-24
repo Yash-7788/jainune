@@ -22,7 +22,80 @@ from app.routers.subscriptions import (
 from app.services.payment_service import get_active_subscription_plans, PLAN_CATALOGUE
 
 
+def _billing_conn():
+    conn = AsyncMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchval = AsyncMock(return_value=None)
+    return conn
+
+
 class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
+
+    async def test_google_verifier_accepts_current_entitlement_after_cancel_or_deferred_change(self):
+        """Google's legacy API omits paymentState for canceled-but-unexpired plans and uses 3 for deferred changes."""
+        from app.services.google_play_verifier import verify_google_play_purchase
+        from app.core.config import settings
+
+        expiry_ms = str(int((datetime.now(timezone.utc) + timedelta(days=10)).timestamp() * 1000))
+
+        class _Response:
+            status_code = 200
+            text = ""
+
+            def __init__(self, data):
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        class _Client:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return self.response
+
+        orig_env = settings.environment
+        settings.environment = "production"
+        try:
+            for provider_data in (
+                {"paymentState": 3, "expiryTimeMillis": expiry_ms},
+                {"cancelReason": 0, "expiryTimeMillis": expiry_ms},
+            ):
+                with patch("app.services.google_play_verifier._load_google_play_credentials", return_value={"test": True}), \
+                     patch("app.services.google_play_verifier.get_google_publisher_token", new_callable=AsyncMock, return_value="token"), \
+                     patch("app.services.google_play_verifier.httpx.AsyncClient", return_value=_Client(_Response(provider_data))):
+                    result = await verify_google_play_purchase(
+                        package_name="com.jainune.app",
+                        product_id="jainune_base_399",
+                        purchase_token="provider-token",
+                        is_subscription=True,
+                    )
+                self.assertGreater(result["_verified_expires_at"], datetime.now(timezone.utc))
+
+            with patch("app.services.google_play_verifier._load_google_play_credentials", return_value={"test": True}), \
+                 patch("app.services.google_play_verifier.get_google_publisher_token", new_callable=AsyncMock, return_value="token"), \
+                 patch("app.services.google_play_verifier.httpx.AsyncClient", return_value=_Client(_Response({"paymentState": 0, "expiryTimeMillis": expiry_ms}))):
+                with self.assertRaises(HTTPException) as ctx:
+                    await verify_google_play_purchase(
+                        package_name="com.jainune.app",
+                        product_id="jainune_base_399",
+                        purchase_token="pending-token",
+                        is_subscription=True,
+                    )
+                self.assertEqual(ctx.exception.status_code, 402)
+        finally:
+            settings.environment = orig_env
 
     def test_01_plan_catalogue_contains_phase5_tiers_and_consumables(self):
         """Verify PLAN_CATALOGUE has base_399, premium_799, ultra_1499, and consumable SKUs."""
@@ -70,14 +143,11 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         current_user = {"user_id": str(user_id)}
 
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
         # Mock existing_sub is None (new purchase)
-        mock_conn.fetchrow.side_effect = [
-            None,  # Check store_subscriptions
-            {"subscription_valid_until": None},  # Check user current valid
-        ]
+        mock_conn.fetchrow.return_value = {"id": user_id}
         mock_conn.execute.return_value = None
 
         body = GooglePlayVerifyBody(
@@ -88,7 +158,13 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             purchaseToken="test_token_abc_123",
         )
 
-        res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {
+                "verified": True,
+                "orderId": body.orderId,
+                "_verified_expires_at": datetime.now(timezone.utc) + timedelta(days=30),
+            }
+            res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
         self.assertTrue(res["success"])
         self.assertTrue(res["activated"])
         self.assertEqual(res["tier"], "premium_799")
@@ -98,6 +174,7 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
 
         # Ensure user update, arcade spins insert, and store_subscriptions insert were executed
         self.assertEqual(mock_conn.execute.call_count, 3)
+        self.assertIn(body.purchaseToken, mock_conn.execute.call_args_list[0].args)
 
     async def test_04_verify_google_play_replay_defense(self):
         """Verify POST /verify-google-play returns idempotent response for same user, rejects different user."""
@@ -106,18 +183,21 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         current_user = {"user_id": str(user_id)}
 
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
         expiry = datetime.now(timezone.utc) + timedelta(days=25)
 
         # Scenario A: Same user re-submits receipt (idempotent success)
-        mock_conn.fetchrow.return_value = {
+        mock_conn.fetch.return_value = [{
             "id": uuid.uuid4(),
             "user_id": user_id,
             "status": "active",
             "expires_at": expiry,
-        }
+            "sku": "jainune_base_399",
+            "original_transaction_id": "legacy-order",
+            "latest_transaction_id": "test_token_abc_123",
+        }]
 
         body = GooglePlayVerifyBody(
             orderId="GPA.1234-5678-9012-34567",
@@ -127,21 +207,36 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             purchaseToken="test_token_abc_123",
         )
 
-        res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {
+                "verified": True,
+                "orderId": body.orderId,
+                "_verified_expires_at": expiry,
+            }
+            res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
         self.assertTrue(res["success"])
         self.assertTrue(res["idempotent"])
         self.assertEqual(res["expires_at"], expiry.isoformat())
 
         # Scenario B: Different user attempts to claim the same order ID (replay attack)
-        mock_conn.fetchrow.return_value = {
+        mock_conn.fetch.return_value = [{
             "id": uuid.uuid4(),
             "user_id": other_user_id,
             "status": "active",
             "expires_at": expiry,
-        }
+            "sku": "jainune_base_399",
+            "original_transaction_id": "legacy-order",
+            "latest_transaction_id": "test_token_abc_123",
+        }]
 
-        with self.assertRaises(HTTPException) as ctx:
-            await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {
+                "verified": True,
+                "orderId": body.orderId,
+                "_verified_expires_at": expiry,
+            }
+            with self.assertRaises(HTTPException) as ctx:
+                await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
         self.assertEqual(ctx.exception.status_code, 409)
 
     async def test_05_verify_google_play_consumable_arcade_spins(self):
@@ -150,10 +245,10 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         current_user = {"user_id": str(user_id)}
 
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
-        mock_conn.fetchrow.return_value = None  # Not previously claimed
+        mock_conn.fetchrow.return_value = {"id": user_id}
         mock_conn.execute.return_value = None
 
         body = GooglePlayVerifyBody(
@@ -164,7 +259,9 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             purchaseToken="token_spins_10",
         )
 
-        res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {"verified": True, "orderId": body.orderId}
+            res = await verify_google_play(body=body, current_user=current_user, pool=mock_pool, redis=None)
         self.assertTrue(res["success"])
         self.assertTrue(res["consumable"])
         self.assertEqual(res["spins_added"], 10)
@@ -204,7 +301,7 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         order_id = "order_test_web_verify_123"
 
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
         mock_conn.fetchrow.side_effect = [
@@ -215,7 +312,9 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         ]
 
         with patch("app.services.payment_service.verify_payment_signature", return_value=True), \
+             patch("app.routers.subscriptions._fetch_captured_razorpay_payment", new_callable=AsyncMock) as fetch_capture, \
              patch("app.services.payment_service.process_payment_captured", new_callable=AsyncMock) as mock_captured:
+            fetch_capture.return_value = {"order_id": order_id, "id": "pay_test_web_456", "status": "captured", "amount": 79900}
             body = VerifyPaymentBody(
                 razorpay_order_id=order_id,
                 razorpay_payment_id="pay_test_web_456",
@@ -233,10 +332,10 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         current_user = {"user_id": str(user_id)}
 
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
-        mock_conn.fetchrow.return_value = None  # Not previously claimed
+        mock_conn.fetchrow.return_value = {"id": user_id}
         mock_conn.execute.return_value = None
 
         # Test Rose
@@ -247,7 +346,9 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             purchaseTime=1700000000000,
             purchaseToken="token_rose",
         )
-        res_rose = await verify_google_play(body=body_rose, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {"verified": True, "orderId": body_rose.orderId}
+            res_rose = await verify_google_play(body=body_rose, current_user=current_user, pool=mock_pool, redis=None)
         self.assertTrue(res_rose["success"])
         self.assertEqual(res_rose["roses_added"], 1)
 
@@ -259,7 +360,9 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             purchaseTime=1700000000000,
             purchaseToken="token_superlike",
         )
-        res_superlike = await verify_google_play(body=body_superlike, current_user=current_user, pool=mock_pool, redis=None)
+        with patch("app.services.google_play_verifier.verify_google_play_purchase", new_callable=AsyncMock) as verify:
+            verify.return_value = {"verified": True, "orderId": body_superlike.orderId}
+            res_superlike = await verify_google_play(body=body_superlike, current_user=current_user, pool=mock_pool, redis=None)
         self.assertTrue(res_superlike["success"])
         self.assertEqual(res_superlike["superlikes_added"], 1)
 
@@ -275,7 +378,7 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
             "subscription_tier": "free",
         }
         mock_pool = MagicMock()
-        mock_conn = AsyncMock()
+        mock_conn = _billing_conn()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
         body = GooglePlayVerifyBody(
@@ -301,4 +404,3 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

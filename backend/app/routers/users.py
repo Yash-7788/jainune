@@ -469,7 +469,7 @@ async def delete_my_account(
             return {
                 "success": True,
                 "data": {
-                    "message": "Your account has been deactivated. Photos and matches will be permanently purged in 72 hours.",
+                    "message": "Your account has been deactivated. Your personal data is scheduled for permanent deletion after 30 days; deletion may be delayed until an active paid subscription ends.",
                     "status": "deactivated",
                 },
                 "error": None,

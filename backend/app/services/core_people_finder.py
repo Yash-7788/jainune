@@ -144,6 +144,58 @@ async def invalidate_feed_cache(user_id: uuid.UUID, redis: aioredis.Redis) -> No
     await redis.delete(f"feed:cache:{user_id}")
 
 
+async def _filter_current_feed_candidates(
+    user_id: uuid.UUID,
+    candidates: list[dict],
+    db: asyncpg.Pool,
+) -> list[dict]:
+    """Revalidate cached profile IDs against current visibility and interaction state."""
+    candidate_ids: list[uuid.UUID] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            candidate_id = uuid.UUID(str(candidate.get("id")))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if candidate_id != user_id and candidate_id not in candidate_ids:
+            candidate_ids.append(candidate_id)
+    if not candidate_ids:
+        return []
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT u.id
+            FROM users u
+            WHERE u.id = ANY($1::uuid[])
+              AND u.account_status = 'active'
+              AND u.deleted_at IS NULL
+              AND u.is_paused = FALSE
+              AND u.onboarding_completed = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM user_media um
+                  WHERE um.user_id = u.id
+                    AND um.media_type = 'photo'
+                    AND um.status = 'approved'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM interactions i
+                  WHERE i.actor_id = $2 AND i.target_id = u.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks ub
+                  WHERE (ub.blocker_id = $2 AND ub.blocked_id = u.id)
+                     OR (ub.blocker_id = u.id AND ub.blocked_id = $2)
+              )
+            """,
+            candidate_ids,
+            user_id,
+        )
+    eligible_ids = {str(row["id"]) for row in rows}
+    return [candidate for candidate in candidates if str(candidate.get("id")) in eligible_ids]
+
+
 # ---------------------------------------------------------------------------
 # Main engine entry point
 # ---------------------------------------------------------------------------
@@ -174,17 +226,19 @@ async def fetch_recommended_feed(
             if cached_json:
                 batch = json.loads(cached_json)
                 if isinstance(batch, list) and (not batch or isinstance(batch[0], dict)):
+                    batch = await _filter_current_feed_candidates(user_id, batch, db)
                     for c in batch:
                         if not isinstance(c.get("prompts"), list):
                             c["prompts"] = []
                         if not isinstance(c.get("photos"), list):
                             c["photos"] = []
-                    return {
-                        "candidates": batch,
-                        "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
-                        "exhausted": False,
-                        "from_cache": True,
-                    }
+                    if batch:
+                        return {
+                            "candidates": batch,
+                            "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                            "exhausted": False,
+                            "from_cache": True,
+                        }
                 await redis.delete(f"feed:cache:{user_id}")
         except Exception as exc:
             log.warning("Atomic feed cache pop failed: %s", exc)
@@ -194,17 +248,24 @@ async def fetch_recommended_feed(
                     raw_batch = json.loads(cached_json)
                     if isinstance(raw_batch, list) and (not raw_batch or isinstance(raw_batch[0], dict)):
                         batch = raw_batch[:limit]
+                        remaining = raw_batch[limit:]
+                        if remaining:
+                            await redis.set(f"feed:cache:{user_id}", json.dumps(remaining, default=str), ex=_FEED_CACHE_TTL)
+                        else:
+                            await redis.delete(f"feed:cache:{user_id}")
+                        batch = await _filter_current_feed_candidates(user_id, batch, db)
                         for c in batch:
                             if not isinstance(c.get("prompts"), list):
                                 c["prompts"] = []
                             if not isinstance(c.get("photos"), list):
                                 c["photos"] = []
-                        return {
-                            "candidates": batch,
-                            "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
-                            "exhausted": False,
-                            "from_cache": True,
-                        }
+                        if batch:
+                            return {
+                                "candidates": batch,
+                                "batch_id": f"batch_{uuid.uuid4().hex[:8]}",
+                                "exhausted": False,
+                                "from_cache": True,
+                            }
                     await redis.delete(f"feed:cache:{user_id}")
             except Exception:
                 pass
@@ -241,9 +302,23 @@ async def fetch_recommended_feed(
                                        job_title, height_cm, open_to_relocation, is_photo_verified,
                                        eats_root_vegetables, eats_onion_garlic, paryushan_mode, education
                                 FROM users
-                                WHERE id = ANY($1::uuid[]) AND account_status = 'active'
+                                WHERE id = ANY($1::uuid[])
+                                  AND account_status = 'active'
+                                  AND deleted_at IS NULL
+                                  AND is_paused = FALSE
+                                  AND onboarding_completed = TRUE
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM user_blocks ub
+                                      WHERE (ub.blocker_id = $2 AND ub.blocked_id = users.id)
+                                         OR (ub.blocker_id = users.id AND ub.blocked_id = $2)
+                                  )
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM interactions i
+                                      WHERE i.actor_id = $2 AND i.target_id = users.id
+                                  )
                                 """,
                                 eligible_ids,
+                                user_id,
                             )
                             c_ids = [r["id"] for r in candidate_rows]
                             media_rows = await conn.fetch(
@@ -768,7 +843,12 @@ async def fetch_daily_compatible(
     try:
         cached = await redis.get(cache_key)
         if cached:
-            return json.loads(cached)
+            cached_candidate = json.loads(cached)
+            if isinstance(cached_candidate, dict):
+                eligible = await _filter_current_feed_candidates(user_id, [cached_candidate], db)
+                if eligible:
+                    return eligible[0]
+            await redis.delete(cache_key)
     except Exception as exc:
         log.warning("Redis daily_compatible decode error for user %s: %s", user_id, exc)
 
@@ -798,6 +878,8 @@ async def fetch_daily_compatible(
             WHERE (dp.user_a_id = $1 OR dp.user_b_id = $1)
               AND dp.proposed_at >= CURRENT_DATE
               AND u.account_status = 'active'
+              AND u.deleted_at IS NULL
+              AND u.is_paused = FALSE
               AND u.onboarding_completed = TRUE
               AND NOT EXISTS (
                   SELECT 1 FROM interactions i
@@ -833,6 +915,8 @@ async def fetch_daily_compatible(
                 JOIN user_behavior_vectors b ON u.id = b.user_id
                 WHERE u.id != $1
                   AND u.account_status = 'active'
+                  AND u.deleted_at IS NULL
+                  AND u.is_paused = FALSE
                   AND u.onboarding_completed = TRUE
                   AND NOT EXISTS (
                       SELECT 1 FROM interactions i

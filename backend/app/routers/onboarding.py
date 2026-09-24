@@ -701,6 +701,14 @@ async def step21_consent(
     ]
     async with db.acquire() as conn:
         async with conn.transaction():
+            user_row = await conn.fetchrow(
+                "SELECT onboarding_completed FROM users WHERE id = $1 FOR UPDATE",
+                current_user.id,
+            )
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User not found.")
+            if user_row["onboarding_completed"]:
+                raise HTTPException(status_code=409, detail="Onboarding is already complete.")
             for consent_type, granted in consents:
                 await conn.execute(
                     """
@@ -742,56 +750,73 @@ async def step22_complete(
     await _guard_rate_limit(current_user.id, redis)
 
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                first_name, date_of_birth, gender, show_me, looking_for,
-                dietary_strictness, community_sect, city, state, location,
-                onboarding_completed
-            FROM users WHERE id = $1
-            """,
-            current_user.id,
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="User not found.")
-        if row["onboarding_completed"]:
-            # Idempotent re-entry: return success to prevent lockout on network retry
-            return _status(22, True, None)
-
-        # Check mandatory fields
-        required = [
-            "first_name", "date_of_birth", "gender", "show_me", "looking_for",
-            "dietary_strictness", "community_sect", "city", "state",
-        ]
-        missing = [f for f in required if not row[f]]
-        if missing:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Mandatory fields not completed: {missing}",
-            )
-        if not row["location"]:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Location (step 11) is required to complete onboarding.",
-            )
-
-        has_photo = await conn.fetchval(
-            """
-            SELECT EXISTS (
-                SELECT 1 FROM user_media
-                WHERE user_id = $1 AND media_type = 'photo'
-                  AND status IN ('approved', 'pending') AND (status = 'approved' OR is_processed = TRUE)
-            )
-            """,
-            current_user.id,
-        )
-        if not has_photo:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="At least one photo (step 19) is required to complete onboarding.",
-            )
-
         async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    first_name, date_of_birth, gender, show_me, looking_for,
+                    dietary_strictness, community_sect, city, state, location,
+                    onboarding_completed
+                FROM users WHERE id = $1 FOR UPDATE
+                """,
+                current_user.id,
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found.")
+            if row["onboarding_completed"]:
+                # Idempotent re-entry: return success to prevent lockout on network retry
+                return _status(22, True, None)
+
+            # Check mandatory fields
+            required = [
+                "first_name", "date_of_birth", "gender", "show_me", "looking_for",
+                "dietary_strictness", "community_sect", "city", "state",
+            ]
+            missing = [f for f in required if not row[f]]
+            if missing:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Mandatory fields not completed: {missing}",
+                )
+            if not row["location"]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Location (step 11) is required to complete onboarding.",
+                )
+
+            has_consent = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM consent_records
+                    WHERE user_id = $1
+                      AND consent_type = 'core_matchmaking'
+                      AND granted = TRUE
+                )
+                """,
+                current_user.id,
+            )
+            if not has_consent:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Core matchmaking consent (step 21) is required to complete onboarding.",
+                )
+
+            has_photo = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM user_media
+                    WHERE user_id = $1 AND media_type = 'photo'
+                      AND status IN ('approved', 'pending') AND (status = 'approved' OR is_processed = TRUE)
+                )
+                """,
+                current_user.id,
+            )
+            if not has_photo:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="At least one photo (step 19) is required to complete onboarding.",
+                )
+
             # Mark onboarding complete and activate account
             await conn.execute(
                 """

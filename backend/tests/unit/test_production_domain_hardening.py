@@ -436,7 +436,7 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         }
         with self.assertRaises(ValueError) as ctx:
             await process_payment_captured(
-                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 29900}}}},
+                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 29900, "status": "captured"}}}},
                 pool=pool,
             )
         self.assertIn("does not match plan price", str(ctx.exception))
@@ -450,7 +450,7 @@ class TestProductionDomainHardening(unittest.IsolatedAsyncioTestCase):
         }
         with self.assertRaises(ValueError) as ctx:
             await process_payment_captured(
-                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 100}}}},
+                event={"payload": {"payment": {"entity": {"order_id": "order_123", "id": "pay_123", "amount": 100, "status": "captured"}}}},
                 pool=pool,
             )
         self.assertIn("does not match expected plan price", str(ctx.exception))
