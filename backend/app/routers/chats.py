@@ -134,7 +134,7 @@ async def list_chats(
             ) unread ON TRUE
             WHERE (c.participant_1_id = $1 OR c.participant_2_id = $1)
               AND c.is_unmatched = FALSE
-              AND other_u.account_status NOT IN ('banned', 'deleted', 'suspended')
+              AND other_u.account_status NOT IN ('banned', 'deleted')
               AND NOT EXISTS (
                   SELECT 1 FROM user_blocks ub
                   WHERE (ub.blocker_id = $1 AND ub.blocked_id = (CASE WHEN c.participant_1_id = $1 THEN c.participant_2_id ELSE c.participant_1_id END))

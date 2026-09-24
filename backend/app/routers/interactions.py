@@ -397,6 +397,7 @@ async def record_interaction_action(
                     await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
                 except Exception as exc:
                     log.warning("Behavior vector EMA update failed for actor=%s target=%s: %s", actor_id, target_id, exc)
+            like_quota_deducted = False
     except Exception:
         if like_quota_deducted and like_key:
             try:

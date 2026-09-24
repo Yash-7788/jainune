@@ -604,7 +604,7 @@ async def process_refund(
                         intent["user_id"],
                     )
                     # B-4: Claw back super connect credits granted during upgrade
-                    credits_granted = plan.get("super_connect_credits", 0)
+                    credits_granted = plan.get("roses", plan.get("super_connect_credits", 0))
                     if credits_granted > 0:
                         await conn.execute(
                             """
