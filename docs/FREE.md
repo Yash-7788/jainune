@@ -631,6 +631,13 @@ done
 - **Unmanaged DevOps**: Raw Linux VM requires manual Docker setup, NGINX SSL certs, firewall rules, and daily backup scripts (Render is zero-ops git-push).
 - **Current headroom**: Render + Supabase already handles current pre-launch phase (up to 3,000 DAU, 50,000 accounts).
 
+#### Architectural Evaluation: Why Combining Multiple Free Databases (Firebase + Render DB + Supabase) is Rejected
+- **Incompatible engines**: App relies on PostgreSQL 16 with PostGIS (geo-proximity radius matching) and pgvector (128-dim compatibility embeddings); Firebase Firestore/RTDB is NoSQL document storage and cannot run PostGIS, pgvector, or SQL JOINs.
+- **Render auto-delete**: Render free PostgreSQL automatically deletes all data every 30 days.
+- **Cross-cloud latency & data corruption**: Splitting data between AWS (Supabase) and GCP (Firebase) adds ~200ms roundtrip network lag per request and breaks ACID transaction atomicity (two-phase commit failures cause ghost matches and orphaned chat threads).
+- **Redis fragmentation**: Splitting Upstash (256MB) and Redis Cloud (30MB) adds extra network hops and connection leaks for an insignificant 30 MB gain.
+- **Verdict**: Stitching 5 fragile free tiers together creates 100 failure points. Single Supabase (current) or single Oracle Always Free VM (target) provides clean, robust, unified storage.
+
 ---
 
 ### 13.2 Multi-Cloud Scenario Comparison ($0 / Month)
