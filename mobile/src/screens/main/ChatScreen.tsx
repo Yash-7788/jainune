@@ -415,13 +415,18 @@ export default function ChatScreen() {
     enabled: Boolean(matchId && !chatBlocked),
   });
 
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
+
   useEffect(() => {
     loadMessages();
     triggerMarkRead();
+  }, [loadMessages, triggerMarkRead]);
 
+  useEffect(() => {
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
-        const latestId = messages[0]?.id;
+        const latestId = messagesRef.current[0]?.id;
         if (latestId) {
           getMessagesDelta(matchId, latestId)
             .then((newMsgs) => {
@@ -449,7 +454,7 @@ export default function ChatScreen() {
     return () => {
       appStateSub.remove();
     };
-  }, [loadMessages, triggerMarkRead, matchId, messages, writeChatCache]);
+  }, [matchId, loadMessages, triggerMarkRead, writeChatCache]);
 
   const sendDraft = useCallback(async (content: string) => {
     const trimmed = content.trim();
@@ -579,7 +584,7 @@ export default function ChatScreen() {
     setLoadingMore(true);
     try {
       const msgs = await getMessages(matchId, cursor);
-      if (msgs.length < 30) setHasMore(false);
+      if (msgs.length < 20) setHasMore(false);
       setMessages((prev) => [...prev, ...msgs]);
       if (msgs.length > 0) setCursor(msgs[msgs.length - 1].id);
     } catch {}

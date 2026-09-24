@@ -148,7 +148,7 @@ import struct
 _MAGIC_WEBP = (b"RIFF", b"WEBP")
 _MAGIC_JPEG = b"\xff\xd8\xff"
 _MAGIC_PNG  = b"\x89PNG"
-_MAX_BYTES   = 10 * 1024 * 1024  # 10 MB hard cap
+_MAX_BYTES   = 2 * 1024 * 1024  # 2 MB hard cap
 
 
 def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:

@@ -103,26 +103,44 @@ export async function getMessagesDelta(
   matchId: string,
   sinceId: string
 ): Promise<Message[]> {
-  const res = await apiGet<{ messages: any[] }>(`/chats/${matchId}/messages`, {
-    since_id: sinceId,
-    after: sinceId,
-    since: sinceId,
-    limit: 50,
-  });
-  if (!res.success) throw { _apiError: res.error };
-  const rawMsgs = res.data?.messages || [];
-  return rawMsgs.map((m: any) => ({
-    id: String(m.id),
-    match_id: String(m.chat_id || matchId),
-    sender_id: String(m.sender_id),
-    type: (m.message_type === "photo" || m.type === "photo") ? "photo" : "text",
-    content: m.content || null,
-    media_url: m.media_url || null,
-    is_read: Boolean(m.is_read),
-    created_at: m.created_at || new Date().toISOString(),
-    is_moderated: Boolean(m.is_moderated),
-    moderation_disclaimer: m.moderation_disclaimer || null,
-  }));
+  const allMsgs: Message[] = [];
+  let currentSince = sinceId;
+  let hasMore = true;
+
+  while (hasMore && allMsgs.length < 500) {
+    const res = await apiGet<{ messages: any[]; has_more?: boolean; next_cursor?: string | null }>(
+      `/chats/${matchId}/messages`,
+      {
+        since_id: currentSince,
+        after: currentSince,
+        since: currentSince,
+        limit: 50,
+      }
+    );
+    if (!res.success) throw { _apiError: res.error };
+    const rawMsgs = res.data?.messages || [];
+    if (rawMsgs.length === 0) break;
+    const mapped: Message[] = rawMsgs.map((m: any) => ({
+      id: String(m.id),
+      match_id: String(m.chat_id || matchId),
+      sender_id: String(m.sender_id),
+      type: (m.message_type === "photo" || m.type === "photo") ? "photo" : "text",
+      content: m.content || null,
+      media_url: m.media_url || null,
+      is_read: Boolean(m.is_read),
+      created_at: m.created_at || new Date().toISOString(),
+      is_moderated: Boolean(m.is_moderated),
+      moderation_disclaimer: m.moderation_disclaimer || null,
+    }));
+    allMsgs.push(...mapped);
+    if (res.data?.has_more && res.data?.next_cursor) {
+      currentSince = res.data.next_cursor;
+    } else {
+      hasMore = false;
+    }
+  }
+
+  return allMsgs.reverse();
 }
 
 /** POST /v1/chats/:match_id/messages — text */

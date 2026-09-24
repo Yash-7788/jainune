@@ -193,27 +193,33 @@ async def _async_flush_telemetry(pool) -> None:
 
             # ── Flush dwell vector updates ───────────────────────────────────
             if vector_snapshot:
-                vec_sql = """
-                UPDATE user_behavior_vectors uv
-                SET revealed_preference_vector = (
-                    uv.revealed_preference_vector + (
-                        t.revealed_preference_vector - uv.revealed_preference_vector
-                    ) * $3
-                )
-                FROM user_behavior_vectors t
-                WHERE uv.user_id = $1
-                  AND t.user_id  = $2
-                  AND t.revealed_preference_vector IS NOT NULL
-                  AND uv.revealed_preference_vector IS NOT NULL
-                """
                 for v in vector_snapshot:
                     try:
-                        await conn.execute(
-                            vec_sql,
-                            uuid.UUID(v["actor_id"]),
-                            uuid.UUID(v["target_id"]),
-                            float(v.get("alpha", 0.05)),
+                        actor_id = uuid.UUID(v["actor_id"])
+                        target_id = uuid.UUID(v["target_id"])
+                        alpha = float(v.get("alpha", 0.05))
+                        rows = await conn.fetch(
+                            "SELECT user_id, revealed_preference_vector::text AS vec FROM user_behavior_vectors WHERE user_id IN ($1, $2)",
+                            actor_id, target_id,
                         )
+                        vecs = {}
+                        for r in rows:
+                            if r.get("vec"):
+                                raw = r["vec"].strip("[]()")
+                                if raw:
+                                    try:
+                                        vecs[r["user_id"]] = [float(x) for x in raw.split(",") if x.strip()]
+                                    except Exception:
+                                        pass
+                        actor_vec = vecs.get(actor_id)
+                        target_vec = vecs.get(target_id)
+                        if actor_vec and target_vec and len(actor_vec) == len(target_vec):
+                            new_vec = [a + alpha * (t - a) for a, t in zip(actor_vec, target_vec)]
+                            vec_str = "[" + ",".join(f"{x:.6f}" for x in new_vec) + "]"
+                            await conn.execute(
+                                "UPDATE user_behavior_vectors SET revealed_preference_vector = $2::vector WHERE user_id = $1",
+                                actor_id, vec_str,
+                            )
                     except Exception as exc:
                         log.warning("Vector update failed: %s", exc)
                 log.info("_async_flush_telemetry: processed %d vector updates", len(vector_snapshot))

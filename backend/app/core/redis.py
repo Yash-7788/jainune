@@ -51,6 +51,14 @@ class InMemoryPipeline:
         self._cmds.append(("delete", names, {}))
         return self
 
+    def incr(self, name: str, amount: int = 1) -> InMemoryPipeline:
+        self._cmds.append(("incr", (name, amount), {}))
+        return self
+
+    def decr(self, name: str, amount: int = 1) -> InMemoryPipeline:
+        self._cmds.append(("decr", (name, amount), {}))
+        return self
+
     async def execute(self) -> list[Any]:
         results = []
         for cmd, args, kwargs in self._cmds:

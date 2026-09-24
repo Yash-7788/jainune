@@ -179,24 +179,33 @@ async def _flush_async() -> None:
                     actor_uid = uuid.UUID(v_entry.get("actor_id"))
                     target_uid = uuid.UUID(v_entry.get("target_id"))
                     alpha = float(v_entry.get("alpha", 0.05))
-                    await conn.execute(
-                        """
-                        UPDATE user_behavior_vectors uv
-                        SET revealed_preference_vector = (
-                            uv.revealed_preference_vector + (
-                                t.revealed_preference_vector - uv.revealed_preference_vector
-                            ) * $3
-                        )
-                        FROM user_behavior_vectors t
-                        WHERE uv.user_id = $1
-                          AND t.user_id  = $2
-                          AND t.revealed_preference_vector IS NOT NULL
-                          AND uv.revealed_preference_vector IS NOT NULL
-                        """,
-                        actor_uid,
-                        target_uid,
-                        alpha,
+                    rows = await conn.fetch(
+                        "SELECT user_id, revealed_preference_vector::text AS vec FROM user_behavior_vectors WHERE user_id IN ($1, $2)",
+                        actor_uid, target_uid,
                     )
+                    vecs = {}
+                    for r in rows:
+                        if r.get("vec"):
+                            raw = r["vec"].strip("[]()")
+                            if raw:
+                                try:
+                                    vecs[r["user_id"]] = [float(x) for x in raw.split(",") if x.strip()]
+                                except Exception:
+                                    pass
+                    actor_vec = vecs.get(actor_uid)
+                    target_vec = vecs.get(target_uid)
+                    if actor_vec and target_vec and len(actor_vec) == len(target_vec):
+                        new_vec = [a + alpha * (t - a) for a, t in zip(actor_vec, target_vec)]
+                        vec_str = "[" + ",".join(f"{x:.6f}" for x in new_vec) + "]"
+                        await conn.execute(
+                            "UPDATE user_behavior_vectors SET revealed_preference_vector = $2::vector WHERE user_id = $1",
+                            actor_uid, vec_str,
+                        )
+                    else:
+                        await conn.execute(
+                            "UPDATE user_behavior_vectors SET revealed_preference_vector = revealed_preference_vector WHERE user_id = $1",
+                            actor_uid,
+                        )
                 except Exception as v_exc:
                     log.warning("Failed processing vector update %s: %s", stream_id, v_exc)
             if v_del_ids:

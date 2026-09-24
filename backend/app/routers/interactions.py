@@ -122,23 +122,6 @@ async def _update_behavior_vector_ema(
     VALUES ($1, array_fill(0.0, ARRAY[128])::vector)
     ON CONFLICT (user_id) DO NOTHING
     """
-    vec_sql = """
-    UPDATE user_behavior_vectors uv
-    SET revealed_preference_vector = (
-        uv.revealed_preference_vector + (
-            CASE WHEN $3 = 'pass'
-                 THEN (uv.revealed_preference_vector - t.revealed_preference_vector) * 0.05
-                 ELSE (t.revealed_preference_vector - uv.revealed_preference_vector) * 0.10
-            END
-        )
-    )
-    FROM user_behavior_vectors t
-    WHERE uv.user_id = $1
-      AND t.user_id  = $2
-      AND t.revealed_preference_vector IS NOT NULL
-      AND uv.revealed_preference_vector IS NOT NULL
-    """
-
     async def _execute_all(c):
         await c.execute(init_sql, actor_id)
         await c.execute(init_sql, target_id)
@@ -148,7 +131,30 @@ async def _update_behavior_vector_ema(
         else:
             await c.execute("UPDATE user_behavior_vectors SET total_likes_sent = total_likes_sent + 1 WHERE user_id = $1", actor_id)
             await c.execute("UPDATE user_behavior_vectors SET total_likes_received = total_likes_received + 1 WHERE user_id = $1", target_id)
-        await c.execute(vec_sql, actor_id, target_id, action)
+
+        rows = await c.fetch(
+            "SELECT user_id, revealed_preference_vector::text AS vec FROM user_behavior_vectors WHERE user_id IN ($1, $2)",
+            actor_id, target_id,
+        )
+        vecs = {}
+        for r in rows:
+            if r.get("vec"):
+                raw = r["vec"].strip("[]()")
+                if raw:
+                    try:
+                        vecs[r["user_id"]] = [float(x) for x in raw.split(",") if x.strip()]
+                    except Exception:
+                        pass
+        actor_vec = vecs.get(actor_id)
+        target_vec = vecs.get(target_id)
+        if actor_vec and target_vec and len(actor_vec) == len(target_vec):
+            alpha = -0.05 if action == "pass" else 0.10
+            new_vec = [a + alpha * (t - a) for a, t in zip(actor_vec, target_vec)]
+            vec_str = "[" + ",".join(f"{x:.6f}" for x in new_vec) + "]"
+            await c.execute(
+                "UPDATE user_behavior_vectors SET revealed_preference_vector = $2::vector WHERE user_id = $1",
+                actor_id, vec_str,
+            )
 
     if hasattr(conn_or_db, "fetchrow") or hasattr(conn_or_db, "fetch"):
         await _execute_all(conn_or_db)
@@ -392,9 +398,10 @@ async def record_interaction_action(
                             chat_id, match_row["id"],
                         )
 
-                # EMA vector update (inside same connection/transaction)
+                # EMA vector update (isolated with savepoint)
                 try:
-                    await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
+                    async with conn.transaction():
+                        await _update_behavior_vector_ema(actor_id, target_id, body.action, conn)
                 except Exception as exc:
                     log.warning("Behavior vector EMA update failed for actor=%s target=%s: %s", actor_id, target_id, exc)
             like_quota_deducted = False

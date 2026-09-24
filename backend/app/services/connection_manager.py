@@ -23,8 +23,8 @@ class ConnectionManager:
     """
 
     def __init__(self) -> None:
-        # chat_id -> {user_id: WebSocket}
-        self._chat_rooms: Dict[str, Dict[str, WebSocket]] = defaultdict(dict)
+        # chat_id -> {user_id: Set[WebSocket]}
+        self._chat_rooms: Dict[str, Dict[str, Set[WebSocket]]] = defaultdict(lambda: defaultdict(set))
         # user_id -> set[WebSocket] (supports multi-device/multi-tab sessions)
         self._user_sockets: Dict[str, Set[WebSocket]] = defaultdict(set)
         # (chat_id, user_id) -> expiry_timestamp
@@ -34,7 +34,7 @@ class ConnectionManager:
         """Registers an accepted WebSocket connection into room and user registries."""
         cid = str(chat_id)
         uid = str(user_id)
-        self._chat_rooms[cid][uid] = websocket
+        self._chat_rooms[cid][uid].add(websocket)
         self._user_sockets[uid].add(websocket)
         self.refresh_presence(cid, uid)
         log.debug("Registered WS connection for user %s in chat %s", uid, cid)
@@ -45,8 +45,8 @@ class ConnectionManager:
         uid = str(user_id)
 
         if cid in self._chat_rooms:
-            # Only remove if socket matches (avoid race on rapid reconnect)
-            if self._chat_rooms[cid].get(uid) == websocket:
+            self._chat_rooms[cid][uid].discard(websocket)
+            if not self._chat_rooms[cid][uid]:
                 self._chat_rooms[cid].pop(uid, None)
             if not self._chat_rooms[cid]:
                 self._chat_rooms.pop(cid, None)
@@ -56,7 +56,9 @@ class ConnectionManager:
             if not self._user_sockets[uid]:
                 self._user_sockets.pop(uid, None)
 
-        self._presence.pop((cid, uid), None)
+        # Only clear presence if no sockets remain for this user in this room
+        if cid not in self._chat_rooms or uid not in self._chat_rooms[cid]:
+            self._presence.pop((cid, uid), None)
         log.debug("Unregistered WS connection for user %s in chat %s", uid, cid)
 
     async def broadcast_chat(
@@ -75,14 +77,15 @@ class ConnectionManager:
             return
 
         dead_sockets: list[tuple[str, WebSocket]] = []
-        for uid, ws in list(room.items()):
+        for uid, ws_set in list(room.items()):
             if exclude_user_id and str(uid) == str(exclude_user_id):
                 continue
-            try:
-                await asyncio.wait_for(ws.send_json(message), timeout=5.0)
-            except Exception as exc:
-                log.warning("Failed to send message to user %s in chat %s: %s", uid, cid, exc)
-                dead_sockets.append((uid, ws))
+            for ws in list(ws_set):
+                try:
+                    await asyncio.wait_for(ws.send_json(message), timeout=5.0)
+                except Exception as exc:
+                    log.warning("Failed to send message to user %s in chat %s: %s", uid, cid, exc)
+                    dead_sockets.append((uid, ws))
 
         for uid, ws in dead_sockets:
             self.unregister(cid, uid, ws)
@@ -94,16 +97,17 @@ class ConnectionManager:
         if not room:
             return
 
-        for uid, ws in list(room.items()):
-            if uid in self._user_sockets:
-                self._user_sockets[uid].discard(ws)
-                if not self._user_sockets[uid]:
-                    self._user_sockets.pop(uid, None)
+        for uid, ws_set in list(room.items()):
+            for ws in list(ws_set):
+                if uid in self._user_sockets:
+                    self._user_sockets[uid].discard(ws)
+                try:
+                    await ws.close(code=4003, reason=f"Chat closed: {reason}")
+                except Exception:
+                    pass
+            if not self._user_sockets.get(uid):
+                self._user_sockets.pop(uid, None)
             self._presence.pop((cid, uid), None)
-            try:
-                await ws.close(code=4003, reason=f"Chat closed: {reason}")
-            except Exception:
-                pass
 
     async def disconnect_user(self, user_id: str, reason: str = "Account disconnected.") -> None:
         """Forces disconnect on all active WebSocket sessions for a user (ban / session replace)."""

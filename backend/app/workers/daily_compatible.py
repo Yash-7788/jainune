@@ -57,6 +57,11 @@ def run_daily_compatible() -> None:
     run_worker_task(_run_async())
 
 
+async def run_daily_compatible_async() -> None:
+    """Async entry point for in-process maintenance loop inside running event loop."""
+    await _run_async()
+
+
 async def _run_async() -> None:
     conn = await _get_conn()
     redis = await _get_redis()

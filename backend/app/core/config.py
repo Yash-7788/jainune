@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://postgres:password@localhost:5432/jainune_dev"
     database_pool_min_size: int = 2
-    database_pool_max_size: int = 10
+    database_pool_max_size: int = 30
     database_statement_timeout_ms: int = 2000
 
     # Redis

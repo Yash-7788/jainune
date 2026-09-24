@@ -112,6 +112,20 @@ async def _periodic_maintenance_loop() -> None:
                     DELETE FROM telemetry_events
                      WHERE occurred_at < NOW() - INTERVAL '30 days'
                 """)
+                # Prune chat messages beyond latest 100 per chat thread (500 MB limit defense)
+                await conn.execute("""
+                    DELETE FROM messages
+                     WHERE id IN (
+                         SELECT id FROM (
+                             SELECT id, ROW_NUMBER() OVER (
+                                 PARTITION BY chat_id
+                                 ORDER BY created_at DESC, id DESC
+                             ) as rn
+                             FROM messages
+                         ) ranked
+                         WHERE ranked.rn > 100
+                     )
+                """)
 
                 # 4. Mark stranded processing/pending media as rejected (>30 min timeout)
                 await conn.execute("""
@@ -195,8 +209,8 @@ async def _periodic_maintenance_loop() -> None:
 
             if needs_daily_batch:
                 _mlog.info("Executing daily Gale-Shapley matching pipeline...")
-                from app.workers.daily_compatible import run_daily_compatible
-                await run_daily_compatible()
+                from app.workers.daily_compatible import run_daily_compatible_async
+                await run_daily_compatible_async()
 
             # 10. Flush in-process impression buffer
             from app.services.core_people_finder import _async_flush_impressions

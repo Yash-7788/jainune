@@ -375,8 +375,8 @@ async def process_payment_captured(
                 log.error("No payment_intent for order_id=%s", order_id)
                 return
 
-            if intent["status"] == "captured":
-                log.info("Duplicate webhook for order_id=%s — skipping", order_id)
+            if intent["status"] in ("captured", "refunded", "partially_refunded"):
+                log.info("Duplicate or already finalized webhook for order_id=%s (status=%s) — skipping", order_id, intent["status"])
                 return
 
             plan = PLAN_CATALOGUE.get(intent["plan_id"])
@@ -571,13 +571,15 @@ async def process_refund(
                 return
 
             if plan_type == "subscription":
-                # Check if user has any other active captured payment
+                # Check if user has any other active captured subscription payment (BUG-016)
+                sub_plan_ids = [pid for pid, p in PLAN_CATALOGUE.items() if p.get("type") == "subscription"]
                 other_active = await conn.fetchrow(
                     """
                     SELECT razorpay_payment_id
                     FROM payment_intents
                     WHERE user_id = $1
                       AND status = 'captured'
+                      AND plan_id = ANY($3::text[])
                       AND razorpay_payment_id IS NOT NULL
                       AND razorpay_payment_id != $2
                     ORDER BY captured_at DESC
@@ -585,6 +587,7 @@ async def process_refund(
                     """,
                     intent["user_id"],
                     payment_id,
+                    sub_plan_ids,
                 )
                 has_other_payment = (
                     other_active is not None
@@ -616,7 +619,23 @@ async def process_refund(
                             credits_granted,
                             intent["user_id"],
                         )
-                    log.info("Subscription revoked on refund: user=%s payment=%s credits_clawed=%s", intent["user_id"], payment_id, credits_granted)
+                    # BUG-015: Also claw back bundled spins granted during subscription upgrade
+                    spins_granted = plan.get("spins", 0)
+                    if spins_granted > 0:
+                        try:
+                            await conn.execute(
+                                """
+                                UPDATE user_arcade_wallet
+                                   SET available_spins = GREATEST(0, available_spins - $1),
+                                       updated_at      = NOW()
+                                 WHERE user_id = $2
+                                """,
+                                spins_granted,
+                                intent["user_id"],
+                            )
+                        except Exception:
+                            pass
+                    log.info("Subscription revoked on refund: user=%s payment=%s credits_clawed=%s spins_clawed=%s", intent["user_id"], payment_id, credits_granted, spins_granted)
                     from app.core.redis import get_redis
                     try:
                         r = get_redis()
@@ -658,6 +677,21 @@ async def process_refund(
                     payment_id,
                 )
                 log.info("Arcade credits revoked on refund: user=%s", intent["user_id"])
+            elif plan_type in ("rose", "superlike"):
+                # BUG-015: Deduct super_connect_credits granted for rose/superlike purchase
+                credits_to_deduct = plan.get("roses", plan.get("superlikes", 1))
+                if credits_to_deduct > 0:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                           SET super_connect_credits = GREATEST(0, COALESCE(super_connect_credits, 0) - $1),
+                               updated_at            = NOW()
+                         WHERE id = $2
+                        """,
+                        credits_to_deduct,
+                        intent["user_id"],
+                    )
+                    log.info("Rose/superlike credits revoked on refund: user=%s credits=-%d", intent["user_id"], credits_to_deduct)
 
             await conn.execute(
                 "UPDATE payment_intents SET status = 'refunded', updated_at = NOW() WHERE razorpay_payment_id = $1 OR razorpay_order_id = $1",
@@ -686,6 +720,7 @@ async def process_payment_failed(
                    razorpay_payment_id = $1,
                    updated_at          = NOW()
              WHERE razorpay_order_id   = $2
+               AND status NOT IN ('captured', 'refunded', 'partially_refunded')
             """,
             payment_id,
             order_id,

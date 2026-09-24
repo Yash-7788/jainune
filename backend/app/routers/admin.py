@@ -674,9 +674,10 @@ async def reject_media(
                 from app.services.media_processor import delete_user_avatar
                 await delete_user_avatar(user_id)
             except Exception as exc:
-                logger.warning("Failed to purge rejected avatar for user %s: %s", user_id, exc)
+                log.warning("Failed to purge rejected avatar for user %s: %s", user_id, exc)
         elif row.get("s3_key"):
             try:
+                from app.core.config import settings
                 from app.services.media_processor import _get_supabase
                 import asyncio
                 client = _get_supabase()
@@ -685,7 +686,7 @@ async def reject_media(
                     [row["s3_key"]],
                 )
             except Exception as exc:
-                logger.warning("Failed to purge rejected user_media %s from storage: %s", row["s3_key"], exc)
+                log.warning("Failed to purge rejected user_media %s from storage: %s", row["s3_key"], exc)
 
         # Invalidate caches
         try:

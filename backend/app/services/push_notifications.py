@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 
-_token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0}
+_token_cache: tuple[str, float] = ("", 0.0)
 _cached_sa: dict[str, Any] | None = None
 _cached_project_id: str | None = None
 
@@ -98,7 +98,7 @@ def _build_jwt(sa: dict[str, Any]) -> str:
     payload = {
         "iss": sa["client_email"],
         "scope": _FCM_SCOPE,
-        "aud": _GOOGLE_TOKEN_URL,
+        "aud": _TOKEN_URL,
         "iat": now,
         "exp": now + 3600,
     }
@@ -129,7 +129,7 @@ async def _get_access_token() -> str:
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            _GOOGLE_TOKEN_URL,
+            _TOKEN_URL,
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                 "assertion": jwt,

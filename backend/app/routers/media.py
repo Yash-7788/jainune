@@ -32,7 +32,7 @@ router = APIRouter(prefix="/v1/media", tags=["media"])
 
 # Only photos accepted — voice deprecated
 _ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
-_MAX_PHOTO_BYTES = 10 * 1024 * 1024  # 10 MB (client compresses to ~10KB WebP before upload)
+_MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2 MB (client compresses to ~10KB WebP before upload)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +184,10 @@ async def confirm_upload(
     from app.services.moderation import run_photo_moderation
 
     enqueue_task(
-        run_photo_moderation(body.media_id, uuid.UUID(str(user_id)), pool=db),
+        run_photo_moderation,
+        body.media_id,
+        uuid.UUID(str(user_id)),
+        pool=db,
         name=f"moderate_photo_{body.media_id}",
     )
 

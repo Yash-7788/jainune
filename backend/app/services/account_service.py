@@ -247,7 +247,7 @@ async def soft_delete_user_account(
             UPDATE users
                SET account_status   = 'deleted',
                    first_name       = 'Deleted User',
-                   phone_number     = 'DELETED_' || id::text,
+                   phone_number     = NULL,
                    email            = NULL,
                    google_id        = NULL,
                    apple_id         = NULL,

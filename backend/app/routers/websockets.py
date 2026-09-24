@@ -217,10 +217,13 @@ async def websocket_chat(
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
-            except (asyncio.TimeoutError, WebSocketDisconnect):
+            except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
                 break
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 continue
+            except Exception as exc:
+                log.debug("WebSocket receive error: %s", exc)
+                break
 
             if not isinstance(data, dict):
                 continue

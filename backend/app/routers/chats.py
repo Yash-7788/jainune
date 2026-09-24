@@ -246,7 +246,7 @@ async def get_messages(
                            is_moderated, moderation_type, moderation_disclaimer
                     FROM messages
                     WHERE chat_id = $1 AND (created_at, id) > ($2, $3)
-                    ORDER BY created_at DESC, id DESC
+                    ORDER BY created_at ASC, id ASC
                     LIMIT $4
                     """,
                     actual_chat_id, since_row["created_at"], since_row["id"], limit + 1,
