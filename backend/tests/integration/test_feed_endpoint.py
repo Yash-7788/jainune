@@ -24,6 +24,24 @@ async def test_feed_unauthenticated(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_validate_cached_feed_candidates_excludes_paused_profiles(authed_client, mock_pool):
+    client, _user_id = authed_client
+    _pool, conn = mock_pool
+    eligible_id = uuid.uuid4()
+    paused_id = uuid.uuid4()
+    conn.fetch.return_value = [{"id": eligible_id}]
+
+    resp = await client.post(
+        "/v1/feed/validate-candidates",
+        json={"candidate_ids": [str(eligible_id), str(paused_id)]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["eligible_ids"] == [str(eligible_id)]
+    assert "is_paused = FALSE" in conn.fetch.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_feed_cache_hit(authed_client, fake_redis, mock_pool):
     """If candidates are pre-cached in Redis, return from cache."""
     client, user_id = authed_client

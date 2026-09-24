@@ -30,6 +30,7 @@ import DailyCompatibleModal from "../../components/feed/DailyCompatibleModal";
 import { Image } from "expo-image";
 import {
   getFeed,
+  validateFeedCandidates,
   postInteraction,
   sendTelemetry,
   FeedCandidate,
@@ -39,7 +40,7 @@ import { getMyProfile } from "../../api/profileApi";
 import { extractError } from "../../api/client";
 import { SerendipityArcadeModal } from "../../components/arcade";
 import { useAuthStore } from "../../store/authStore";
-import { cacheGet, cacheSet, CACHE_KEYS } from "../../utils/cache";
+import { cacheGet, cacheSet, cacheRemove, CACHE_KEYS } from "../../utils/cache";
 
 interface CachedFeedDeck {
   lastSyncedAt: number;
@@ -67,6 +68,7 @@ export default function FeedScreen() {
   const [showDailyCompatible, setShowDailyCompatible] = useState(false);
   const offlineBannerAnim = useRef(new Animated.Value(0)).current;
   const isOffline = useRef(false);
+  const cachedDeckUnverified = useRef(false);
   const requestTimestamps = useRef<number[]>([]);
 
   // Load my profile photo once
@@ -79,16 +81,61 @@ export default function FeedScreen() {
       .catch(() => {});
   }, []);
 
-  // L2 Cache: Read the current account's feed cache on mount → paint instantly (OPTIMIZE.md §2.2 C)
+  // L2 Cache: Revalidate the current account's saved deck before restoring it on mount.
   useEffect(() => {
-    cacheGet<CachedFeedDeck>(feedCacheKey).then((cached) => {
-      if (cached?.candidates && cached.candidates.length > 0) {
-        setCandidates(cached.candidates);
-        setUiState("populated");
+    let cancelled = false;
+    const restoreAndFetch = async () => {
+      const cached = await cacheGet<CachedFeedDeck>(feedCacheKey);
+      if (cancelled) return;
+
+      if (cached?.candidates?.length) {
+        try {
+          const eligibleIds = await validateFeedCandidates(cached.candidates.map((candidate) => candidate.id));
+          if (cancelled) return;
+          cachedDeckUnverified.current = false;
+          const eligibleCandidates = cached.candidates.filter((candidate) => eligibleIds.has(candidate.id));
+          if (eligibleCandidates.length) {
+            setCandidates(eligibleCandidates);
+            setUiState("populated");
+            if (eligibleCandidates.length !== cached.candidates.length) {
+              cacheSet<CachedFeedDeck>(feedCacheKey, {
+                lastSyncedAt: Date.now(),
+                candidates: eligibleCandidates,
+              });
+            }
+          } else {
+            if (feedCacheKey) await cacheRemove(feedCacheKey);
+          }
+        } catch (error: unknown) {
+          const validationError = error as {
+            response?: unknown;
+            _apiError?: unknown;
+            code?: string;
+          };
+          const isNetworkFailure =
+            !validationError.response &&
+            !validationError._apiError &&
+            (validationError.code === "ERR_NETWORK" || validationError.code === "ECONNABORTED");
+          if (isNetworkFailure && !cancelled) {
+            // Preserve offline-first display; interactions are still checked against current server state.
+            cachedDeckUnverified.current = true;
+            setCandidates(cached.candidates);
+            setUiState("populated");
+          } else if (feedCacheKey) {
+            cachedDeckUnverified.current = false;
+            await cacheRemove(feedCacheKey);
+          }
+        }
       }
-      // Always fetch fresh batch in background (even on cache hit)
-      fetchBatch();
-    });
+
+      // Always fetch fresh batch after cache revalidation (or immediately offline).
+      if (!cancelled) fetchBatch();
+    };
+
+    void restoreAndFetch();
+    return () => {
+      cancelled = true;
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // Hardware GPU prefetch for upcoming card photos (zero-flicker swipes)
@@ -125,14 +172,18 @@ export default function FeedScreen() {
     setIsFetching(true);
     try {
       const data = await getFeed(20);
+      const discardUnverifiedCache = cachedDeckUnverified.current;
+      cachedDeckUnverified.current = false;
+      if (discardUnverifiedCache && feedCacheKey) void cacheRemove(feedCacheKey);
       if (data.exhausted && data.candidates.length === 0) {
-        setCandidates((prev) => (prev.length === 0 ? [] : prev));
-        if (candidates.length === 0) setUiState("empty");
+        setCandidates((prev) => (discardUnverifiedCache || prev.length === 0 ? [] : prev));
+        if (discardUnverifiedCache || candidates.length === 0) setUiState("empty");
       } else {
         setCandidates((prev) => {
-          const seen = new Set(prev.map((c) => c.id));
+          const existing = discardUnverifiedCache ? [] : prev;
+          const seen = new Set(existing.map((c) => c.id));
           const uniqueNew = data.candidates.filter((c) => !seen.has(c.id));
-          const merged = [...prev, ...uniqueNew];
+          const merged = [...existing, ...uniqueNew];
           // L2 cache write-back: persist deck to AsyncStorage
           cacheSet<CachedFeedDeck>(feedCacheKey, {
             lastSyncedAt: Date.now(),
@@ -147,6 +198,13 @@ export default function FeedScreen() {
         Animated.timing(offlineBannerAnim, { toValue: 0, duration: 400, useNativeDriver: true }).start();
       }
     } catch (err: any) {
+      const hasServerResponse = Boolean(err?.response || err?._apiError);
+      if (cachedDeckUnverified.current && hasServerResponse) {
+        cachedDeckUnverified.current = false;
+        setCandidates([]);
+        setUiState("error");
+        if (feedCacheKey) void cacheRemove(feedCacheKey);
+      }
       if (err?._apiError?.code === "DAILY_LIMIT_REACHED") {
         setDailyLimitReached(true);
         setUiState("populated");

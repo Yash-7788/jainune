@@ -302,7 +302,7 @@ async def run_photo_moderation(
                         confidence=1.0,
                     )
 
-            # Download image bytes from public CDN / storage
+            # Download a size-bounded image from public CDN / authenticated Storage.
             img_client = http_client
             close_img_client = False
             if img_client is None:
@@ -310,37 +310,34 @@ async def run_photo_moderation(
                 close_img_client = True
 
             image_bytes = None
+            result = None
             try:
-                resp = await img_client.get(cdn_url)
-                if resp.status_code == 200:
-                    image_bytes = resp.content
+                from app.services.media_processor import AvatarTooLargeError, download_avatar_bytes
+                image_bytes = await download_avatar_bytes(user_id, img_client, cdn_url=cdn_url)
+            except AvatarTooLargeError:
+                # Treat oversized content as rejected without ever passing it to the model.
+                result = ModerationResult(
+                    is_safe=False,
+                    reason="Image exceeds the 2 MB upload limit",
+                    confidence=1.0,
+                )
             except Exception as exc:
-                logger.warning("Avatar HTTP GET failed for %s: %s", cdn_url, exc)
+                logger.warning("Avatar download failed for %s: %s", cdn_url, exc)
             finally:
                 if close_img_client:
                     await img_client.aclose()
 
-            # Fallback to authenticated Supabase storage download if public GET failed
-            if not image_bytes:
-                try:
-                    from app.services.media_processor import _get_supabase, avatar_storage_path
-                    supabase = _get_supabase()
-                    path = avatar_storage_path(user_id)
-                    image_bytes = await asyncio.to_thread(
-                        supabase.storage.from_(settings.supabase_storage_bucket).download,
-                        path,
-                    )
-                except Exception as exc:
-                    logger.error("Authenticated Supabase download failed for %s: %s", user_id, exc)
-                    return ModerationResult(is_safe=None, reason="Image download failed", confidence=0.0)
+            if result is None and not image_bytes:
+                return ModerationResult(is_safe=None, reason="Image download failed", confidence=0.0)
 
-            # Run moderation via Cloudflare Workers AI
-            result = await moderator.moderate_image_bytes(
-                image_bytes=image_bytes,
-                mime_type="image/webp",
-                dhash=dhash,
-                http_client=http_client,
-            )
+            # Run moderation only after the bounded read has succeeded.
+            if result is None:
+                result = await moderator.moderate_image_bytes(
+                    image_bytes=image_bytes,
+                    mime_type="image/webp",
+                    dhash=dhash,
+                    http_client=http_client,
+                )
 
             async with pool.acquire() as conn:
                 async with conn.transaction():

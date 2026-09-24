@@ -23,16 +23,19 @@ from pydantic import BaseModel, Field
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
 from app.services.media_processor import (
+    MAX_AVATAR_BYTES,
+    AvatarTooLargeError,
     generate_supabase_upload_signed_url,
     verify_avatar_uploaded,
     avatar_public_url,
+    delete_user_avatar,
 )
 
 router = APIRouter(prefix="/v1/media", tags=["media"])
 
 # Only photos accepted — voice deprecated
 _ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
-_MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2 MB (client compresses to ~10KB WebP before upload)
+_MAX_PHOTO_BYTES = MAX_AVATAR_BYTES  # Client declaration is validated; stored size is checked at confirmation.
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +146,58 @@ async def confirm_upload(
 
     user_id = current_user["user_id"]
 
-    # Verify the object actually landed in Supabase
-    uploaded = await verify_avatar_uploaded(user_id)
+    # Validate the upload intent before checking or cleaning up its shared storage path.
+    async with db.acquire() as conn:
+        intent_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM user_media WHERE id = $1 AND user_id = $2 AND media_type = 'photo')",
+            body.media_id,
+            uuid.UUID(str(user_id)),
+        )
+    if not intent_exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Upload intent not found or expired. Request a new upload URL.",
+        )
+
+    # Verify the object actually landed in Supabase and its stored size is within policy.
+    try:
+        uploaded = await verify_avatar_uploaded(user_id)
+    except AvatarTooLargeError:
+        # Mark this exact active intent rejected and purge its over-limit object. Keeping the
+        # row update and purge under the row lock prevents a concurrent new intent from being
+        # accidentally deleted during cleanup.
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.execute(
+                    """
+                    UPDATE user_media
+                       SET status = 'rejected', rejection_reason = 'Avatar exceeds 2 MB limit',
+                           is_processed = TRUE
+                     WHERE id = $1 AND user_id = $2 AND media_type = 'photo' AND position = 1
+                    """,
+                    body.media_id,
+                    uuid.UUID(str(user_id)),
+                )
+                if updated == "UPDATE 1":
+                    await conn.execute(
+                        """
+                        UPDATE users SET avatar_url = NULL, updated_at = NOW()
+                         WHERE id = $1 AND EXISTS (
+                             SELECT 1 FROM user_media
+                              WHERE id = $2 AND user_id = $1 AND position = 1 AND media_type = 'photo'
+                         )
+                        """,
+                        uuid.UUID(str(user_id)),
+                        body.media_id,
+                    )
+                    await delete_user_avatar(user_id)
+        try:
+            if redis and hasattr(redis, "delete"):
+                await redis.delete(f"profile:{user_id}", f"feed:cache:{user_id}")
+        except Exception:
+            pass
+        raise HTTPException(status_code=413, detail="Avatar exceeds the 2 MB upload limit")
+
     if not uploaded:
         raise HTTPException(
             status_code=422,

@@ -22,15 +22,16 @@ from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 
 from app.main import app
+from app.models.schemas.interaction import InteractionActionRequest
 from app.models.schemas.payment import (
     CreateOrderBody,
     PlanId,
     SubscriptionStatusResponse,
     SubscriptionTier,
 )
-from app.routers.users import _TIER_LIMITS, get_subscription_status
-from app.routers.interactions import get_users_who_liked_me
 from app.routers.arcade import spin_serendipity_wheel, get_arcade_wallet
+from app.routers.interactions import get_users_who_liked_me, record_interaction_action
+from app.routers.users import _TIER_LIMITS, get_subscription_status
 
 
 def _make_mock_pool():
@@ -48,6 +49,30 @@ def _make_mock_pool():
 
 class TestPhase6ArcadeAndInteractions(unittest.IsolatedAsyncioTestCase):
     """Phase 6 Unit Tests."""
+
+    @patch("app.routers.interactions.sliding_window_rate_limit", new_callable=AsyncMock)
+    async def test_interaction_rejects_paused_target(self, _rate_limit):
+        actor_id, target_id = uuid.uuid4(), uuid.uuid4()
+        pool, conn = _make_mock_pool()
+        conn.fetchval.return_value = None
+        conn.fetchrow.return_value = {
+            "id": target_id,
+            "account_status": "active",
+            "deleted_at": None,
+            "is_paused": True,
+        }
+
+        with self.assertRaises(HTTPException) as ctx:
+            await record_interaction_action(
+                body=InteractionActionRequest(target_id=target_id, action="like"),
+                current_user={"user_id": str(actor_id)},
+                db=pool,
+                redis=AsyncMock(),
+            )
+
+        self.assertEqual(ctx.exception.status_code, 404)
+        target_query = conn.fetchrow.await_args.args[0]
+        self.assertIn("is_paused", target_query)
 
     def test_subscription_tier_enum_and_status(self):
         """SubscriptionTier accepts base_399, premium_799, and ultra_1499."""

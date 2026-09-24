@@ -1,11 +1,14 @@
 """Payment recovery and retention/delta-sync boundary regressions."""
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
-from app.core.redis import InMemoryRedis
+from app.core.redis import InMemoryRedis, ResilientRedisClient
+from app.core.security import hash_otp, verify_otp
 from app.routers.chats import get_messages
 from app.services.payment_service import process_payment_captured, get_effective_user_tier
 
@@ -18,6 +21,24 @@ def pool_for(conn):
     conn.transaction.return_value.__aenter__ = AsyncMock()
     conn.transaction.return_value.__aexit__ = AsyncMock(return_value=False)
     return pool
+
+
+@pytest.mark.asyncio
+async def test_otp_is_consumed_atomically_by_in_memory_redis_fallback():
+    phone = "+919876543219"
+    otp = "654321"
+    redis = ResilientRedisClient(None)
+    await redis.set(f"auth:otp:{phone}", hash_otp(phone, otp), ex=180)
+
+    async def verify_once():
+        try:
+            return await verify_otp(phone, otp, redis)
+        except HTTPException as exc:
+            return exc.status_code
+
+    results = await asyncio.gather(verify_once(), verify_once())
+    assert results.count(True) == 1
+    assert results.count(400) == 1
 
 
 @pytest.mark.asyncio

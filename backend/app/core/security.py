@@ -85,10 +85,12 @@ async def verify_otp(
             stored_hash = await redis.getdel(session_key)
         else:
             stored_hash = await redis.eval(_GETDEL_LUA, 1, session_key)
-    except Exception:
-        stored_hash = await redis.get(session_key)
-        if stored_hash:
-            await redis.delete(session_key)
+    except Exception as exc:
+        logger.error("Atomic OTP consumption failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OTP verification is temporarily unavailable. Please try again.",
+        ) from exc
 
     if not stored_hash:
         raise HTTPException(

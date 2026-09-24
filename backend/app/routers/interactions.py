@@ -235,7 +235,7 @@ async def record_interaction_action(
 
                 # ── Verify target profile exists and is active ───────────────────────
                 target_row = await conn.fetchrow(
-                    "SELECT id, account_status, deleted_at FROM users WHERE id = $1",
+                    "SELECT id, account_status, deleted_at, is_paused FROM users WHERE id = $1",
                     target_id,
                 )
                 if target_row is None:
@@ -244,7 +244,11 @@ async def record_interaction_action(
                         detail="Target profile not found or no longer available.",
                     )
                 t_data = dict(target_row)
-                if t_data.get("deleted_at") is not None or t_data.get("account_status") in ("deleted", "banned"):
+                if (
+                    t_data.get("deleted_at") is not None
+                    or t_data.get("account_status") in ("deleted", "banned")
+                    or t_data.get("is_paused") is True
+                ):
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="Target profile not found or no longer available.",

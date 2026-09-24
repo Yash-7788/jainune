@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
 from app.core.security import sliding_window_rate_limit
 from app.dependencies import CurrentUser, DBDep, RedisDep
@@ -16,9 +17,29 @@ from app.models.schemas.feed import DailyCompatibleResponse, FeedResponse
 from app.services.core_people_finder import (
     fetch_daily_compatible,
     fetch_recommended_feed,
+    _filter_current_feed_candidates,
 )
 
 router = APIRouter(prefix="/v1/feed", tags=["feed"])
+
+
+class CachedFeedValidationRequest(BaseModel):
+    candidate_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+
+@router.post("/validate-candidates", summary="Revalidate locally cached feed cards")
+async def validate_cached_feed_candidates(
+    body: CachedFeedValidationRequest,
+    current_user: CurrentUser,
+    db: DBDep,
+    redis: RedisDep,
+) -> dict:
+    """Return cached candidate IDs that remain visible and actionable for this user."""
+    user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    await sliding_window_rate_limit(f"ratelimit:feed:validate:{user_id}", 20, 60, redis)
+    candidates = [{"id": str(candidate_id)} for candidate_id in body.candidate_ids]
+    eligible = await _filter_current_feed_candidates(user_id, candidates, db)
+    return {"eligible_ids": [candidate["id"] for candidate in eligible]}
 
 
 @router.get("", response_model=FeedResponse, summary="Get discovery feed")

@@ -78,6 +78,16 @@ export async function getFeed(limit = 15): Promise<FeedResponse> {
   return res.data;
 }
 
+/** POST /v1/feed/validate-candidates — revalidate cached cards before display */
+export async function validateFeedCandidates(candidateIds: string[]): Promise<Set<string>> {
+  if (candidateIds.length === 0) return new Set();
+  const res = await apiPost<{ eligible_ids: string[] }>("/feed/validate-candidates", {
+    candidate_ids: candidateIds,
+  });
+  if (!res.success) throw { _apiError: res.error };
+  return new Set(res.data.eligible_ids);
+}
+
 export const getFeedCandidates = getFeed;
 
 /** GET /v1/feed/daily-compatible */

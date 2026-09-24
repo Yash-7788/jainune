@@ -509,6 +509,7 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
 
         conn = MagicMock()
         conn.execute = AsyncMock(return_value="UPDATE 0")
+        conn.fetchval = AsyncMock(return_value=False)
         pool = MagicMock()
         pool.acquire.return_value.__aenter__.return_value = conn
         pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -518,6 +519,163 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(HTTPException) as ctx:
                     await confirm_upload(body=body, current_user=current_user, db=pool, redis=MagicMock())
                 self.assertEqual(ctx.exception.status_code, 404)
+
+
+class TestAvatarSizeBounds(unittest.IsolatedAsyncioTestCase):
+    def _storage_client_with_items(self, items):
+        client = MagicMock()
+        bucket = MagicMock()
+        client.storage.from_ = MagicMock(return_value=bucket)
+        bucket.list.return_value = items
+        return client
+
+    async def test_verify_avatar_accepts_storage_size_at_limit(self):
+        from app.services.media_processor import MAX_AVATAR_BYTES, verify_avatar_uploaded
+
+        client = self._storage_client_with_items([
+            {"name": "avatar.webp", "metadata": {"size": str(MAX_AVATAR_BYTES)}}
+        ])
+
+        with patch("app.services.media_processor._get_supabase", return_value=client):
+            self.assertTrue(await verify_avatar_uploaded(uuid.uuid4()))
+
+    async def test_confirm_upload_rejects_and_cleans_over_limit_avatar(self):
+        from fastapi import HTTPException
+        from app.routers.media import ConfirmUploadBody, confirm_upload
+        from app.services.media_processor import AvatarTooLargeError
+
+        media_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        conn = MagicMock()
+        conn.fetchval = AsyncMock(return_value=True)
+        conn.execute = AsyncMock(return_value="UPDATE 1")
+        conn.transaction = MagicMock()
+        conn.transaction.return_value.__aenter__ = AsyncMock()
+        conn.transaction.return_value.__aexit__ = AsyncMock()
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__.return_value = conn
+        pool.acquire.return_value.__aexit__ = AsyncMock()
+        redis = AsyncMock()
+
+        with patch("app.routers.media.sliding_window_rate_limit", AsyncMock()):
+            with patch("app.routers.media.verify_avatar_uploaded", AsyncMock(side_effect=AvatarTooLargeError)):
+                with patch("app.routers.media.delete_user_avatar", AsyncMock()) as delete_avatar:
+                    with self.assertRaises(HTTPException) as ctx:
+                        await confirm_upload(
+                            body=ConfirmUploadBody(media_id=media_id),
+                            current_user={"user_id": str(user_id)},
+                            db=pool,
+                            redis=redis,
+                        )
+
+        self.assertEqual(ctx.exception.status_code, 413)
+        self.assertEqual(conn.execute.await_count, 2)
+        delete_avatar.assert_awaited_once_with(str(user_id))
+        redis.delete.assert_awaited_once()
+
+    async def test_verify_avatar_rejects_storage_size_over_limit(self):
+        from app.services.media_processor import AvatarTooLargeError, MAX_AVATAR_BYTES, verify_avatar_uploaded
+
+        client = self._storage_client_with_items([
+            {"name": "avatar.webp", "metadata": {"size": str(MAX_AVATAR_BYTES + 1)}}
+        ])
+
+        with patch("app.services.media_processor._get_supabase", return_value=client):
+            with self.assertRaises(AvatarTooLargeError):
+                await verify_avatar_uploaded(uuid.uuid4())
+
+    async def test_verify_avatar_fails_closed_when_storage_size_is_unavailable(self):
+        from app.services.media_processor import verify_avatar_uploaded
+
+        client = self._storage_client_with_items([{"name": "avatar.webp", "metadata": None}])
+        with patch("app.services.media_processor._get_supabase", return_value=client):
+            self.assertFalse(await verify_avatar_uploaded(uuid.uuid4()))
+
+    async def test_moderation_stream_rejects_oversize_without_content_length(self):
+        from app.services.media_processor import AvatarTooLargeError, MAX_AVATAR_BYTES, _read_bounded_image_response
+
+        body = b"x" * (MAX_AVATAR_BYTES + 1)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=httpx.ByteStream(body))
+        )
+        async with httpx.AsyncClient(transport=transport) as http:
+            with self.assertRaises(AvatarTooLargeError):
+                await _read_bounded_image_response(http, "https://cdn.example.com/avatar.webp")
+
+    async def test_moderation_authenticated_fallback_uses_same_byte_cap(self):
+        from app.core.config import settings
+        from app.services.media_processor import AvatarTooLargeError, MAX_AVATAR_BYTES, download_avatar_bytes
+
+        requests = []
+
+        def handler(request: httpx.Request):
+            requests.append(request)
+            if "/public/" in request.url.path:
+                return httpx.Response(404)
+            return httpx.Response(200, headers={"content-length": str(MAX_AVATAR_BYTES + 1)})
+
+        original_url = settings.supabase_url
+        original_key = settings.supabase_service_role_key
+        settings.supabase_url = "https://storage.example.com"
+        settings.supabase_service_role_key = "service-key-test"
+        try:
+            transport = httpx.MockTransport(handler)
+            async with httpx.AsyncClient(transport=transport) as http:
+                with self.assertRaises(AvatarTooLargeError):
+                    await download_avatar_bytes(uuid.uuid4(), http, cdn_url="https://cdn.example.com/public/avatar.webp")
+        finally:
+            settings.supabase_url = original_url
+            settings.supabase_service_role_key = original_key
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1].headers["apikey"], "service-key-test")
+        self.assertEqual(requests[1].headers["authorization"], "Bearer service-key-test")
+
+    async def test_oversize_moderation_result_rejects_without_calling_vision_model(self):
+        from app.services.media_processor import MAX_AVATAR_BYTES
+        from app.services.moderation import run_photo_moderation
+
+        photo_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        conn = MagicMock()
+        conn.fetchrow = AsyncMock(return_value={
+            "id": photo_id,
+            "user_id": user_id,
+            "status": "pending",
+            "cdn_url": "https://cdn.example.com/avatar.webp",
+        })
+        conn.fetchval = AsyncMock(return_value=True)
+        conn.execute = AsyncMock()
+        conn.transaction = MagicMock()
+        conn.transaction.return_value.__aenter__ = AsyncMock()
+        conn.transaction.return_value.__aexit__ = AsyncMock()
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__.return_value = conn
+        pool.acquire.return_value.__aexit__ = AsyncMock()
+
+        moderator = MagicMock()
+        moderator.moderate_image_bytes = AsyncMock()
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                stream=httpx.ByteStream(b"x" * (MAX_AVATAR_BYTES + 1)),
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as http:
+            with patch("app.services.media_processor.delete_user_avatar", AsyncMock()) as delete_avatar:
+                result = await run_photo_moderation(
+                    photo_id,
+                    user_id,
+                    pool=pool,
+                    moderator=moderator,
+                    http_client=http,
+                )
+
+        self.assertFalse(result.is_safe)
+        self.assertIn("2 MB", result.reason)
+        moderator.moderate_image_bytes.assert_not_awaited()
+        self.assertTrue(any("status = 'rejected'" in call.args[0] for call in conn.execute.await_args_list))
+        delete_avatar.assert_awaited_once_with(user_id)
 
 
 class TestRateLimiterUpstashResilienceAndTOCTOU(unittest.IsolatedAsyncioTestCase):

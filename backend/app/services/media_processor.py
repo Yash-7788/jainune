@@ -16,12 +16,19 @@ import asyncio
 import logging
 import uuid
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+
+
+class AvatarTooLargeError(ValueError):
+    """Raised when stored avatar bytes exceed the application upload limit."""
 
 # ---------------------------------------------------------------------------
 # Supabase Storage client (lazy singleton)
@@ -87,27 +94,112 @@ async def generate_supabase_upload_signed_url(user_id: str | uuid.UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 async def verify_avatar_uploaded(user_id: str | uuid.UUID) -> bool:
-    """HEAD request to confirm object landed in Supabase Storage with authenticated SDK fallback."""
-    url = avatar_public_url(user_id)
-    try:
-        async with httpx.AsyncClient(timeout=10) as http:
-            r = await http.head(url)
-        if r.status_code == 200:
-            return True
-    except Exception as exc:
-        logger.warning("Avatar HEAD check failed for %s: %s", user_id, exc)
-
-    # Authenticated Supabase SDK fallback (e.g. if bucket has RLS or CDN has propagation delay)
+    """Verify existence and size using uncached authenticated Storage metadata."""
+    # Do not use public CDN HEAD as the authoritative size: its cached Content-Length can
+    # describe an earlier object at this overwrite-in-place avatar path.
     try:
         client = _get_supabase()
         items = await asyncio.to_thread(client.storage.from_(settings.supabase_storage_bucket).list, str(user_id))
         for item in items:
             if item.get("name") == "avatar.webp":
-                return True
+                metadata = item.get("metadata") or {}
+                raw_size = next(
+                    (value for value in (
+                        metadata.get("size"),
+                        metadata.get("contentLength"),
+                        metadata.get("content_length"),
+                        item.get("size"),
+                        item.get("contentLength"),
+                    ) if value is not None),
+                    None,
+                )
+                try:
+                    size = int(raw_size) if raw_size is not None else None
+                except (TypeError, ValueError):
+                    size = None
+                if size is None:
+                    logger.warning("Avatar size metadata unavailable for %s; rejecting unverified upload", user_id)
+                    return False
+                if size > MAX_AVATAR_BYTES:
+                    raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+                return size > 0
+    except AvatarTooLargeError:
+        raise
     except Exception as exc:
         logger.warning("Avatar SDK check failed for %s: %s", user_id, exc)
 
     return False
+
+
+async def _read_bounded_image_response(
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+) -> Optional[bytes]:
+    """Stream an image response and retain no more than the avatar byte limit."""
+    request_headers = {"Accept-Encoding": "identity"}
+    if headers:
+        request_headers.update(headers)
+    async with http.stream("GET", url, headers=request_headers) as response:
+        if response.status_code != 200:
+            return None
+        if response.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
+            raise ValueError("Encoded avatar response is not accepted")
+
+        raw_size = response.headers.get("content-length")
+        try:
+            declared_size = int(raw_size) if raw_size is not None else None
+        except (TypeError, ValueError):
+            declared_size = None
+        if declared_size is not None and declared_size > MAX_AVATAR_BYTES:
+            raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            total += len(chunk)
+            if total > MAX_AVATAR_BYTES:
+                raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+async def download_avatar_bytes(
+    user_id: str | uuid.UUID,
+    http: httpx.AsyncClient,
+    *,
+    cdn_url: Optional[str] = None,
+) -> Optional[bytes]:
+    """Download an avatar through public CDN or authenticated Storage, with a hard byte cap."""
+    public_url = cdn_url or avatar_public_url(user_id)
+    try:
+        image = await _read_bounded_image_response(http, public_url)
+        if image:
+            return image
+    except AvatarTooLargeError:
+        raise
+    except Exception as exc:
+        logger.warning("Avatar CDN download failed for %s: %s", public_url, exc)
+
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        return None
+
+    bucket = quote(settings.supabase_storage_bucket, safe="")
+    path = quote(avatar_storage_path(user_id), safe="/")
+    storage_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{path}"
+    service_key = settings.supabase_service_role_key
+    try:
+        return await _read_bounded_image_response(
+            http,
+            storage_url,
+            headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+        )
+    except AvatarTooLargeError:
+        raise
+    except Exception as exc:
+        logger.error("Authenticated Supabase download failed for %s: %s", user_id, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

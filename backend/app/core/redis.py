@@ -98,6 +98,17 @@ class InMemoryRedis:
                 return val.encode("utf-8")
             return val
 
+    async def getdel(self, name: str) -> Any:
+        """Atomically return and remove a string value, matching Redis GETDEL."""
+        async with self._lock:
+            if self._is_expired(name):
+                return None
+            value = self._data.pop(name, None)
+            self._expires.pop(name, None)
+            if isinstance(value, str):
+                return value.encode("utf-8")
+            return value
+
     async def set(
         self,
         name: str,
