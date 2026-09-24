@@ -680,6 +680,8 @@ done
 
 ### 13.4 Final Maximized Architecture Specs ($0.00 / Month Forever)
 
+> **Scenario Context**: now final orcale 24gb , nignx , cloudflare stack plus activating all caching optimization techniques that are already currently present in codebase , and optimize md and auto prune , 100 gb clearance and one photo 70 compression all client side compute and client side caching - stats (11:21 AM)
+
 #### Stack Configuration
 - **Host**: Oracle Cloud Always Free (4 ARM OCPU cores, 24 GB RAM, 200 GB NVMe SSD).
 - **Gateway**: NGINX (epoll socket multiplexing, TLS 1.3 offloading, HTTP/2, connection pooling).
