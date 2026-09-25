@@ -318,7 +318,7 @@ async def run_photo_moderation(
                 # Treat oversized content as rejected without ever passing it to the model.
                 result = ModerationResult(
                     is_safe=False,
-                    reason="Image exceeds the 2 MB upload limit",
+                    reason="Image exceeds the 350 KB upload limit",
                     confidence=1.0,
                 )
             except Exception as exc:

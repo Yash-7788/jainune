@@ -62,50 +62,10 @@ async def get_feed(
     # Rate limit: 20 feed requests per minute per user (SECURITY.md 10.1)
     await sliding_window_rate_limit(f"ratelimit:feed:{user_id}", 20, 60, redis)
 
-    # Check cache first to avoid unnecessary DB connection acquisition (BUG-080)
-    if not refresh:
-        from app.services.core_people_finder import _get_cached_feed
-        cached = await _get_cached_feed(user_id, redis)
-        if cached and len(cached) >= limit:
-            result = await fetch_recommended_feed(
-                user_id=user_id,
-                user_data=dict(current_user),
-                db=db,
-                redis=redis,
-                limit=limit,
-                force_refresh=False,
-            )
-            for c in result.get("candidates", []):
-                if isinstance(c, dict):
-                    c.pop("_behavioral_affinity", None)
-                    c.pop("_cultural_score", None)
-            return FeedResponse(**result)
-
-    # Enrich current_user with location + behavior vector for pipeline on cache miss
-    async with db.acquire() as conn:
-        extra = await conn.fetchrow(
-            """
-            SELECT u.location, b.revealed_preference_vector
-            FROM users u
-            LEFT JOIN user_behavior_vectors b ON u.id = b.user_id
-            WHERE u.id = $1
-            """,
-            user_id,
-        )
-
-    if not extra:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
-
-    user_data = dict(current_user)
-    user_data["location"] = extra["location"]
-    user_data["revealed_preference_vector"] = extra["revealed_preference_vector"]
-
+    # Single-roundtrip feed architecture: delegate Redis pop + lazy DB fallback to fetch_recommended_feed
     result = await fetch_recommended_feed(
         user_id=user_id,
-        user_data=user_data,
+        user_data=dict(current_user),
         db=db,
         redis=redis,
         limit=limit,

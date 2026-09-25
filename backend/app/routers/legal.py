@@ -48,6 +48,9 @@ _BASE_HTML = """<!DOCTYPE html>
 </html>
 """
 
+_PUBLIC_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"}
+
+
 @router.get("/robots.txt", response_class=Response)
 def robots_txt() -> Response:
     content = (
@@ -65,12 +68,12 @@ def robots_txt() -> Response:
         "Disallow: /docs\n"
         "Disallow: /openapi.json\n"
     )
-    return Response(content=content, media_type="text/plain")
+    return Response(content=content, media_type="text/plain", headers=_PUBLIC_CACHE_HEADERS)
 
 
 @router.get("/privacy", response_class=HTMLResponse)
 @router.get("/legal/privacy", response_class=HTMLResponse)
-async def privacy_policy():
+async def privacy_policy(response: Response = None):
     content = """
     <h2>1. Introduction</h2>
     <p>Jainune ("we", "our", "us") values your privacy. This policy outlines how we collect, handle, and protect your personal data in accordance with the Digital Personal Data Protection Act (DPDP) 2023 and global privacy frameworks.</p>
@@ -92,12 +95,14 @@ async def privacy_policy():
     <h2>5. Grievance Redressal</h2>
     <p>For data privacy queries or grievance reports: <strong>privacy@jainune.com</strong>.</p>
     """
+    if response:
+        response.headers.update(_PUBLIC_CACHE_HEADERS)
     return _BASE_HTML.format(title="Privacy Policy", content=content)
 
 
 @router.get("/terms", response_class=HTMLResponse)
 @router.get("/legal/terms", response_class=HTMLResponse)
-async def terms_of_service():
+async def terms_of_service(response: Response = None):
     content = """
     <h2>1. Eligibility</h2>
     <p>You must be at least 18 years of age to register or use Jainune. By using the service, you represent and warrant that you have the legal capacity to enter into this agreement.</p>
@@ -111,12 +116,14 @@ async def terms_of_service():
     <h2>4. Account Termination</h2>
     <p>We reserve the right to suspend or terminate accounts that violate our terms, guidelines, or safety policies.</p>
     """
+    if response:
+        response.headers.update(_PUBLIC_CACHE_HEADERS)
     return _BASE_HTML.format(title="Terms of Service", content=content)
 
 
 @router.get("/child-safety", response_class=HTMLResponse)
 @router.get("/legal/child-safety", response_class=HTMLResponse)
-async def child_safety_standards():
+async def child_safety_standards(response: Response = None):
     content = """
     <div class="card" style="border-color: #E53935; background: rgba(229,57,53,0.08);">
       <h3 style="color: #FF5252; margin-top: 0;">Zero-Tolerance Policy on Child Sexual Abuse and Exploitation (CSAE)</h3>
@@ -137,12 +144,14 @@ async def child_safety_standards():
     <p><strong>Designated Child Safety Officer:</strong> <a href="mailto:safety@jainune.com">safety@jainune.com</a><br>
     Response SLA: Under 1 hour for child safety and emergency escalations.</p>
     """
+    if response:
+        response.headers.update(_PUBLIC_CACHE_HEADERS)
     return _BASE_HTML.format(title="Child Safety & CSAE Prevention Standards", content=content)
 
 
 @router.get("/community-guidelines", response_class=HTMLResponse)
 @router.get("/legal/community-guidelines", response_class=HTMLResponse)
-async def community_guidelines():
+async def community_guidelines(response: Response = None):
     content = """
     <h2>Our Core Values</h2>
     <p>Jainune brings modern singles together grounded in shared cultural values, transparency, and dignity.</p>
@@ -152,12 +161,14 @@ async def community_guidelines():
       <li><strong>Consent & Privacy:</strong> Do not capture, record, or distribute another member's media or private messages without explicit consent.</li>
     </ul>
     """
+    if response:
+        response.headers.update(_PUBLIC_CACHE_HEADERS)
     return _BASE_HTML.format(title="Community Guidelines", content=content)
 
 
 @router.get("/delete-account", response_class=HTMLResponse)
 @router.get("/legal/delete-account", response_class=HTMLResponse)
-async def delete_account_portal():
+async def delete_account_portal(response: Response = None):
     content = """
     <p>In accordance with Google Play User Data policies and DPDP Right to Erasure, Jainune provides both in-app and external web-based account deletion.</p>
 
@@ -173,4 +184,6 @@ async def delete_account_portal():
       <p><strong>What gets deleted:</strong> Profile information, photographs, voice notes, chat history, and biometric liveness metadata are permanently removed within 48 hours of verification.</p>
     </div>
     """
+    if response:
+        response.headers.update(_PUBLIC_CACHE_HEADERS)
     return _BASE_HTML.format(title="Account Deletion & Data Erasure Portal", content=content)

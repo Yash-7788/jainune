@@ -34,7 +34,7 @@ from app.services.media_processor import (
 router = APIRouter(prefix="/v1/media", tags=["media"])
 
 # Only photos accepted — voice deprecated
-_ALLOWED_PHOTO_CT = {"image/jpeg", "image/png", "image/webp", "image/heic"}
+_ALLOWED_PHOTO_CT = {"image/webp"}
 _MAX_PHOTO_BYTES = MAX_AVATAR_BYTES  # Client declaration is validated; stored size is checked at confirmation.
 
 

@@ -47,7 +47,7 @@ interface CachedFeedDeck {
   candidates: FeedCandidate[];
 }
 
-const PREFETCH_THRESHOLD = 5; // Fetch next batch when ≤5 cards (OPTIMIZE.md §2.2 C)
+const PREFETCH_THRESHOLD = 3; // Fetch next batch when <=3 cards (preserves battery & DB IOPS)
 
 type UIState = "loading" | "populated" | "empty" | "error" | "offline";
 
@@ -88,6 +88,7 @@ export default function FeedScreen() {
       const cached = await cacheGet<CachedFeedDeck>(feedCacheKey);
       if (cancelled) return;
 
+      let deckHealthy = false;
       if (cached?.candidates?.length) {
         try {
           const eligibleIds = await validateFeedCandidates(cached.candidates.map((candidate) => candidate.id));
@@ -97,6 +98,9 @@ export default function FeedScreen() {
           if (eligibleCandidates.length) {
             setCandidates(eligibleCandidates);
             setUiState("populated");
+            if (eligibleCandidates.length >= 5) {
+              deckHealthy = true;
+            }
             if (eligibleCandidates.length !== cached.candidates.length) {
               cacheSet<CachedFeedDeck>(feedCacheKey, {
                 lastSyncedAt: Date.now(),
@@ -121,6 +125,9 @@ export default function FeedScreen() {
             cachedDeckUnverified.current = true;
             setCandidates(cached.candidates);
             setUiState("populated");
+            if (cached.candidates.length >= 5) {
+              deckHealthy = true;
+            }
           } else if (feedCacheKey) {
             cachedDeckUnverified.current = false;
             await cacheRemove(feedCacheKey);
@@ -128,8 +135,8 @@ export default function FeedScreen() {
         }
       }
 
-      // Always fetch fresh batch after cache revalidation (or immediately offline).
-      if (!cancelled) fetchBatch();
+      // Defer network refill if local revalidated deck already has >= 5 valid cards
+      if (!cancelled && !deckHealthy) fetchBatch();
     };
 
     void restoreAndFetch();

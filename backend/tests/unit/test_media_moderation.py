@@ -672,7 +672,7 @@ class TestAvatarSizeBounds(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertFalse(result.is_safe)
-        self.assertIn("2 MB", result.reason)
+        self.assertIn("350 KB", result.reason)
         moderator.moderate_image_bytes.assert_not_awaited()
         self.assertTrue(any("status = 'rejected'" in call.args[0] for call in conn.execute.await_args_list))
         delete_avatar.assert_awaited_once_with(user_id)

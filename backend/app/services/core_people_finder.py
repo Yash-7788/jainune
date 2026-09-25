@@ -419,7 +419,31 @@ async def fetch_recommended_feed(
         except Exception as exc:
             log.warning("Durable feed_queue fetch fallback failed: %s", exc)
 
-    # L0 + L1 + L2 + L3: Full pipeline
+    # L0 + L1 + L2 + L3: Full pipeline (lazy DB fetch only when location missing from user_data)
+    if not user_data.get("location") and db is not None:
+        if hasattr(db, "acquire"):
+            async with db.acquire() as conn:
+                extra = await conn.fetchrow(
+                    """
+                    SELECT u.location, b.revealed_preference_vector
+                    FROM users u
+                    LEFT JOIN user_behavior_vectors b ON u.id = b.user_id
+                    WHERE u.id = $1
+                    """,
+                    user_id,
+                )
+            if not extra and not user_data.get("location"):
+                from fastapi import HTTPException, status
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found.",
+                )
+            if extra:
+                if "location" in extra and extra["location"]:
+                    user_data["location"] = extra["location"]
+                if "revealed_preference_vector" in extra and extra["revealed_preference_vector"]:
+                    user_data["revealed_preference_vector"] = extra["revealed_preference_vector"]
+
     candidates = await _run_pipeline(user_id, user_data, db, limit * 2)
 
     # Cache surplus for session prefetch

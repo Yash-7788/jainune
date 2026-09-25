@@ -24,7 +24,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-MAX_AVATAR_BYTES = 2 * 1024 * 1024
+MAX_AVATAR_BYTES = 350 * 1024  # 350 KB cap (retina 640x800 WebP <= 45 KB)
 
 
 class AvatarTooLargeError(ValueError):
@@ -60,7 +60,7 @@ def avatar_storage_path(user_id: str | uuid.UUID) -> str:
 
 
 def avatar_public_url(user_id: str | uuid.UUID, version: Optional[str] = None) -> str:
-    base = (settings.supabase_url or "https://supabase.local").rstrip("/")
+    base = (getattr(settings, "media_cdn_url", "") or settings.supabase_url or "https://supabase.local").rstrip("/")
     bucket = getattr(settings, "supabase_storage_bucket", "avatars")
     url = f"{base}/storage/v1/object/public/{bucket}/{avatar_storage_path(user_id)}"
     if version:
@@ -121,7 +121,7 @@ async def verify_avatar_uploaded(user_id: str | uuid.UUID) -> bool:
                     logger.warning("Avatar size metadata unavailable for %s; rejecting unverified upload", user_id)
                     return False
                 if size > MAX_AVATAR_BYTES:
-                    raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+                    raise AvatarTooLargeError("Avatar exceeds the 350 KB upload limit")
                 return size > 0
     except AvatarTooLargeError:
         raise
@@ -153,14 +153,14 @@ async def _read_bounded_image_response(
         except (TypeError, ValueError):
             declared_size = None
         if declared_size is not None and declared_size > MAX_AVATAR_BYTES:
-            raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+            raise AvatarTooLargeError("Avatar exceeds the 350 KB upload limit")
 
         chunks: list[bytes] = []
         total = 0
         async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
             total += len(chunk)
             if total > MAX_AVATAR_BYTES:
-                raise AvatarTooLargeError("Avatar exceeds the 2 MB upload limit")
+                raise AvatarTooLargeError("Avatar exceeds the 350 KB upload limit")
             chunks.append(chunk)
         return b"".join(chunks)
 
@@ -240,7 +240,7 @@ import struct
 _MAGIC_WEBP = (b"RIFF", b"WEBP")
 _MAGIC_JPEG = b"\xff\xd8\xff"
 _MAGIC_PNG  = b"\x89PNG"
-_MAX_BYTES   = 2 * 1024 * 1024  # 2 MB hard cap
+_MAX_BYTES   = MAX_AVATAR_BYTES  # 350 KB hard cap
 
 
 def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:
@@ -253,7 +253,7 @@ def process_and_sanitize_image(data: bytes, max_dimension: int = 1920) -> bytes:
     if not data:
         raise ValueError("Corrupted image header: empty payload")
     if len(data) > _MAX_BYTES:
-        raise ValueError(f"Image exceeds {_MAX_BYTES // (1024*1024)} MB limit")
+        raise ValueError(f"Image exceeds {_MAX_BYTES // 1024} KB limit")
     # Validate magic bytes — accept WebP, JPEG, PNG
     if data[:4] == b"RIFF":
         if len(data) < 12 or data[8:12] != b"WEBP":

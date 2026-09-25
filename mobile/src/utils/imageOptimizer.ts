@@ -10,8 +10,8 @@ export interface OptimizedImageResult {
 }
 
 /**
- * Compresses an image to extreme high-density WebP format.
- * Target: Max 480x600 resolution, 70% quality, <=15KB payload.
+ * Compresses an image to high-density WebP format.
+ * Target: Max 640x800 resolution (retina card/profile), 75% quality, <=45KB payload.
  */
 export async function optimizeProfilePhoto(
   originalUri: string
@@ -23,13 +23,13 @@ export async function optimizeProfilePhoto(
       [
         {
           resize: {
-            width: 480,
-            height: 480, // WhatsApp-style 1:1 square crop
+            width: 640,
+            height: 800,
           },
         },
       ],
       {
-        compress: 0.7, // 70% lossy compression (indistinguishable on retina screens)
+        compress: 0.75, // 75% WebP quality
         format: ImageManipulator.SaveFormat.WEBP,
         base64: false,
       }
@@ -39,14 +39,14 @@ export async function optimizeProfilePhoto(
     const fileInfo = await FileSystem.getInfoAsync(manipulated.uri);
     const size = fileInfo.exists && "size" in fileInfo ? fileInfo.size : 0;
 
-    // Safety assertion: Alert if image exceeds strict 20KB budget
-    if (size > 20 * 1024) {
+    // Safety assertion: Alert if image exceeds strict 45KB budget
+    if (size > 45 * 1024) {
       // Re-compress at lower quality if initial pass exceeded threshold
       const emergencyPass = await ImageManipulator.manipulateAsync(
         manipulated.uri,
-        [{ resize: { width: 400 } }],
+        [{ resize: { width: 540 } }],
         {
-          compress: 0.55,
+          compress: 0.6,
           format: ImageManipulator.SaveFormat.WEBP,
         }
       );

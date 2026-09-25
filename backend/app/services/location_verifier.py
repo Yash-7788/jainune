@@ -117,7 +117,7 @@ def verify_location_anti_spoofing(
     # If origin secret is configured, require valid origin/edge token
     # (prevents direct-to-origin bypass where cf-* headers are omitted)
     if origin_secret:
-        edge_token = h.get("x-edge-secret") or h.get("x-origin-secret")
+        edge_token = h.get("cf-origin-secret") or h.get("x-origin-secret") or h.get("x-edge-secret")
         if not edge_token or edge_token != origin_secret:
             return False, "Untrusted edge network headers detected without valid origin secret."
     elif settings.environment == "production" and has_cf_headers:

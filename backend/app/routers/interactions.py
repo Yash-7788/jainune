@@ -439,9 +439,6 @@ async def record_interaction_action(
     if match_created:
         await invalidate_feed_cache(actor_id, redis)
         await invalidate_feed_cache(target_id, redis)
-    elif body.action == "pass":
-        # Just invalidate actor's cache so passed profile doesn't reappear
-        await invalidate_feed_cache(actor_id, redis)
 
     return InteractionActionResponse(
         success=True,

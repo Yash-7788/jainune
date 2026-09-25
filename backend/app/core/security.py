@@ -208,6 +208,25 @@ async def _check_in_memory_rate_limit(key: str, limit: int, window_seconds: int)
         return True
 
 
+_SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_start = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local member = ARGV[5]
+
+redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+local current = redis.call('ZCARD', key)
+if current >= limit then
+    return 0
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttl)
+return 1
+"""
+
+
 async def sliding_window_rate_limit(
     key: str,
     limit: int,
@@ -216,16 +235,16 @@ async def sliding_window_rate_limit(
 ) -> None:
     """
     Sliding-window rate limiter.
-    1. Handles high-frequency swipe interactions in-process (0 Redis commands, saving 100% of Upstash quota).
-    2. Uses Redis sorted sets for distributed endpoints (OTP / Auth / Admin).
+    1. Handles high-frequency interactions and feeds in-process (0 Redis commands, saving Upstash quota).
+    2. Uses single-command atomic Lua script for distributed endpoints (OTP / Auth / Admin).
     3. Gracefully falls back to in-memory limiter if Redis is unavailable or quota is exceeded (prevents 503 crash).
     """
     from fastapi.params import Depends
     if isinstance(redis, Depends):
         return
 
-    # High-frequency swipe interactions: evaluate in-process to protect Upstash 10k daily command quota
-    if key.startswith("ratelimit:interaction:"):
+    # High-frequency swipe interactions and main discovery feed: evaluate in-process (0 Redis commands)
+    if key.startswith("ratelimit:interaction:") or (key.startswith("ratelimit:feed:") and not key.startswith("ratelimit:feed:daily:")):
         allowed = await _check_in_memory_rate_limit(key, limit, window_seconds)
         if not allowed:
             raise HTTPException(
@@ -251,6 +270,27 @@ async def sliding_window_rate_limit(
 
     member = f"{now_ms}:{secrets.token_hex(4)}"
     try:
+        # Atomic Lua evaluation: executes 4 operations as 1 billable command on Upstash
+        if hasattr(redis, "eval"):
+            eval_res = redis.eval(
+                _SLIDING_WINDOW_LUA,
+                1,
+                key,
+                now_ms,
+                window_start,
+                limit,
+                window_seconds + 1,
+                member,
+            )
+            res = await eval_res if hasattr(eval_res, "__await__") else eval_res
+            if isinstance(res, (int, bool)):
+                if not res:
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail="Rate limit exceeded.",
+                    )
+                return
+
         pipe = redis.pipeline(transaction=True)
         if hasattr(pipe, "__await__"):
             pipe = await pipe
@@ -342,7 +382,7 @@ def get_trusted_client_ip(request) -> str:
 
     headers = {k.lower(): v for k, v in request.headers.items()} if hasattr(request, "headers") else {}
     origin_secret = getattr(settings, "cloudflare_origin_secret", "")
-    edge_token = headers.get("x-edge-secret") or headers.get("x-origin-secret")
+    edge_token = headers.get("cf-origin-secret") or headers.get("x-origin-secret") or headers.get("x-edge-secret")
 
     # Only trust reverse-proxy headers if origin lock matches
     if origin_secret and edge_token == origin_secret:

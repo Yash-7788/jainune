@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_storage_bucket: str = "avatars"
+    media_cdn_url: str = ""
 
     # MSG91 (SMS & WhatsApp)
     msg91_auth_key: str = "test_msg91_key"
