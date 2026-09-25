@@ -147,13 +147,13 @@ async def _issue_token_response(
 
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
 
-    old_token_hash = await conn.fetchval(
-        "SELECT token_hash FROM refresh_tokens WHERE user_id = $1",
-        user_id,
-    )
-
-    # Atomic transaction for token write and activity timestamp (BUG-073)
+    # AUTH-01: Read old_token_hash inside the transaction with FOR UPDATE so concurrent
+    # logins cannot both read the same stale hash and leave one issued token un-revoked.
     async with conn.transaction():
+        old_token_hash = await conn.fetchval(
+            "SELECT token_hash FROM refresh_tokens WHERE user_id = $1 FOR UPDATE",
+            user_id,
+        )
         await conn.execute(
             """
             INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -165,7 +165,7 @@ async def _issue_token_response(
             """,
             user_id, refresh_hash, expires_at,
         )
-        # Touch last active
+        # Touch last active (BUG-073)
         await conn.execute("UPDATE users SET last_active_at = NOW() WHERE id = $1", user_id)
 
     # Track old token as replaced by login rather than rotated/theft (BUG-064)
@@ -185,17 +185,14 @@ async def _issue_token_response(
             log.warning("Failed to persist session replacement state in DB: %s", e)
 
         try:
+            # AUTH-02: get_redis() returns an async client; await unconditionally.
             r = get_redis()
-            res = r.set(
+            await r.set(
                 f"auth:replaced_by_login:{old_token_hash}",
                 str(user_id),
                 ex=settings.refresh_token_expire_days * 86400,
             )
-            if hasattr(res, "__await__"):
-                await res
-            del_res = r.delete(f"user:session:{user_id}")
-            if hasattr(del_res, "__await__"):
-                await del_res
+            await r.delete(f"user:session:{user_id}")
         except Exception as e:
             log.warning("Failed to record session replacement state in Redis: %s", e)
 

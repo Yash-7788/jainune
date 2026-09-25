@@ -859,13 +859,21 @@ async def process_store_subscription_event(
         else (f"{store}:{original_transaction_id}:{event_type}" if original_transaction_id else None)
     )
 
-    # 1. Event Idempotency check (NEW-007)
+    # 1. Event Idempotency - atomic SETNX (PAY-01: replaces check-then-set race)
+    # Only one of N concurrent identical RTDN deliveries wins the NX lock;
+    # the rest short-circuit here before any DB mutations run.
     if effective_event_id and r:
         try:
-            if await r.get(f"store:event:processed:{effective_event_id}"):
+            acquired = await r.set(
+                f"store:event:processed:{effective_event_id}",
+                "1",
+                ex=86400 * 7,
+                nx=True,
+            )
+            if not acquired:
                 return {"status": "already_processed", "event_id": effective_event_id}
         except Exception:
-            pass
+            pass  # Redis unavailable - fall through to DB-level duplicate protection
 
     # 2. Map plan SKU to canonical duration (NEW-006)
     sku_durations = {
