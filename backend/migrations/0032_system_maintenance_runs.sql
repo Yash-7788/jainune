@@ -2,7 +2,8 @@
 CREATE TABLE IF NOT EXISTS system_maintenance_runs (
     task_name VARCHAR(64) PRIMARY KEY,
     last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    run_date_ist DATE NOT NULL
+    run_date_ist DATE NOT NULL,
+    locked_until TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01'::timestamptz
 );
 ALTER TABLE system_maintenance_runs ENABLE ROW LEVEL SECURITY;
 DO $$
