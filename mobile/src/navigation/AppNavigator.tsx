@@ -12,6 +12,7 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import * as Linking from "expo-linking";
 import { colors } from "../theme/tokens";
 import { useAuthStore } from "../store/authStore";
+import { reconcileAndroidPurchases, setupAndroidPurchaseListener } from "../services/billingService";
 import {
   registerForPushNotificationsAsync,
   setupNotificationListeners,
@@ -208,7 +209,7 @@ function LoadingScreen() {
 }
 
 const linking = {
-  prefixes: [Linking.createURL("/"), "jainune://", "https://jainune.com"],
+  prefixes: [Linking.createURL("/"), "jainune://", "https://jainune.com", "https://app.jainune.com"],
   config: {
     screens: {
       Chat: "chat/:matchId",
@@ -258,8 +259,11 @@ export default function AppNavigator() {
 
   useEffect(() => {
     if (authState === "authenticated") {
+      const stopPurchaseListener = setupAndroidPurchaseListener();
       registerForPushNotificationsAsync();
+      reconcileAndroidPurchases().catch(() => {});
       flushPendingIntents();
+      return stopPurchaseListener;
     }
   }, [authState, flushPendingIntents]);
 

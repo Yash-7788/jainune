@@ -1,13 +1,3 @@
-declare module "react-native-iap" {
-  export function initConnection(): Promise<boolean>;
-  export function endConnection(): Promise<void>;
-  export function getSubscriptions(skus: { skus: string[] }): Promise<any[]>;
-  export function requestSubscription(params: { sku: string }): Promise<any>;
-  export function getProducts(skus: { skus: string[] }): Promise<any[]>;
-  export function requestPurchase(params: { sku: string }): Promise<any>;
-  export function finishTransaction(params: { purchase: any; isConsumable?: boolean }): Promise<void>;
-}
-
 declare module "expo-splash-screen" {
   export function preventAutoHideAsync(): Promise<boolean>;
   export function hideAsync(): Promise<boolean>;

@@ -16,8 +16,8 @@ import {
   Animated,
   Easing,
   ActivityIndicator,
-  Alert,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { purchaseArcadeRolls } from "../../services/billingService";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
@@ -198,8 +198,8 @@ export default function SerendipityArcadeModal({ visible, onClose, onNavigateToC
           setRolls((r) => r + (product.rolls || 0));
         }
         Alert.alert("Purchased!", `${product.label} added to your arcade balance.`);
-      } else if (res.error === "EXTERNAL_CHECKOUT_OPENED") {
-        Alert.alert("Checkout Opened", "Complete your purchase in your browser. Tokens will appear automatically once confirmed.");
+      } else if (res.pending_verification) {
+        Alert.alert("Payment Processing", res.message || "Complete your purchase. Tokens will appear once payment is verified.");
       }
     } catch (err: any) {
       if (err?.code !== 0 && err?.error !== "CANCELLED") {

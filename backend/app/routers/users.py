@@ -408,6 +408,78 @@ async def set_fcm_token(
     return {"success": True, "message": "FCM token registered"}
 
 
+class WebPushKeys(BaseModel):
+    p256dh: str = Field(..., min_length=40, max_length=180, pattern=r"^[A-Za-z0-9_-]+$")
+    auth: str = Field(..., min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class WebPushSubscriptionBody(BaseModel):
+    endpoint: str = Field(..., min_length=30, max_length=2048)
+    keys: WebPushKeys
+    device_id: str = Field(..., min_length=8, max_length=128)
+
+
+class WebPushUnsubscribeBody(BaseModel):
+    endpoint: str = Field(..., min_length=30, max_length=2048)
+
+
+@router.get("/me/web-push/config")
+async def get_web_push_config(current_user: dict = Depends(get_current_user)):
+    from app.core.config import settings
+
+    if not settings.web_push_vapid_public_key or not settings.web_push_vapid_private_key:
+        raise HTTPException(status_code=503, detail="Web Push is not configured.")
+    return {"public_key": settings.web_push_vapid_public_key}
+
+
+@router.post("/me/web-push/subscriptions", status_code=status.HTTP_200_OK)
+async def register_web_push_subscription(
+    body: WebPushSubscriptionBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    from app.services.push_notifications import valid_web_push_endpoint
+
+    if not valid_web_push_endpoint(body.endpoint):
+        raise HTTPException(status_code=400, detail="Invalid push service endpoint.")
+    uid = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM web_push_subscriptions WHERE user_id = $1 AND device_id = $2 AND endpoint <> $3",
+                uid, body.device_id, body.endpoint,
+            )
+            await conn.execute(
+                """
+                INSERT INTO web_push_subscriptions (user_id, device_id, endpoint, p256dh, auth)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (endpoint) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    device_id = EXCLUDED.device_id,
+                    p256dh = EXCLUDED.p256dh,
+                    auth = EXCLUDED.auth,
+                    updated_at = NOW()
+                """,
+                uid, body.device_id, body.endpoint, body.keys.p256dh, body.keys.auth,
+            )
+    return {"success": True}
+
+
+@router.post("/me/web-push/unsubscribe", status_code=status.HTTP_200_OK)
+async def unregister_web_push_subscription(
+    body: WebPushUnsubscribeBody,
+    current_user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    uid = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM web_push_subscriptions WHERE user_id = $1 AND endpoint = $2",
+            uid, body.endpoint,
+        )
+    return {"success": True}
+
+
 @router.delete("/me", status_code=status.HTTP_200_OK)
 @router.post("/me/delete", status_code=status.HTTP_200_OK)
 async def delete_my_account(

@@ -30,6 +30,7 @@ import { googleSignIn } from "../../api/authApi";
 import { useAuthStore } from "../../store/authStore";
 import { extractError } from "../../api/client";
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
+import GoogleSignInButton from "../../components/auth/GoogleSignInButton";
 import type { AuthStackParams } from "../../navigation/AppNavigator";
 
 type Nav = NativeStackNavigationProp<AuthStackParams, "AuthMethod">;
@@ -155,6 +156,19 @@ export default function AuthMethodScreen() {
     }
   };
 
+  const handleWebGoogleCredential = async (credential: string) => {
+    setLoading("google");
+    setError(null);
+    try {
+      const data = await googleSignIn(credential);
+      setAuthenticated(data.user_id, data.is_new_user, data.onboarding_completed);
+    } catch (err) {
+      setError(extractError(err));
+    } finally {
+      setLoading(null);
+    }
+  };
+
 
 
   return (
@@ -193,12 +207,19 @@ export default function AuthMethodScreen() {
         ]}
       >
         {/* Google — Official Multicolor G Logo with 2px Black Border */}
-        <SocialButton
-          label="Continue with Google"
-          onPress={handleGoogle}
-          loading={loading === "google"}
-          icon={<GoogleLogo size={20} />}
-        />
+        {Platform.OS === "web" ? (
+          <GoogleSignInButton
+            onCredential={handleWebGoogleCredential}
+            onError={(message) => setError({ title: "Google Sign-In", message })}
+          />
+        ) : (
+          <SocialButton
+            label="Continue with Google"
+            onPress={handleGoogle}
+            loading={loading === "google"}
+            icon={<GoogleLogo size={20} />}
+          />
+        )}
 
         {/* Tactile Divider */}
         <View style={styles.divider}>

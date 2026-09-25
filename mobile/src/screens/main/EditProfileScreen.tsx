@@ -24,10 +24,10 @@ import {
   Image,
   Switch,
   ActivityIndicator,
-  Alert,
   Platform,
   Linking,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
 import { colors, spacing, radii, typography } from "../../theme/tokens";

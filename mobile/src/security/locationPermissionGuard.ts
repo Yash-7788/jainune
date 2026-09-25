@@ -21,7 +21,8 @@
  * - Enrolls phone number to location waitlist.
  */
 
-import { Platform, Linking, Alert } from "react-native";
+import { Platform, Linking} from "react-native";
+import { Alert } from "../utils/platformAlert";
 
 export interface GeoCoordinates {
   latitude: float;

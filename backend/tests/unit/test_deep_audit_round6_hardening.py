@@ -295,11 +295,11 @@ class TestDeepAuditRound6Hardening(unittest.IsolatedAsyncioTestCase):
         """Verify send_daily_digest batches tokens via send_push_multicast in chunks of 500 (BUG-051)."""
         from app.workers.notification_worker import send_daily_digest
         mock_rows = [
-            {"fcm_token": f"token_{i}", "like_count": 3}
+            {"user_id": uuid.uuid4(), "fcm_token": f"token_{i}", "like_count": 3}
             for i in range(1200)
         ]
         mock_conn = MagicMock()
-        mock_conn.fetch = AsyncMock(return_value=mock_rows)
+        mock_conn.fetch = AsyncMock(side_effect=[mock_rows, [], []])
         mock_conn.close = AsyncMock()
 
         multicast_calls = []
@@ -436,5 +436,4 @@ class TestDeepAuditRound6Hardening(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

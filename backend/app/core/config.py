@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "default_jwt_hmac_secret_32_bytes_len"
     otp_pepper_secret: str = "default_test_pepper_secret_32_bytes_len"
     google_client_id: str = ""
+    apple_bundle_id: str = ""
 
     # Supabase Storage (replaces AWS S3)
     supabase_url: str = ""
@@ -100,6 +101,11 @@ class Settings(BaseSettings):
     fcm_service_account_path: str = "/etc/secrets/fcm_service_account.json"
     fcm_service_account_json: str = ""
     fcm_project_id: str = "jainune-prod"
+
+    # Standards-based Web Push for installed iPhone/desktop PWAs.
+    web_push_vapid_public_key: str = ""
+    web_push_vapid_private_key: str = ""
+    web_push_vapid_subject: str = "mailto:noreply@jainune.com"
 
     # Cloudflare Turnstile & Origin Protection
     turnstile_secret_key: str = ""

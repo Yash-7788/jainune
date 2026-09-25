@@ -317,16 +317,21 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["X-XSS-Protection"] = "0"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    req_path = getattr(getattr(request, "url", None), "path", "")
+    checkout_page = req_path == "/v1/payments/razorpay/checkout"
     response.headers["Permissions-Policy"] = (
         "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
-        "magnetometer=(), microphone=(), payment=(), usb=()"
+        "magnetometer=(), microphone=(), "
+        + ('payment=(self "https://checkout.razorpay.com")' if checkout_page else "payment=()")
+        + ", usb=()"
     )
-    req_path = getattr(getattr(request, "url", None), "path", "")
     if isinstance(req_path, str) and (req_path.startswith("/v1/") or req_path.startswith("/api/")):
         response.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, private")
         response.headers.setdefault("Pragma", "no-cache")
 
-    if isinstance(req_path, str) and (
+    if checkout_page and "Content-Security-Policy" in response.headers:
+        pass  # Checkout uses a per-response nonce for its payment script.
+    elif isinstance(req_path, str) and (
         req_path.startswith("/legal") or req_path in (
             "/privacy", "/terms", "/child-safety", "/community-guidelines", "/delete-account"
         )

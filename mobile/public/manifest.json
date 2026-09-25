@@ -1,19 +1,12 @@
 {
+  "id": "/",
   "short_name": "Jainune",
   "name": "Jainune — Modern Jain Relationships",
   "icons": [
-    {
-      "src": "/assets/icon.png",
-      "type": "image/png",
-      "sizes": "192x192"
-    },
-    {
-      "src": "/assets/icon.png",
-      "type": "image/png",
-      "sizes": "512x512"
-    }
+    { "src": "/icon.png", "type": "image/png", "sizes": "1024x1024", "purpose": "any maskable" }
   ],
   "start_url": "/",
+  "scope": "/",
   "background_color": "#FFFCFA",
   "theme_color": "#FF9C4A",
   "display": "standalone"

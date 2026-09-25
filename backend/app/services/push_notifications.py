@@ -19,7 +19,9 @@ import logging
 import os
 import time
 import uuid
+import base64
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -33,6 +35,47 @@ _FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 _token_cache: tuple[str, float] = ("", 0.0)
 _cached_sa: dict[str, Any] | None = None
 _cached_project_id: str | None = None
+_WEB_PUSH_PREFIX = "webpush:"
+
+
+def valid_web_push_endpoint(endpoint: str) -> bool:
+    try:
+        parsed = urlsplit(endpoint)
+        host = (parsed.hostname or "").lower()
+        return (
+            parsed.scheme == "https"
+            and parsed.port in (None, 443)
+            and not parsed.username
+            and not parsed.password
+            and (
+                host == "fcm.googleapis.com"
+                or host == "updates.push.services.mozilla.com"
+                or host.endswith(".push.apple.com")
+                or host.endswith(".notify.windows.com")
+            )
+        )
+    except ValueError:
+        return False
+
+
+def _encode_web_subscription(row: Any) -> str:
+    subscription = {
+        "endpoint": row["endpoint"],
+        "keys": {"p256dh": row["p256dh"], "auth": row["auth"]},
+    }
+    raw = json.dumps(subscription, separators=(",", ":")).encode()
+    return _WEB_PUSH_PREFIX + base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_web_subscription(token: str) -> dict[str, Any] | None:
+    try:
+        raw = base64.urlsafe_b64decode(token[len(_WEB_PUSH_PREFIX):])
+        subscription = json.loads(raw)
+        if valid_web_push_endpoint(subscription["endpoint"]) and subscription["keys"]["auth"] and subscription["keys"]["p256dh"]:
+            return subscription
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        pass
+    return None
 
 
 def _load_service_account() -> dict[str, Any]:
@@ -146,20 +189,54 @@ async def _get_access_token() -> str:
 
 async def get_user_device_tokens(user_id: uuid.UUID, conn: Any) -> list[str]:
     """Fetch all active device tokens for a user across multi-device user_devices table."""
+    tokens: list[str] = []
     try:
         rows = await conn.fetch("SELECT token FROM user_devices WHERE user_id = $1", user_id)
         tokens = [r["token"] for r in rows if r.get("token")]
-        if tokens:
-            return tokens
     except Exception as exc:
         log.debug("user_devices query failed for %s: %s", user_id, exc)
+    if not tokens:
+        try:
+            row = await conn.fetchrow("SELECT fcm_token FROM users WHERE id = $1", user_id)
+            if row and row.get("fcm_token"):
+                tokens = [row["fcm_token"]]
+        except Exception:
+            pass
     try:
-        row = await conn.fetchrow("SELECT fcm_token FROM users WHERE id = $1", user_id)
-        if row and row.get("fcm_token"):
-            return [row["fcm_token"]]
-    except Exception:
-        pass
-    return []
+        web_rows = await conn.fetch(
+            "SELECT endpoint, p256dh, auth FROM web_push_subscriptions WHERE user_id = $1",
+            user_id,
+        )
+        tokens.extend(_encode_web_subscription(row) for row in web_rows)
+    except Exception as exc:
+        log.debug("web_push_subscriptions query failed for %s: %s", user_id, exc)
+    return tokens
+
+
+async def get_users_device_tokens(user_ids: list[uuid.UUID], conn: Any) -> dict[uuid.UUID, list[str]]:
+    """Batch-fetch native and browser tokens for digest-style fanout."""
+    result: dict[uuid.UUID, list[str]] = {user_id: [] for user_id in user_ids}
+    if not user_ids:
+        return result
+    try:
+        native_rows = await conn.fetch(
+            "SELECT user_id, token FROM user_devices WHERE user_id = ANY($1::uuid[])", user_ids,
+        )
+        for row in native_rows:
+            if row["token"]:
+                result[row["user_id"]].append(row["token"])
+    except Exception as exc:
+        log.debug("Batch native token query failed: %s", exc)
+    try:
+        web_rows = await conn.fetch(
+            "SELECT user_id, endpoint, p256dh, auth FROM web_push_subscriptions WHERE user_id = ANY($1::uuid[])",
+            user_ids,
+        )
+        for row in web_rows:
+            result[row["user_id"]].append(_encode_web_subscription(row))
+    except Exception as exc:
+        log.debug("Batch browser token query failed: %s", exc)
+    return result
 
 
 async def prune_invalid_device_token(device_token: str, conn: Any = None) -> None:
@@ -207,6 +284,35 @@ async def send_push(
     """
     if not device_token:
         return False
+
+    if device_token.startswith(_WEB_PUSH_PREFIX):
+        subscription = _decode_web_subscription(device_token)
+        if not subscription or not settings.web_push_vapid_private_key:
+            return False
+        try:
+            from pywebpush import webpush_async
+
+            await webpush_async(
+                subscription_info=subscription,
+                data=json.dumps({"title": title, "body": body, "data": data or {}}),
+                vapid_private_key=settings.web_push_vapid_private_key,
+                vapid_claims={"sub": settings.web_push_vapid_subject},
+                ttl=3600,
+                timeout=10,
+            )
+            return True
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code in (404, 410) and db_conn is not None:
+                try:
+                    await db_conn.execute(
+                        "DELETE FROM web_push_subscriptions WHERE endpoint = $1",
+                        subscription["endpoint"],
+                    )
+                except Exception:
+                    pass
+            log.warning("Web Push failed: status=%s error=%s", status_code, exc)
+            return False
 
     # Expo push token delivery (handles iOS APNs / Android without raw token mismatches)
     if device_token.startswith(("ExponentPushToken", "ExpoPushToken")):

@@ -5,7 +5,8 @@
  * Then calls /v1/location/verify to check 100km geofence. Waitlist if outside.
  */
 import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, StyleSheet, Alert, AppState, AppStateStatus } from "react-native";
+import { View, Text, StyleSheet, AppState, AppStateStatus } from "react-native";
+import { Alert } from "../../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import * as Location from "expo-location";

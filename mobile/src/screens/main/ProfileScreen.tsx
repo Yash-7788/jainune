@@ -18,8 +18,8 @@ import {
   Switch,
   RefreshControl,
   Platform,
-  Alert,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import { getMyProfile, updateProfile, MyProfile } from "../../api/profileApi";

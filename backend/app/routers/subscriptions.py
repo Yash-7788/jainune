@@ -11,9 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import secrets
 import uuid
+from html import escape
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -907,29 +911,47 @@ async def verify_google_play(
 # ---------------------------------------------------------------------------
 
 
+def _valid_checkout_return_origin(origin: str) -> bool:
+    parsed = urlsplit(origin)
+    if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+        return False
+    if origin != f"{parsed.scheme}://{parsed.netloc}":
+        return False
+    if origin in settings.allowed_origins and origin != "https://jainune-backend-api.onrender.com":
+        return parsed.scheme == "https"
+    return (
+        settings.environment != "production"
+        and parsed.scheme == "http"
+        and parsed.hostname in ("localhost", "127.0.0.1")
+    )
+
+
 @router.get("/razorpay/checkout", response_class=HTMLResponse)
 async def razorpay_web_checkout(
-    plan_id: str,
-    user_id: str,
+    order_id: str,
+    return_origin: str,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """
-    Renders standalone Razorpay web checkout page for iOS PWA and web clients.
-    Bypasses Apple 30% tax with 100% web compliance.
-    """
-    plan = payment_service.PLAN_CATALOGUE.get(plan_id)
-    if not plan:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid plan_id")
+    """Display an order created by the authenticated /subscriptions/order endpoint."""
+    if not re.fullmatch(r"order_[A-Za-z0-9_-]{5,120}", order_id):
+        raise HTTPException(status_code=400, detail="Invalid order ID")
+    if not _valid_checkout_return_origin(return_origin):
+        raise HTTPException(status_code=400, detail="Invalid return origin")
 
-    try:
-        user_uuid = UUID(user_id)
-    except (ValueError, AttributeError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user_id format")
-
-    order_res = await payment_service.create_order(str(user_uuid), plan_id, pool)
-    order_id = order_res["order_id"]
+    async with pool.acquire() as conn:
+        intent = await conn.fetchrow(
+            "SELECT plan_id, amount, status FROM payment_intents WHERE razorpay_order_id = $1",
+            order_id,
+        )
+    if intent is None:
+        raise HTTPException(status_code=404, detail="Payment order not found")
+    plan = payment_service.PLAN_CATALOGUE.get(intent["plan_id"])
+    if not plan or intent["amount"] != plan["amount"] or intent["status"] != "created":
+        raise HTTPException(status_code=409, detail="Payment order is not available for checkout")
     amount_inr = plan["amount"] // 100
-    plan_label = plan.get("label", plan_id.replace("_", " ").title())
+    plan_label = escape(plan.get("label", intent["plan_id"].replace("_", " ").title()))
+    return_url = f"{return_origin}/subscriptions"
+    nonce = secrets.token_urlsafe(18)
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -958,15 +980,17 @@ async def razorpay_web_checkout(
     <button id="pay-btn" class="btn">Pay ₹{amount_inr} with Razorpay</button>
     <div class="footer">UPI, Debit/Credit Card, NetBanking supported.</div>
   </div>
-  <script>
+  <script nonce="{nonce}">
+    var verificationStarted = false;
     var options = {{
-      "key": "{settings.razorpay_key_id}",
+      "key": {json.dumps(settings.razorpay_key_id)},
       "amount": {plan["amount"]},
       "currency": "INR",
       "name": "Jainune",
-      "description": "{plan_label} Membership",
-      "order_id": "{order_id}",
+      "description": {json.dumps(plan_label)},
+      "order_id": {json.dumps(order_id)},
       "handler": function (response) {{
+        verificationStarted = true;
         fetch("/v1/payments/razorpay/verify-web", {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
@@ -977,14 +1001,20 @@ async def razorpay_web_checkout(
           }})
         }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
           if (data && data.success) {{
-            alert("Payment successful! Your membership has been activated.");
-            if (window.opener) {{ window.close(); }} else {{ window.location.href = "/"; }}
+            window.location.replace({json.dumps(return_url)} + "?payment=success&order_id=" + encodeURIComponent({json.dumps(order_id)}));
           }} else {{
             alert("Payment verification failed: " + (data.detail || data.message || "Please contact support"));
           }}
         }}).catch(function(err) {{
           alert("Payment verification failed. Please contact support.");
         }});
+      }},
+      "modal": {{
+        "ondismiss": function () {{
+          if (!verificationStarted) {{
+            window.location.replace({json.dumps(return_url)} + "?payment=cancelled&order_id=" + encodeURIComponent({json.dumps(order_id)}));
+          }}
+        }}
       }},
       "theme": {{ "color": "#FF4D6D" }}
     }};
@@ -999,7 +1029,14 @@ async def razorpay_web_checkout(
   </script>
 </body>
 </html>"""
-    return HTMLResponse(content=html_content, status_code=status.HTTP_200_OK)
+    response = HTMLResponse(content=html_content, status_code=status.HTTP_200_OK)
+    response.headers["Content-Security-Policy"] = (
+        f"default-src 'none'; script-src https://checkout.razorpay.com 'nonce-{nonce}'; "
+        "style-src 'unsafe-inline'; img-src https: data:; "
+        "connect-src 'self' https://*.razorpay.com; frame-src https://*.razorpay.com; "
+        "form-action 'self' https://*.razorpay.com; frame-ancestors 'none'; base-uri 'none'"
+    )
+    return response
 
 
 async def razorpay_web_verify(

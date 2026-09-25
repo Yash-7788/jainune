@@ -10,13 +10,11 @@
  */
 
 import { Platform, Linking } from "react-native";
-import * as SecureStore from "expo-secure-store";
-import { apiPost, getUserId } from "../api/client";
-import { useAuthStore } from "../store/authStore";
+import * as SecureStore from "../utils/secureStorage";
+import { apiPost } from "../api/client";
 import {
   createSubscriptionOrder,
   syncSubscriptionOrder,
-  createArcadeOrder,
   SubscriptionPlan,
 } from "../api/profileApi";
 
@@ -61,12 +59,10 @@ export interface PendingPayment {
 }
 
 export async function savePendingPayment(payment: PendingPayment): Promise<void> {
-  try {
-    const all = await getAllPendingPayments();
-    all[payment.order_id] = payment;
-    await SecureStore.setItemAsync(PENDING_PAYMENTS_MAP_KEY, JSON.stringify(all));
-    await SecureStore.setItemAsync(PENDING_PAYMENT_KEY, JSON.stringify(payment));
-  } catch {}
+  const all = await getAllPendingPayments();
+  all[payment.order_id] = payment;
+  await SecureStore.setItemAsync(PENDING_PAYMENTS_MAP_KEY, JSON.stringify(all));
+  await SecureStore.setItemAsync(PENDING_PAYMENT_KEY, JSON.stringify(payment));
 }
 
 export async function getAllPendingPayments(): Promise<Record<string, PendingPayment>> {
@@ -158,17 +154,103 @@ export async function initializeBilling(): Promise<void> {
   }
 }
 
+const purchasesInFlight = new Map<string, Promise<PurchaseResult>>();
+
+async function verifyAndFinishAndroidPurchase(purchase: any, sku: string): Promise<PurchaseResult> {
+  if (!purchase?.purchaseToken || !purchase?.productId) {
+    throw new Error("Google Play did not return a purchase receipt.");
+  }
+  if (purchase.purchaseStateAndroid != null && purchase.purchaseStateAndroid !== 1) {
+    return {
+      success: false,
+      pending_verification: true,
+      message: "Google Play is still processing this purchase. It will be restored when approved.",
+    };
+  }
+  const verification = await apiPost<{ activated: boolean; expires_at?: string }>(
+    "/subscriptions/verify-google-play",
+    {
+      orderId: purchase.orderId || purchase.transactionId || purchase.purchaseToken,
+      packageName: purchase.packageNameAndroid || "com.jainune.app",
+      productId: purchase.productId || sku,
+      purchaseTime: purchase.transactionDate || Date.now(),
+      purchaseToken: purchase.purchaseToken,
+    }
+  );
+  if (!verification.success || !verification.data?.activated) {
+    throw new Error("Google Play purchase verification failed.");
+  }
+  const isConsumable = sku.startsWith("arcade_") || sku.startsWith("rose_") || sku.startsWith("slingshot_");
+  if ((isConsumable || !purchase.isAcknowledgedAndroid) && typeof RNIap.finishTransaction === "function") {
+    await RNIap.finishTransaction({
+      purchase,
+      isConsumable,
+    });
+  }
+  return { success: true, activated: true, expires_at: verification.data.expires_at };
+}
+
+function processAndroidPurchase(purchase: any, sku: string): Promise<PurchaseResult> {
+  const token = purchase?.purchaseToken;
+  if (!token) return verifyAndFinishAndroidPurchase(purchase, sku);
+  const existing = purchasesInFlight.get(token);
+  if (existing) return existing;
+  const task = verifyAndFinishAndroidPurchase(purchase, sku).finally(() => {
+    purchasesInFlight.delete(token);
+  });
+  purchasesInFlight.set(token, task);
+  return task;
+}
+
+export function setupAndroidPurchaseListener(): () => void {
+  if (Platform.OS !== "android" || !RNIap?.purchaseUpdatedListener) return () => {};
+  const listener = RNIap.purchaseUpdatedListener((purchase: any) => {
+    if (purchase?.purchaseToken && purchase?.productId) {
+      processAndroidPurchase(purchase, purchase.productId).catch(() => {});
+    }
+  });
+  return () => listener?.remove?.();
+}
+
+/** Reconcile completed but unacknowledged purchases after an interrupted checkout. */
+export async function reconcileAndroidPurchases(): Promise<void> {
+  if (Platform.OS !== "android" || !RNIap?.getAvailablePurchases) return;
+  await initializeBilling();
+  const purchases: any[] = await RNIap.getAvailablePurchases();
+  for (const purchase of purchases) {
+    if (!purchase?.purchaseToken || !purchase?.productId) continue;
+    try {
+      await processAndroidPurchase(purchase, purchase.productId);
+    } catch {
+      // Retain the Play purchase for the next attempt; never acknowledge before verification.
+    }
+  }
+}
+
 /**
  * Executes native Google Play purchase on Android.
  */
 export async function purchaseAndroidPlan(sku: string): Promise<PurchaseResult> {
   try {
     if (RNIap && (typeof RNIap.requestPurchase === "function" || typeof RNIap.requestSubscription === "function")) {
-      const isSub = sku.startsWith("jainune_") && !sku.startsWith("jainune_plus_");
+      const isSub = sku.startsWith("jainune_") || sku.startsWith("gold_") || sku.startsWith("platinum_");
+      await RNIap.initConnection();
       let purchase: any;
       if (isSub && typeof RNIap.requestSubscription === "function") {
-        purchase = await RNIap.requestSubscription({ sku });
+        const products: any[] = await RNIap.getSubscriptions({ skus: [sku] });
+        const product = products.find((item) => item.productId === sku);
+        const offers: any[] = product?.subscriptionOfferDetails || [];
+        const offer = offers.find((item) => item.offerId == null && item.offerToken) ||
+          offers.find((item) => item.offerToken);
+        if (!offer) throw new Error("This Google Play subscription is not available yet.");
+        purchase = await RNIap.requestSubscription({
+          subscriptionOffers: [{ sku, offerToken: offer.offerToken }],
+        });
       } else {
+        const products: any[] = await RNIap.getProducts({ skus: [sku] });
+        if (!products.some((item) => item.productId === sku)) {
+          throw new Error("This Google Play item is not available yet.");
+        }
         purchase = await RNIap.requestPurchase({ skus: [sku] });
       }
 
@@ -176,50 +258,14 @@ export async function purchaseAndroidPlan(sku: string): Promise<PurchaseResult> 
         purchase = purchase[0];
       }
 
-      // Send receipt to FastAPI for cryptographic verification & activation
-      const verification = await apiPost<{
-        success: boolean;
-        activated: boolean;
-        expires_at?: string;
-        tier?: string;
-      }>("/subscriptions/verify-google-play", {
-        orderId: purchase?.orderId || purchase?.transactionId || `order_${Date.now()}`,
-        packageName: purchase?.packageNameAndroid || "com.jainune.app",
-        productId: purchase?.productId || sku,
-        purchaseTime: purchase?.transactionDate || Date.now(),
-        purchaseToken: purchase?.purchaseToken || "token_mock",
-      });
-
-      if (verification.success && verification.data?.activated) {
-        // Acknowledge transaction with Google Play to prevent automatic refund
-        if (typeof RNIap.finishTransaction === "function") {
-          await RNIap.finishTransaction({
-            purchase,
-            isConsumable: sku.startsWith("arcade_") || sku.startsWith("rose_") || sku.startsWith("slingshot_"),
-          });
-        }
-        return {
-          success: true,
-          activated: true,
-          expires_at: verification.data.expires_at,
-        };
-      } else {
+      if (!purchase) {
         return {
           success: false,
-          error: "Verification failed on server.",
+          pending_verification: true,
+          message: "Google Play is processing this purchase.",
         };
       }
-    }
-
-    // Expo Go / Dev Client sandbox fallback
-    if (__DEV__) {
-      const devOrder = await createSubscriptionOrder(sku);
-      const syncRes = await syncSubscriptionOrder(devOrder.order_id);
-      return {
-        success: true,
-        activated: syncRes.activated,
-        expires_at: syncRes.expires_at,
-      };
+      return await processAndroidPurchase(purchase, sku);
     }
 
     throw new Error("PLAY_BILLING_UNAVAILABLE");
@@ -234,17 +280,20 @@ export async function purchaseAndroidPlan(sku: string): Promise<PurchaseResult> 
 /**
  * Launches standalone Razorpay Web Checkout for iOS PWA and desktop web users.
  */
-export async function launchWebPayment(planId: string, explicitUserId?: string): Promise<void> {
-  const userId =
-    explicitUserId ||
-    useAuthStore.getState().userId ||
-    (await getUserId()) ||
-    (await SecureStore.getItemAsync("auth_user_id")) ||
-    "";
+export async function launchWebPayment(planId: string): Promise<void> {
+  const order = await createSubscriptionOrder(planId);
+  await savePendingPayment({
+    order_id: order.order_id,
+    payment_id: "",
+    signature: "",
+    plan_id: planId,
+    timestamp: Date.now(),
+  });
   const apiBase =
     process.env.EXPO_PUBLIC_API_URL?.replace(/\/v1\/?$/, "") ||
     "https://jainune-backend-api.onrender.com";
-  const checkoutUrl = `${apiBase}/v1/payments/razorpay/checkout?plan_id=${encodeURIComponent(planId)}&user_id=${encodeURIComponent(userId)}`;
+  const returnOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  const checkoutUrl = `${apiBase}/v1/payments/razorpay/checkout?order_id=${encodeURIComponent(order.order_id)}&return_origin=${encodeURIComponent(returnOrigin)}`;
 
   if (typeof window !== "undefined" && window.location) {
     window.location.href = checkoutUrl;
@@ -267,9 +316,9 @@ export async function purchaseSubscription(
   }
 
   // iOS PWA or Web browser checkout
-  await launchWebPayment(plan.plan_id, userId);
+  await launchWebPayment(plan.plan_id);
   return {
-    success: true,
+    success: false,
     pending_verification: true,
     message: "Opening secure Razorpay web checkout...",
   };
@@ -288,9 +337,9 @@ export async function purchaseArcadeRolls(
   }
 
   // iOS PWA or Web browser checkout
-  await launchWebPayment(productId, userId);
+  await launchWebPayment(productId);
   return {
-    success: true,
+    success: false,
     pending_verification: true,
     message: "Opening secure Razorpay web checkout...",
   };

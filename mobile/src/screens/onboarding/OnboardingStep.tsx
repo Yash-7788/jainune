@@ -11,8 +11,8 @@ import {
   Platform,
   ScrollView,
   TouchableOpacity,
-  Alert,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import { useAuthStore } from "../../store/authStore";
 import { useOnboardingStore } from "../../store/onboardingStore";

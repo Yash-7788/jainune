@@ -6,8 +6,9 @@
  * Input sanitization rules from frontend_integration_contracts.md §3.1
  */
 
-import * as SecureStore from "expo-secure-store";
+import * as SecureStore from "../utils/secureStorage";
 import { apiPost, saveTokens, clearTokens, extractError } from "./client";
+import { getTurnstileToken } from "../services/turnstile";
 
 // ── Input sanitizers (client-side, matches backend validators) ────────────────
 
@@ -97,9 +98,11 @@ export async function requestPhoneOTP(
   phoneNumber: string,
   channel: "sms" | "whatsapp" = "sms"
 ): Promise<OTPRequestData> {
+  const turnstileToken = await getTurnstileToken();
   const res = await apiPost<OTPRequestData>("/auth/otp/request", {
     phone_number: phoneNumber.trim(),
     channel,
+    turnstile_token: turnstileToken,
   });
   if (!res.success) throw { _apiError: res.error };
   return res.data;
@@ -122,9 +125,10 @@ export async function requestEmailOTP(
   turnstileToken?: string
 ): Promise<{ email: string; retry_after_seconds: number; expires_in_seconds: number }> {
   const clean = sanitizeEmail(email);
+  const challengeToken = turnstileToken ?? await getTurnstileToken();
   const res = await apiPost<{ email: string; retry_after_seconds: number; expires_in_seconds: number }>(
     "/auth/email/otp/request",
-    { email: clean, turnstile_token: turnstileToken ?? null }
+    { email: clean, turnstile_token: challengeToken }
   );
   if (!res.success) throw { _apiError: res.error };
   return res.data;
@@ -144,7 +148,8 @@ export async function verifyEmailOTP(email: string, otp: string): Promise<TokenD
 /** POST /v1/auth/google — id_token from @react-native-google-signin */
 export async function googleSignIn(idToken: string): Promise<TokenData> {
   const clean = sanitizeOAuthToken(idToken);
-  const res = await apiPost<TokenData>("/auth/google", { id_token: clean });
+  const turnstileToken = await getTurnstileToken();
+  const res = await apiPost<TokenData>("/auth/google", { id_token: clean, turnstile_token: turnstileToken });
   if (!res.success) throw { _apiError: res.error };
   await saveTokens(res.data.access_token, res.data.refresh_token, res.data.user_id);
   return res.data;

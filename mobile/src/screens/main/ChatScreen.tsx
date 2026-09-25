@@ -30,13 +30,13 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
-  Alert,
   ActionSheetIOS,
   AppState,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNavigation, useRoute } from "@react-navigation/native";
-import * as SecureStore from "expo-secure-store";
+import * as SecureStore from "../../utils/secureStorage";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
   getMessages,
@@ -757,24 +757,6 @@ export default function ChatScreen() {
 
       {/* Input bar */}
       <View style={[styles.inputBar, chatBlocked && styles.inputBarDisabled, { paddingBottom: Math.max(insets.bottom, Platform.OS === "ios" ? spacing.sm : spacing.xs) }]}>
-        {!chatBlocked && (
-          <TouchableOpacity
-            style={styles.mediaBtn}
-            onPress={() => {
-              Alert.alert("Send Media", "Choose attachment type:", [
-                {
-                  text: "Photo 📷",
-                  onPress: () => {
-                    Alert.alert("Photo Sharing", "Select photo from library.");
-                  },
-                },
-                { text: "Cancel", style: "cancel" },
-              ]);
-            }}
-          >
-            <Text style={styles.mediaBtnText}>＋</Text>
-          </TouchableOpacity>
-        )}
         <TextInput
           style={styles.input}
           value={draft}

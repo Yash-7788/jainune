@@ -386,6 +386,7 @@ async def send_daily_digest_notification() -> None:
         rows = await conn.fetch(
             """
             SELECT
+                u.id AS user_id,
                 u.fcm_token,
                 COUNT(i.id) AS like_count
             FROM users u
@@ -394,9 +395,7 @@ async def send_daily_digest_notification() -> None:
                 AND i.created_at > NOW() - INTERVAL '24 hours'
             WHERE u.account_status = 'active'
               AND u.subscription_tier IN ('gold', 'platinum', 'jainune_plus', 'premium_799', 'ultra_1499')
-              AND u.fcm_token IS NOT NULL
-              AND u.fcm_token != ''
-            GROUP BY u.fcm_token
+            GROUP BY u.id, u.fcm_token
             HAVING COUNT(i.id) > 0
             """
         )
@@ -406,9 +405,15 @@ async def send_daily_digest_notification() -> None:
             return
 
         from collections import defaultdict
+        from app.services.push_notifications import get_users_device_tokens
+
+        tokens_by_user = await get_users_device_tokens([r["user_id"] for r in rows], conn)
         count_groups: dict[int, list[str]] = defaultdict(list)
         for r in rows:
-            count_groups[r["like_count"]].append(r["fcm_token"])
+            tokens = tokens_by_user.get(r["user_id"], [])
+            if not tokens and r["fcm_token"]:
+                tokens = [r["fcm_token"]]
+            count_groups[r["like_count"]].extend(set(tokens))
 
         BATCH_SIZE = 500
         total_sent = 0

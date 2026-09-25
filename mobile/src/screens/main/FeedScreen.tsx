@@ -22,7 +22,7 @@ import {
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import * as SecureStore from "expo-secure-store";
+import * as SecureStore from "../../utils/secureStorage";
 import { colors, spacing, typography, radii } from "../../theme/tokens";
 import SwipeCard from "../../components/feed/SwipeCard";
 import MatchModal from "../../components/feed/MatchModal";

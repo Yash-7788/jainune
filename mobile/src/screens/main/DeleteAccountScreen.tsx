@@ -20,9 +20,9 @@ import {
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
-  Alert,
   Platform,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import { requestAccountDeletion } from "../../api/profileApi";

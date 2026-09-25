@@ -1,6 +1,6 @@
 /**
  * Jainune API Client
- * - RS256 JWT Bearer auth via expo-secure-store (never AsyncStorage)
+ * - RS256 JWT Bearer auth via native SecureStore or origin-scoped web storage
  * - 10s timeout, 3 retries with exponential backoff
  * - Graceful multi-server fallback
  * - Zero technical errors exposed to user
@@ -9,7 +9,7 @@
  */
 
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
-import * as SecureStore from "expo-secure-store";
+import * as SecureStore from "../utils/secureStorage";
 import { Platform } from "react-native";
 import { ErrorCode, getFriendlyError, ERROR_MAP } from "../utils/errors";
 
@@ -47,7 +47,7 @@ export function setSessionExpiredCallback(fn: SessionExpiredFn): void {
   _onSessionExpired = fn;
 }
 
-// ── Token storage (expo-secure-store only) ────────────────────────────────────
+// ── Platform-specific token storage ──────────────────────────────────────────
 
 export async function saveTokens(
   accessToken: string,

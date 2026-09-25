@@ -24,11 +24,11 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
-  Alert,
   Platform,
   AppState,
   AppStateStatus,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import {
@@ -47,7 +47,7 @@ import {
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
 
-import { purchaseSubscription, syncPendingPayment } from "../../services/billingService";
+import { purchaseSubscription, reconcileAndroidPurchases, syncPendingPayment } from "../../services/billingService";
 
 const FEATURES = [
   "Unlimited intentional likes & profile rewinds",
@@ -120,6 +120,9 @@ export default function SubscriptionsScreen() {
   const handleRestorePurchases = async () => {
     setSyncing(true);
     try {
+      if (Platform.OS === "android") {
+        await reconcileAndroidPurchases();
+      }
       const res = await syncPendingPayment();
       if (res.activated) {
         Alert.alert(

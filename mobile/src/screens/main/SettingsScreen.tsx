@@ -14,10 +14,10 @@ import {
   Switch,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
   Platform,
   Linking,
 } from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { useNavigation } from "@react-navigation/native";
 import { colors, spacing, radii, typography } from "../../theme/tokens";
 import { updateSettings, getSettings } from "../../api/profileApi";
@@ -27,6 +27,12 @@ import {
   disableScreenCaptureProtection,
 } from "../../security/antiReversing";
 import LegalModal, { LegalDocType } from "../../components/legal/LegalModal";
+import {
+  enableWebPushFromGesture,
+  disableWebPush,
+  getWebPushStatus,
+  WebPushStatus,
+} from "../../services/notifications";
 
 interface SettingState {
   discovery_paused: boolean;
@@ -41,6 +47,8 @@ export default function SettingsScreen() {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<keyof SettingState | null>(null);
+  const [pushStatus, setPushStatus] = useState<WebPushStatus>("checking");
+  const [pushBusy, setPushBusy] = useState(false);
 
   useEffect(() => {
     enableScreenCaptureProtection();
@@ -57,6 +65,21 @@ export default function SettingsScreen() {
 
     return () => disableScreenCaptureProtection();
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === "web") {
+      getWebPushStatus().then(setPushStatus).catch(() => setPushStatus("unconfigured"));
+    }
+  }, []);
+
+  const toggleWebPush = () => {
+    setPushBusy(true);
+    const action = pushStatus === "enabled" ? disableWebPush() : enableWebPushFromGesture();
+    action
+      .then(() => getWebPushStatus().then(setPushStatus))
+      .catch((error) => Alert.alert("Notifications", error?.message || "Could not update notifications."))
+      .finally(() => setPushBusy(false));
+  };
 
   const toggle = useCallback(async (key: keyof SettingState, val: boolean) => {
     setSettings((prev) => ({ ...prev, [key]: val }));
@@ -112,6 +135,30 @@ export default function SettingsScreen() {
           </View>
         ))}
       </View>
+
+      {Platform.OS === "web" && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>NOTIFICATIONS</Text>
+          <TouchableOpacity
+            style={styles.linkRow}
+            onPress={toggleWebPush}
+            disabled={pushBusy || pushStatus === "checking" || pushStatus === "unconfigured" || pushStatus === "unsupported" || pushStatus === "install_required" || pushStatus === "denied"}
+          >
+            <Text style={styles.linkRowText}>
+              {pushBusy ? "Updating..." : pushStatus === "enabled" ? "Turn Off Notifications" : "Enable Notifications"}
+            </Text>
+            {pushBusy && <ActivityIndicator size="small" color={colors.saffron} />}
+          </TouchableOpacity>
+          <Text style={styles.rowHint}>
+            {pushStatus === "install_required" ? "On iPhone, first add Jainune to your Home Screen and open it there." :
+              pushStatus === "denied" ? "Allow Jainune notifications in your device settings." :
+              pushStatus === "unconfigured" ? "Notifications are not configured on the server yet." :
+              pushStatus === "unsupported" ? "This browser does not support push notifications." :
+              pushStatus === "enabled" ? "New matches and messages can appear on your Lock Screen." :
+              "Get alerts for new matches and messages, even when Jainune is closed."}
+          </Text>
+        </View>
+      )}
 
       {/* Legal & Safety */}
       <View style={styles.section}>

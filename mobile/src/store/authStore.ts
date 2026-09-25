@@ -1,7 +1,7 @@
 /**
  * Auth store — Zustand with immer
  * Manages session state, token lifecycle, and onboarding routing.
- * Tokens live ONLY in expo-secure-store (never in Zustand state).
+ * Tokens stay outside Zustand: SecureStore on native, origin-scoped storage on web.
  */
 
 import axios from "axios";
@@ -10,6 +10,7 @@ import { getAccessToken, getUserId, clearTokens } from "../api/client";
 import { logout as apiLogout } from "../api/authApi";
 import { getOnboardingStatus } from "../api/onboardingApi";
 import { useOnboardingStore } from "./onboardingStore";
+import { disableWebPush } from "../services/notifications";
 
 export type AuthState = "loading" | "unauthenticated" | "authenticated" | "onboarding";
 
@@ -97,6 +98,7 @@ export const useAuthStore = create<AuthStore>((set, _get) => ({
 
   logout: async () => {
     try {
+      try { await disableWebPush(); } catch {}
       await apiLogout();
     } catch {
       await clearTokens();

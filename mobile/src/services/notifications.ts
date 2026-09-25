@@ -6,8 +6,13 @@
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-constants";
-import * as SecureStore from "expo-secure-store";
+import * as SecureStore from "../utils/secureStorage";
 import { apiPost } from "../api/client";
+
+export type WebPushStatus = "checking" | "unsupported" | "install_required" | "unconfigured" | "disabled" | "denied" | "enabled";
+export async function getWebPushStatus(): Promise<WebPushStatus> { return "unsupported"; }
+export async function enableWebPushFromGesture(): Promise<void> { return; }
+export async function disableWebPush(): Promise<void> { return; }
 
 /** Stable, persistent installation identifier for multi-device push routing (R7-3) */
 export async function getOrCreateDeviceId(): Promise<string> {

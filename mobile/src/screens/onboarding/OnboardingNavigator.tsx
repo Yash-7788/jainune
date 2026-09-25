@@ -5,7 +5,8 @@
  */
 
 import React, { useEffect, useRef } from "react";
-import { View, StyleSheet, StatusBar, BackHandler, Alert } from "react-native";
+import { View, StyleSheet, StatusBar, BackHandler} from "react-native";
+import { Alert } from "../../utils/platformAlert";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { colors, spacing } from "../../theme/tokens";
 import { ProgressBar } from "../../components/core";

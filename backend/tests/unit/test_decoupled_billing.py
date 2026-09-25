@@ -267,32 +267,44 @@ class TestDecoupledBilling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["spins_added"], 10)
 
     async def test_06_razorpay_web_checkout_renders_html(self):
-        """Verify GET /razorpay/checkout generates HTML checkout page pointing to web-verify."""
-        user_id = str(uuid.uuid4())
+        """The public page displays an existing authenticated order without creating one."""
         mock_pool = MagicMock()
+        mock_conn = _billing_conn()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        mock_conn.fetchrow.return_value = {
+            "plan_id": "jainune_premium_799",
+            "amount": 79900,
+            "status": "created",
+        }
 
         with patch("app.services.payment_service.create_order", new_callable=AsyncMock) as mock_order:
-            mock_order.return_value = {
-                "order_id": "order_mock_razorpay_123",
-                "amount": 79900,
-                "amount_paisa": 79900,
-                "currency": "INR",
-                "razorpay_key": "rzp_test_mock",
-            }
-
             resp = await razorpay_web_checkout(
-                plan_id="jainune_premium_799",
-                user_id=user_id,
+                order_id="order_mock_razorpay_123",
+                return_origin="https://app.jainune.com",
                 pool=mock_pool,
             )
+            mock_order.assert_not_awaited()
             self.assertEqual(resp.status_code, 200)
             self.assertIn("text/html", resp.headers["content-type"])
+            self.assertIn("nonce-", resp.headers["content-security-policy"])
             html_text = resp.body.decode("utf-8")
             self.assertIn("SECURE PWA CHECKOUT", html_text)
             self.assertIn("Premium Plan", html_text)
             self.assertIn("799", html_text)
             self.assertIn("order_mock_razorpay_123", html_text)
             self.assertIn("/v1/payments/razorpay/verify-web", html_text)
+            self.assertIn("https://app.jainune.com/subscriptions", html_text)
+
+    async def test_06_checkout_rejects_external_return_origin(self):
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as caught:
+            await razorpay_web_checkout(
+                order_id="order_mock_razorpay_123",
+                return_origin="https://attacker.example",
+                pool=MagicMock(),
+            )
+        self.assertEqual(caught.exception.status_code, 400)
 
     async def test_07_razorpay_web_verify_success(self):
         """Verify POST /v1/payments/razorpay/verify-web cryptographically verifies signature without Bearer auth."""
