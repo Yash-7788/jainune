@@ -1,7 +1,13 @@
 """
-Ephemeral reaper — scheduled cleanup worker.
+Ephemeral reaper — cleanup worker tasks.
 
-Tasks (all beat-triggered — see celery_app.py):
+Architecture note:
+Scheduled sweeps run in-process via FastAPI's `_periodic_maintenance_loop`
+in `main.py` (running every 10 min, plus atomic daily heavy cleanup).
+The worker functions defined here serve as standalone worker tasks,
+manual invocation endpoints, and test harness execution targets.
+
+Tasks:
 
   reap_ephemeral_media()              every 5 min
     → delete quarantine-bucket objects for media that failed moderation

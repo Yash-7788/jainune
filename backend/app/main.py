@@ -121,7 +121,7 @@ async def _periodic_maintenance_loop() -> None:
                     "DELETE FROM revoked_refresh_tokens WHERE expires_at < NOW()"
                 )
 
-                # 5. Off-peak daily heavy maintenance (at or after 3:30 AM IST, i.e. >22:00 UTC previous day)
+                # 5. Off-peak daily heavy maintenance (at or after 3:30 AM IST = 22:00 UTC of previous day; IST is UTC+5:30)
                 # Slashes maintenance DB IOPS on Supabase by running heavy table scans once daily.
                 # Uses atomic DB lease (INSERT ON CONFLICT RETURNING) on system_maintenance_runs for multi-instance safety.
                 now_ist = datetime.now(_IST)
