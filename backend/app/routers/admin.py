@@ -533,6 +533,7 @@ async def list_pending_media(
             JOIN users u ON u.id = m.user_id
             WHERE m.status IN ('flagged', 'pending')
               AND m.media_type = 'photo'
+              AND m.is_processed = TRUE
             ORDER BY m.created_at ASC
             LIMIT $1 OFFSET $2
             """,
@@ -567,11 +568,14 @@ async def approve_media(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, user_id, s3_key, cdn_url, media_type, position FROM user_media WHERE id = $1",
+            "SELECT id, user_id, s3_key, cdn_url, media_type, position, is_processed FROM user_media WHERE id = $1",
             media_id,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Media item not found")
+
+        if not row.get("is_processed"):
+            raise HTTPException(status_code=400, detail="Cannot approve media before file is uploaded and processed.")
 
         user_id = row["user_id"]
         cdn_url = row["cdn_url"] or avatar_public_url(user_id)

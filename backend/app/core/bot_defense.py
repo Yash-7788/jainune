@@ -38,6 +38,7 @@ _BOT_UA_PATTERNS = [
     r"\bk6\b",
 ]
 _RE_BOT_UA = re.compile("|".join(f"(?:{p})" for p in _BOT_UA_PATTERNS), re.IGNORECASE)
+_RE_BROWSER_UA = re.compile(r"\b(mozilla|chrome|safari|firefox|webkit|opera|edge)\b", re.IGNORECASE)
 
 
 def get_client_subnet(ip_str: Optional[str]) -> str:
@@ -148,9 +149,21 @@ def verify_bot_integrity(
                     break
 
     ua_lower = ua.lower()
+    has_browser_header = False
+    header_keys = headers.keys() if hasattr(headers, "keys") else (headers if isinstance(headers, (dict, Mapping)) else [])
+    for k in header_keys:
+        k_lower = str(k).lower()
+        if k_lower.startswith("sec-ch-") or k_lower.startswith("sec-fetch-"):
+            has_browser_header = True
+            break
+
+    is_browser = has_browser_header or bool(_RE_BROWSER_UA.search(ua_lower))
     is_native_mobile = (
-        client_platform in ("ios", "android")
-        or "jainune" in ua_lower
+        not is_browser
+        and (
+            client_platform in ("ios", "android")
+            or "jainune" in ua_lower
+        )
     )
 
     # 3. Turnstile token verification

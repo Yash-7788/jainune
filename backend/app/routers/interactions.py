@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, Union
 
 from fastapi import APIRouter, HTTPException, status
@@ -192,6 +192,12 @@ async def record_interaction_action(
     actor_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
     target_id = body.target_id
 
+    if current_user.get("onboarding_completed") is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Onboarding must be completed before interacting with profiles.",
+        )
+
     # Anti-bot rate limit: max 60 actions per minute per user (SECURITY.md 8.1)
     await sliding_window_rate_limit(f"ratelimit:interaction:{actor_id}", 60, 60, redis)
 
@@ -235,7 +241,7 @@ async def record_interaction_action(
 
                 # ── Verify target profile exists and is active ───────────────────────
                 target_row = await conn.fetchrow(
-                    "SELECT id, account_status, deleted_at, is_paused FROM users WHERE id = $1",
+                    "SELECT id, account_status, deleted_at, is_paused, suspend_until, onboarding_completed FROM users WHERE id = $1",
                     target_id,
                 )
                 if target_row is None:
@@ -244,10 +250,19 @@ async def record_interaction_action(
                         detail="Target profile not found or no longer available.",
                     )
                 t_data = dict(target_row)
+                now_utc = datetime.now(timezone.utc)
+                suspend_until = t_data.get("suspend_until")
+                is_suspended = False
+                if isinstance(suspend_until, datetime):
+                    su_utc = suspend_until if suspend_until.tzinfo else suspend_until.replace(tzinfo=timezone.utc)
+                    is_suspended = su_utc > now_utc
+
                 if (
                     t_data.get("deleted_at") is not None
-                    or t_data.get("account_status") in ("deleted", "banned")
+                    or t_data.get("account_status") in ("deleted", "banned", "suspended")
                     or t_data.get("is_paused") is True
+                    or is_suspended
+                    or t_data.get("onboarding_completed") is False
                 ):
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
@@ -488,6 +503,7 @@ async def get_my_matches(
       AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
       AND u.deleted_at IS NULL
       AND u.is_paused = FALSE
+      AND u.onboarding_completed IS NOT FALSE
       AND NOT EXISTS (
           SELECT 1 FROM user_blocks ub
           WHERE (ub.blocker_id = $1 AND ub.blocked_id = u.id)
@@ -581,6 +597,7 @@ async def get_users_who_liked_me(
           AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
           AND u.deleted_at IS NULL
           AND u.is_paused = FALSE
+          AND u.onboarding_completed IS NOT FALSE
           AND NOT EXISTS (
               SELECT 1 FROM interactions back
               WHERE back.actor_id = $1 AND back.target_id = i.actor_id
@@ -624,6 +641,7 @@ async def get_users_who_liked_me(
           AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
           AND u.deleted_at IS NULL
           AND u.is_paused = FALSE
+          AND u.onboarding_completed IS NOT FALSE
           AND NOT EXISTS (
               SELECT 1 FROM interactions back
               WHERE back.actor_id = $1 AND back.target_id = i.actor_id

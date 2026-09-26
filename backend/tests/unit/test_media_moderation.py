@@ -374,6 +374,7 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
                     "s3_key": f"{user_id}/avatar.webp",
                     "media_type": "photo",
                     "position": 1,
+                    "is_processed": True,
                 }
             return None
 
@@ -471,6 +472,7 @@ class TestAdminMediaModerationEndpoints(unittest.IsolatedAsyncioTestCase):
                     "s3_key": f"{user_id}/voice.mp4",
                     "media_type": "voice",
                     "position": 1,
+                    "is_processed": True,
                 }
             return None
 

@@ -775,8 +775,8 @@ class TestCoverageBoost(unittest.TestCase):
         redis.delete = AsyncMock()
         result = asyncio.run(verify_otp(phone, otp, redis))
         self.assertTrue(result)
-        # Only rate_key delete remains (session_key consumed by getdel)
-        self.assertEqual(redis.delete.call_count, 1)
+        # session_key and rate_key both deleted on verification success
+        self.assertEqual(redis.delete.call_count, 2)
 
     def test_security_verify_otp_rate_limited(self):
         """Cover verify_otp rate-limit branch: lines 65-70."""

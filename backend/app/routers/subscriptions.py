@@ -876,18 +876,27 @@ async def verify_google_play(
             )
 
             if is_arcade:
-                spins_to_add = int(plan_info.get("spins", 1)) if plan_info else (3 if "3" in sku_lower else (10 if "10" in sku_lower else 1))
+                spins_to_add = int(plan_info.get("spins", 0)) if plan_info else (3 if "3" in sku_lower else (10 if "10" in sku_lower else (1 if "spin" in sku_lower else 0)))
+                dice_to_add = int(plan_info.get("dice_rolls", 0)) if plan_info else (1 if "dice" in sku_lower else 0)
                 await conn.execute(
                     """
-                    INSERT INTO user_arcade_wallet (user_id, available_spins, updated_at)
-                    VALUES ($1, $2, NOW())
+                    INSERT INTO user_arcade_wallet (user_id, available_spins, available_dice_rolls, updated_at)
+                    VALUES ($1, $2, $3, NOW())
                     ON CONFLICT (user_id) DO UPDATE
                     SET available_spins = user_arcade_wallet.available_spins + EXCLUDED.available_spins,
+                        available_dice_rolls = user_arcade_wallet.available_dice_rolls + EXCLUDED.available_dice_rolls,
                         updated_at = NOW()
                     """,
-                    user_uuid, spins_to_add,
+                    user_uuid, spins_to_add, dice_to_add,
                 )
-                return {"success": True, "activated": True, "consumable": True, "spins_added": spins_to_add}
+                return {
+                    "success": True,
+                    "activated": True,
+                    "consumable": True,
+                    "spins_added": spins_to_add,
+                    "dice_rolls_granted": dice_to_add,
+                    "dice_added": dice_to_add,
+                }
 
             if is_rose:
                 roses_to_add = int(plan_info.get("roses", 1)) if plan_info else 1

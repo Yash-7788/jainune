@@ -54,7 +54,8 @@ async def get_current_user(
                    dietary_strictness, eats_root_vegetables, eats_onion_garlic,
                    community_sect, city, state, max_distance_km,
                    open_to_relocation, subscription_tier, account_status,
-                   paryushan_mode, is_photo_verified, suspend_until, deleted_at
+                   paryushan_mode, is_photo_verified, suspend_until, deleted_at,
+                   onboarding_completed
             FROM users
             WHERE id = $1
             """,

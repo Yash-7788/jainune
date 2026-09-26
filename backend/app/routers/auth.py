@@ -513,17 +513,10 @@ async def verify_email_otp(
             detail="Maximum OTP verification attempts exceeded. Request a new OTP.",
         )
 
-    # Atomic GETDEL prevents concurrent requests from double-consuming the same OTP
-    _GETDEL_LUA = "local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end; return v"
     try:
-        if hasattr(redis, "getdel"):
-            stored_hash = await redis.getdel(session_key)
-        else:
-            stored_hash = await redis.eval(_GETDEL_LUA, 1, session_key)
-    except Exception:
         stored_hash = await redis.get(session_key)
-        if stored_hash:
-            await redis.delete(session_key)
+    except Exception:
+        stored_hash = None
 
     if not stored_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
@@ -532,6 +525,11 @@ async def verify_email_otp(
     stored_str = stored_hash.decode() if isinstance(stored_hash, bytes) else stored_hash
     if not hmac.compare_digest(stored_str, expected_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code.")
+
+    # Atomic consumption: only the first successful concurrent request consumes the code
+    deleted = await redis.delete(session_key)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP expired or not requested.")
 
     await redis.delete(rate_key)
 
@@ -911,7 +909,7 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
     async with db.acquire() as conn:
         rev_row = await conn.fetchrow(
             """
-            SELECT revocation_type, user_id, payload, expires_at
+            SELECT revocation_type, user_id, payload, expires_at, created_at
             FROM revoked_refresh_tokens
             WHERE token_hash = $1 AND expires_at > NOW()
             ORDER BY created_at DESC LIMIT 1
@@ -919,7 +917,16 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
             token_hash,
         )
         if rev_row:
-            if rev_row["revocation_type"] == "grace" and rev_row.get("payload"):
+            now_utc = datetime.now(timezone.utc)
+            created_at_val = rev_row["created_at"]
+            if created_at_val and created_at_val.tzinfo is None:
+                created_at_val = created_at_val.replace(tzinfo=timezone.utc)
+            is_within_grace = (
+                created_at_val is not None
+                and (now_utc - created_at_val).total_seconds() <= 15.0
+                and rev_row.get("payload")
+            )
+            if is_within_grace or (rev_row["revocation_type"] == "grace" and rev_row.get("payload")):
                 try:
                     return ok(json.loads(rev_row["payload"]))
                 except Exception:
@@ -981,6 +988,43 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
                         detail="Refresh token reuse detected. All sessions revoked.",
                     )
 
+                # Post-lock DB fallback if Redis was evicted
+                rev_row_post = await conn.fetchrow(
+                    """
+                    SELECT revocation_type, user_id, payload, expires_at, created_at
+                    FROM revoked_refresh_tokens
+                    WHERE token_hash = $1 AND expires_at > NOW()
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    token_hash,
+                )
+                if rev_row_post:
+                    now_utc = datetime.now(timezone.utc)
+                    created_at_post = rev_row_post["created_at"]
+                    if created_at_post and created_at_post.tzinfo is None:
+                        created_at_post = created_at_post.replace(tzinfo=timezone.utc)
+                    is_within_grace_post = (
+                        created_at_post is not None
+                        and (now_utc - created_at_post).total_seconds() <= 15.0
+                        and rev_row_post.get("payload")
+                    )
+                    if is_within_grace_post or (rev_row_post["revocation_type"] == "grace" and rev_row_post.get("payload")):
+                        try:
+                            return ok(json.loads(rev_row_post["payload"]))
+                        except Exception:
+                            pass
+                    elif rev_row_post["revocation_type"] == "replaced_by_login":
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session expired due to login from another device. Please sign in again.",
+                        )
+                    else:
+                        await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", rev_row_post["user_id"])
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Refresh token reuse detected. All sessions revoked.",
+                        )
+
                 if row:
                     await conn.execute(
                         "DELETE FROM refresh_tokens WHERE user_id = $1",
@@ -1029,23 +1073,14 @@ async def refresh_token_endpoint(body: TokenRefreshBody, request: Request, db: D
 
             # Persist revocation record to PostgreSQL before releasing lock
             exp_time = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
-            grace_exp = datetime.now(timezone.utc) + timedelta(seconds=15)
             try:
                 await conn.execute(
                     """
-                    INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, payload, expires_at)
-                    VALUES ($1, $2, 'revoked', NULL, $3)
-                    ON CONFLICT (token_hash) DO NOTHING
-                    """,
-                    token_hash, user_id, exp_time,
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, payload, expires_at)
-                    VALUES ($1, $2, 'grace', $3, $4)
+                    INSERT INTO revoked_refresh_tokens (token_hash, user_id, revocation_type, payload, expires_at, created_at)
+                    VALUES ($1, $2, 'revoked', $3, $4, NOW())
                     ON CONFLICT (token_hash) DO UPDATE SET payload = EXCLUDED.payload, expires_at = EXCLUDED.expires_at
                     """,
-                    token_hash, user_id, json.dumps(resp_data), grace_exp,
+                    token_hash, user_id, json.dumps(resp_data), exp_time,
                 )
             except Exception as dberr:
                 log.warning("Failed to record durable token revocation in DB: %s", dberr)

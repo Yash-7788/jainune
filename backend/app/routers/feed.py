@@ -59,6 +59,12 @@ async def get_feed(
     """
     user_id = uuid.UUID(str(current_user.get("user_id") or current_user.get("id")))
 
+    if current_user.get("onboarding_completed") is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Onboarding must be completed before accessing discovery feed.",
+        )
+
     # Rate limit: 20 feed requests per minute per user (SECURITY.md 10.1)
     await sliding_window_rate_limit(f"ratelimit:feed:{user_id}", 20, 60, redis)
 

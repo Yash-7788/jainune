@@ -251,6 +251,21 @@ export default function FeedScreen() {
     });
   }, [feedCacheKey]);
 
+  const restoreCandidate = useCallback(
+    (candidate: FeedCandidate) => {
+      setCandidates((prev) => {
+        if (prev.some((c) => c.id === candidate.id)) return prev;
+        const next = [candidate, ...prev];
+        cacheSet<CachedFeedDeck>(feedCacheKey, {
+          lastSyncedAt: Date.now(),
+          candidates: next,
+        });
+        return next;
+      });
+    },
+    [feedCacheKey]
+  );
+
   const handleSwipeRight = useCallback(
     async (candidate: FeedCandidate, totalMs: number, photoMs: number, promptMs: number) => {
       // Remove from stack optimistically and update L2 cache
@@ -286,6 +301,7 @@ export default function FeedScreen() {
           setMatchCandidate(candidate);
         }
       } catch (err: any) {
+        restoreCandidate(candidate);
         const errCode = err?._apiError?.code;
         const errStatus = err?._apiError?.status || err?.status;
         const errMsg = err?._apiError?.message?.toLowerCase() || "";
@@ -299,7 +315,7 @@ export default function FeedScreen() {
         }
       }
     },
-    [candidates.length, fetchBatch]
+    [candidates.length, fetchBatch, popCandidate, restoreCandidate]
   );
 
   const handleSwipeLeft = useCallback(
@@ -319,9 +335,11 @@ export default function FeedScreen() {
 
       try {
         await postInteraction(candidate.id, "pass", "photo", candidate.id);
-      } catch {}
+      } catch {
+        restoreCandidate(candidate);
+      }
     },
-    [candidates.length, fetchBatch, popCandidate]
+    [candidates.length, fetchBatch, popCandidate, restoreCandidate]
   );
 
   const handleSuperLike = useCallback(
@@ -349,6 +367,7 @@ export default function FeedScreen() {
           setMatchCandidate(candidate);
         }
       } catch (err: any) {
+        restoreCandidate(candidate);
         const errCode = err?._apiError?.code;
         const errStatus = err?._apiError?.status || err?.status;
         const errMsg = err?._apiError?.message?.toLowerCase() || "";
@@ -363,7 +382,7 @@ export default function FeedScreen() {
         }
       }
     },
-    [candidates.length, fetchBatch, popCandidate]
+    [candidates.length, fetchBatch, popCandidate, restoreCandidate]
   );
 
   const openChat = (chatId: string) => {

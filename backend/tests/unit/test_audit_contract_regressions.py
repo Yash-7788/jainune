@@ -115,3 +115,176 @@ async def test_forward_sync_recovers_retained_history(anchor_exists):
     sql = conn.fetch.call_args.args[0]
     assert "chat_id = $1" in sql
     assert "ORDER BY created_at ASC, id ASC" in sql
+
+
+@pytest.mark.asyncio
+async def test_bug001_wrong_otp_does_not_consume_valid_code():
+    phone = "+919876543210"
+    otp = "123456"
+    redis = ResilientRedisClient(None)
+    await redis.set(f"auth:otp:{phone}", hash_otp(phone, otp), ex=180)
+
+    # 1. Wrong OTP attempt fails with 401
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_otp(phone, "000000", redis)
+    assert exc_info.value.status_code == 401
+
+    # 2. Correct OTP attempt still succeeds (not consumed by wrong attempt)
+    assert await verify_otp(phone, otp, redis) is True
+
+    # 3. Subsequent attempt fails with 400 (consumed on successful verification)
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_otp(phone, otp, redis)
+    assert exc_info.value.status_code == 400
+
+
+def test_bug002_browser_headers_spoofer_requires_turnstile():
+    from app.core.bot_defense import verify_bot_integrity
+
+    # User-agent or browser headers claiming to be mobile client without turnstile token
+    browser_spoof_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "X-Client-Platform": "android",
+        "Sec-Ch-Ua": '"Chromium";v="120"',
+    }
+    is_bot, reason = verify_bot_integrity(browser_spoof_headers, is_production=True)
+    assert is_bot is True
+    assert "Security verification challenge failed" in reason
+
+    # Genuine mobile client without browser markers
+    mobile_headers = {
+        "User-Agent": "JainuneMobile/1.0 (Android)",
+        "X-Client-Platform": "android",
+    }
+    is_bot, _ = verify_bot_integrity(mobile_headers, is_production=True)
+    assert is_bot is False
+
+
+@pytest.mark.asyncio
+async def test_bug003_refresh_token_grace_period_and_theft_detection():
+    from app.routers.auth import refresh_token_endpoint, TokenRefreshBody
+    import hashlib
+    import json
+
+    user_id = uuid.uuid4()
+    raw_token = "valid_refresh_token_sample"
+    redis = ResilientRedisClient(None)
+
+    conn = AsyncMock()
+    pool = pool_for(conn)
+
+    # Test 1: Recent grace entry within 15 seconds returns grace payload
+    now_utc = datetime.now(timezone.utc)
+    mock_payload = {"access_token": "grace_access_jwt", "token_type": "bearer", "expires_in": 900}
+    conn.fetchrow.return_value = {
+        "revocation_type": "grace",
+        "user_id": user_id,
+        "payload": json.dumps(mock_payload),
+        "expires_at": now_utc + timedelta(days=30),
+        "created_at": now_utc - timedelta(seconds=5),
+    }
+
+    req = MagicMock()
+    req.headers = {}
+    req.client.host = "127.0.0.1"
+
+    body = TokenRefreshBody(refresh_token=raw_token)
+    res = await refresh_token_endpoint(body=body, request=req, db=pool, redis=redis)
+    res_data = json.loads(res.body.decode()) if hasattr(res, "body") else res
+    payload_data = res_data.get("data", res_data)
+    assert payload_data.get("access_token") == "grace_access_jwt"
+
+    # Test 2: Expired grace entry (> 15 seconds) triggers theft detection (HTTP 401)
+    conn.fetchrow.return_value = {
+        "revocation_type": "revoked",
+        "user_id": user_id,
+        "payload": json.dumps(mock_payload),
+        "expires_at": now_utc + timedelta(days=30),
+        "created_at": now_utc - timedelta(seconds=20),
+    }
+    with pytest.raises(HTTPException) as exc_info:
+        await refresh_token_endpoint(body=body, request=req, db=pool, redis=redis)
+    assert exc_info.value.status_code == 401
+    assert "Refresh token reuse detected" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_bug004_onboarding_incomplete_feed_and_interactions_denied():
+    from app.routers.feed import get_feed
+    from app.routers.interactions import record_interaction_action, InteractionActionRequest
+
+    # Incomplete user blocked from feed
+    incomplete_user = {"user_id": str(uuid.uuid4()), "onboarding_completed": False}
+    with pytest.raises(HTTPException) as exc_info:
+        await get_feed(current_user=incomplete_user, db=MagicMock(), redis=None)
+    assert exc_info.value.status_code == 403
+    assert "Onboarding must be completed" in exc_info.value.detail
+
+    # Incomplete user blocked from swiping/interacting
+    with pytest.raises(HTTPException) as exc_info:
+        await record_interaction_action(
+            body=InteractionActionRequest(target_id=uuid.uuid4(), action="like"),
+            current_user=incomplete_user,
+            db=MagicMock(),
+            redis=None,
+        )
+    assert exc_info.value.status_code == 403
+    assert "Onboarding must be completed" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_bug005_admin_approve_unprocessed_media_rejected():
+    from app.routers.admin import approve_media
+
+    media_id = uuid.uuid4()
+    admin_user = {"user_id": uuid.uuid4(), "admin_role": "admin"}
+    conn = AsyncMock()
+    pool = pool_for(conn)
+
+    # Unprocessed media returns is_processed=False
+    conn.fetchrow.return_value = {
+        "id": media_id,
+        "user_id": uuid.uuid4(),
+        "s3_key": "raw/media.jpg",
+        "cdn_url": None,
+        "media_type": "photo",
+        "position": 0,
+        "is_processed": False,
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        await approve_media(media_id=media_id, admin=admin_user, pool=pool)
+    assert exc_info.value.status_code == 400
+    assert "Cannot approve media before file is uploaded and processed" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_bug006_google_play_consumable_dice_credits_wallet():
+    from app.routers.subscriptions import verify_google_play, GooglePlayVerifyBody
+
+    user_id = uuid.uuid4()
+    current_user = {"user_id": str(user_id)}
+    conn = AsyncMock()
+    pool = pool_for(conn)
+
+    # Mock no existing token found in store_subscriptions
+    conn.fetch.return_value = []
+    # Mock user exists
+    conn.fetchrow.return_value = {"id": user_id}
+
+    body = GooglePlayVerifyBody(
+        orderId="GPA.1234-5678-9012-34567",
+        productId="arcade_3_pack",
+        purchaseToken="valid_google_purchase_token_sample",
+        purchaseTime=int(datetime.now(timezone.utc).timestamp() * 1000),
+    )
+
+    with patch("app.services.google_play_verifier.verify_google_play_purchase", return_value={"purchaseState": 0, "consumptionState": 0}):
+        res = await verify_google_play(body=body, current_user=current_user, pool=pool, redis=None)
+
+    assert res.get("success") is True
+    assert res.get("dice_rolls_granted") == 3
+
+    executed_sqls = [call.args[0] for call in conn.execute.call_args_list]
+    wallet_updates = [sql for sql in executed_sqls if "user_arcade_wallet" in sql and "available_dice_rolls" in sql]
+    assert len(wallet_updates) >= 1

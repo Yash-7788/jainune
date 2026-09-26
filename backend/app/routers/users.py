@@ -664,6 +664,8 @@ async def get_public_profile(
             WHERE u.id = $1
               AND u.account_status = 'active'
               AND u.is_paused = FALSE
+              AND (u.suspend_until IS NULL OR u.suspend_until <= NOW())
+              AND u.onboarding_completed IS NOT FALSE
               AND NOT EXISTS (
                   SELECT 1 FROM user_blocks ub
                   WHERE (ub.blocker_id = $2 AND ub.blocked_id = u.id)
