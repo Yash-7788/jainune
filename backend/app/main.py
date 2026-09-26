@@ -575,3 +575,11 @@ app.include_router(arcade.router)
 app.include_router(admin.router)
 app.include_router(location.router)
 app.include_router(legal.router)
+
+# Added last so the gate runs before application middleware and route handlers.
+# Deployment enables it only after the Worker and all callback URLs are tested.
+from app.core.edge_origin import EdgeOriginGate  # noqa: E402
+from app.core.payment_body_limit import StoreWebhookBodyLimit  # noqa: E402
+
+app.add_middleware(StoreWebhookBodyLimit)
+app.add_middleware(EdgeOriginGate)

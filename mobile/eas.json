@@ -16,9 +16,6 @@
     },
     "production": {
       "autoIncrement": true,
-      "env": {
-        "EXPO_PUBLIC_API_URL": "https://jainune-backend-api.onrender.com/v1"
-      },
       "android": {
         "buildType": "app-bundle"
       },

@@ -7,11 +7,12 @@ from typing import Any, Dict, Optional
 SENSITIVE_KEYS = {
     "authorization", "cookie", "set-cookie", "token", "password",
     "otp", "pepper", "secret", "phone", "phone_number", "email",
-    "access_token", "refresh_token", "razorpay_key_secret", "key"
+    "access_token", "refresh_token", "razorpay_key_secret", "key", "ticket"
 }
 
 PHONE_REGEX = re.compile(r"(\+?91)?[6-9]\d{9}")
 OTP_REGEX = re.compile(r"\b\d{6}\b")
+TICKET_QUERY_REGEX = re.compile(r"(?i)((?:^|[?&])ticket=)[^&#\s]+")
 
 
 def scrub_pii_from_dict(data: Any) -> Any:
@@ -29,7 +30,7 @@ def scrub_pii_from_dict(data: Any) -> Any:
     elif isinstance(data, str):
         # Mask phone numbers in strings
         scrubbed = PHONE_REGEX.sub("[PHONE_SCRUBBED]", data)
-        return scrubbed
+        return TICKET_QUERY_REGEX.sub(r"\1[SCRUBBED]", scrubbed)
     return data
 
 
@@ -47,6 +48,8 @@ def sentry_before_send(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = N
             req["data"] = scrub_pii_from_dict(req["data"])
         if "cookies" in req:
             req["cookies"] = "[SCRUBBED]"
+        if "url" in req and isinstance(req["url"], str):
+            req["url"] = scrub_pii_from_dict(req["url"])
         if "query_string" in req and isinstance(req["query_string"], str):
             req["query_string"] = PHONE_REGEX.sub("[PHONE_SCRUBBED]", req["query_string"])
             for sensitive_key in SENSITIVE_KEYS:

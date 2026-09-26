@@ -80,7 +80,32 @@ async def generate_supabase_upload_signed_url(user_id: str | uuid.UUID) -> dict:
     bucket = settings.supabase_storage_bucket
     path = avatar_storage_path(user_id)
     client = _get_supabase()
-    res = await asyncio.to_thread(client.storage.from_(bucket).create_signed_upload_url, path)
+    create_url = client.storage.from_(bucket).create_signed_upload_url
+    try:
+        # The avatar path is reused, so replacement uploads must be signed for upsert.
+        res = await asyncio.to_thread(create_url, path, options={"upsert": "true"})
+    except TypeError as exc:
+        if "options" not in str(exc):
+            raise
+        # supabase-py 2.13 (the pinned version) has no options parameter. Use
+        # the same Storage API operation directly so replacement still works.
+        storage_path = f"{quote(bucket, safe='')}/{quote(path, safe='/')}"
+        endpoint = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/upload/sign/{storage_path}"
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.post(
+                endpoint,
+                headers={
+                    "apikey": settings.supabase_service_role_key,
+                    "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                    "x-upsert": "true",
+                },
+                json={},
+            )
+            response.raise_for_status()
+            relative_url = response.json()["url"]
+        if not isinstance(relative_url, str) or not relative_url.startswith("/object/upload/sign/"):
+            raise ValueError("Supabase returned an invalid signed upload URL")
+        res = {"signedURL": f"{settings.supabase_url.rstrip('/')}/storage/v1{relative_url}"}
     return {
         "signed_url": res["signedURL"],
         "token": res.get("token", ""),

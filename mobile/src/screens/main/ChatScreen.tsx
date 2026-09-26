@@ -78,9 +78,6 @@ interface CachedChatThread {
   messages: Message[];
 }
 
-const WS_BASE =
-  process.env.EXPO_PUBLIC_WS_URL || "wss://jainune-backend-api.onrender.com/v1/ws/chat";
-
 interface RouteParams {
   matchId: string;
   otherUser: {

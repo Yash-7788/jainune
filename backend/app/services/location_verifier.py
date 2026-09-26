@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import logging
+import hmac
 from typing import TYPE_CHECKING, Any, Optional
 
 from app.core.config import settings
@@ -110,18 +111,21 @@ def verify_location_anti_spoofing(
 
     # Server-side edge network corroboration
     h = {k.lower(): v for k, v in headers.items()} if headers else {}
-    has_cf_headers = any(k.startswith("cf-") for k in h)
+    has_edge_headers = any(k.startswith("cf-") for k in h) or "x-country-code" in h
     origin_secret = getattr(settings, "cloudflare_origin_secret", "")
     require_corroboration = getattr(settings, "require_edge_location_corroboration", False)
+    require_edge_origin = getattr(settings, "require_edge_origin", False)
+    edge_token = h.get("cf-origin-secret") or h.get("x-origin-secret") or h.get("x-edge-secret")
 
-    # If origin secret is configured, require valid origin/edge token
-    # (prevents direct-to-origin bypass where cf-* headers are omitted)
-    if origin_secret:
-        edge_token = h.get("cf-origin-secret") or h.get("x-origin-secret") or h.get("x-edge-secret")
-        if not edge_token or edge_token != origin_secret:
-            return False, "Untrusted edge network headers detected without valid origin secret."
-    elif settings.environment == "production" and has_cf_headers:
-        return False, "Untrusted edge network headers detected in production without origin lock."
+    # A configured secret alone does not mean the Worker is active. Direct app
+    # requests remain valid until origin enforcement is enabled, but claimed
+    # edge headers must never influence GPS decisions without that secret.
+    edge_required = require_edge_origin or bool(origin_secret) and (
+        require_corroboration or has_edge_headers or bool(edge_token)
+    )
+    if edge_required and (not origin_secret or not edge_token or
+                          not hmac.compare_digest(edge_token, origin_secret)):
+        return False, "Untrusted edge network headers detected without valid origin secret."
 
     country = h.get("cf-ipcountry") or h.get("x-country-code")
     if country and country.upper() not in ("IN", "XX", "T1"):
@@ -130,8 +134,8 @@ def verify_location_anti_spoofing(
     ip_lat_str = h.get("cf-iplatitude")
     ip_lon_str = h.get("cf-iplongitude")
 
-    # Observability: log missing geolocation headers in production or when origin secret is set
-    if settings.environment == "production" or origin_secret:
+    # Observe missing geolocation headers only for edge-routed traffic.
+    if require_corroboration or (origin_secret and edge_token):
         missing_headers = []
         if not country:
             missing_headers.append("cf-ipcountry")

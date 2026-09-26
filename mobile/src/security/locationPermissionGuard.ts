@@ -23,6 +23,7 @@
 
 import { Platform, Linking} from "react-native";
 import { Alert } from "../utils/platformAlert";
+import { API_ORIGIN } from "../config/endpoints";
 
 export interface GeoCoordinates {
   latitude: float;
@@ -41,7 +42,7 @@ export type LocationGateState =
 
 type float = number;
 
-const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || "https://jainune-backend-api.onrender.com/v1").replace(/\/v1\/?$/, "");
+const API_BASE_URL = API_ORIGIN;
 
 /**
  * Validates GPS coordinate integrity against client-side spoofers and mock location apps.

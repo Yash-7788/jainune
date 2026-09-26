@@ -201,11 +201,31 @@ class TestLocationVerifier(unittest.TestCase):
         self.assertFalse(allowed)
 
     def test_origin_secret_enforcement_prevents_direct_origin_bypass(self):
-        """FINDING-07: Origin secret must be enforced when configured even if cf-* headers are omitted."""
+        """Enforce the secret after the edge gate is enabled, not before rollout."""
         from app.core.config import settings
         original_secret = settings.cloudflare_origin_secret
+        original_gate = settings.require_edge_origin
         try:
             settings.cloudflare_origin_secret = "super_secret_origin_key"
+
+            # A configured secret alone must not break existing direct clients.
+            settings.require_edge_origin = False
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"user-agent": "direct-client"}
+            )
+            self.assertTrue(valid)
+            self.assertIsNone(err)
+
+            # A client cannot claim edge geolocation or send a forged secret.
+            valid, err = verify_location_anti_spoofing(
+                19.0760, 72.8777,
+                headers={"cf-ipcountry": "IN"}
+            )
+            self.assertFalse(valid)
+            self.assertIn("without valid origin secret", err)
+
+            settings.require_edge_origin = True
 
             # Direct request omitting cf-* headers and omitting origin secret must be rejected
             valid, err = verify_location_anti_spoofing(
@@ -232,6 +252,7 @@ class TestLocationVerifier(unittest.TestCase):
             self.assertIsNone(err)
         finally:
             settings.cloudflare_origin_secret = original_secret
+            settings.require_edge_origin = original_gate
 
     def test_require_edge_corroboration_fails_closed(self):
         """FINDING-07: When require_edge_location_corroboration is True, missing headers fail closed."""

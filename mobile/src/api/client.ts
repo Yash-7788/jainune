@@ -12,24 +12,11 @@ import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
 import * as SecureStore from "../utils/secureStorage";
 import { Platform } from "react-native";
 import { ErrorCode, getFriendlyError, ERROR_MAP } from "../utils/errors";
+import { API_V1_URL } from "../config/endpoints";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_DEV_URL =
-  Platform.OS === "android"
-    ? "http://10.0.2.2:8000/v1"
-    : "http://localhost:8000/v1";
-
-function normalizeApiUrl(raw?: string): string {
-  if (!raw) return "";
-  const trimmed = raw.trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
-const PRIMARY_BASE_URL =
-  normalizeApiUrl(process.env.EXPO_PUBLIC_API_URL) ||
-  (__DEV__ ? DEFAULT_DEV_URL : "https://jainune-backend-api.onrender.com/v1");
-const SERVER_URLS = [PRIMARY_BASE_URL];
+const SERVER_URLS = [API_V1_URL];
 
 export const SECURE_KEYS = {
   ACCESS_TOKEN: "jainune_access_token",
@@ -312,7 +299,7 @@ export async function uploadToPresignedUrl(
     const uploadRes = await FileSystem.uploadAsync(presignedUrl, fileUri, {
       httpMethod: "PUT",
       uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      headers: { "Content-Type": contentType },
+      headers: { "Content-Type": contentType, "Cache-Control": "max-age=3600" },
     });
     if (uploadRes.status >= 400) {
       throw new Error(`Storage upload failed: ${uploadRes.status}`);
@@ -342,7 +329,7 @@ export async function uploadToPresignedUrl(
 
     const uploadResponse = await fetch(presignedUrl, {
       method: "PUT",
-      headers: { "Content-Type": contentType },
+      headers: { "Content-Type": contentType, "Cache-Control": "max-age=3600" },
       body: blob,
     });
 

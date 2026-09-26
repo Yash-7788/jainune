@@ -1,0 +1,14 @@
+name = "jainune-photo-proxy"
+main = "photo-proxy.mjs"
+compatibility_date = "2026-09-25"
+
+# Workers Caching works on workers.dev; the Cache API used previously did not.
+[cache]
+enabled = true
+
+[vars]
+SUPABASE_ORIGIN = "https://qawugegebqvmpeezbcim.supabase.co"
+
+# Add a custom-domain route for cdn.jainune.com only after the live canary
+# confirms TLS, image delivery, and cache behavior. Do not set MEDIA_CDN_URL
+# on Render before that check.

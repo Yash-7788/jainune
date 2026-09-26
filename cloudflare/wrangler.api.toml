@@ -1,0 +1,9 @@
+name = "jainune-api-proxy"
+main = "api-proxy.mjs"
+compatibility_date = "2026-09-25"
+
+[vars]
+API_ORIGIN = "https://jainune-backend-api.onrender.com"
+
+# Configure EDGE_ORIGIN_SECRET as a Worker secret, using the same value as
+# Render CLOUDFLARE_ORIGIN_SECRET. Never place it in this file or in Expo.

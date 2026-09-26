@@ -449,6 +449,27 @@ async def request_refund(
 # Webhook (no auth header — Razorpay sends from its servers)
 # ---------------------------------------------------------------------------
 
+_MAX_RAZORPAY_WEBHOOK_BYTES = 1024 * 1024
+
+
+async def _read_bounded_webhook_body(request: Request) -> bytes:
+    """Bound webhook memory use even when Content-Length is absent or false."""
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            declared_size = int(declared)
+            if declared_size < 0 or declared_size > _MAX_RAZORPAY_WEBHOOK_BYTES:
+                raise HTTPException(status_code=413, detail="Webhook body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _MAX_RAZORPAY_WEBHOOK_BYTES:
+            raise HTTPException(status_code=413, detail="Webhook body too large")
+        body.extend(chunk)
+    return bytes(body)
+
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
 async def razorpay_webhook(
@@ -464,7 +485,7 @@ async def razorpay_webhook(
       - payment.captured  → upgrade subscription
       - payment.refunded  → downgrade to free
     """
-    body_bytes = await request.body()
+    body_bytes = await _read_bounded_webhook_body(request)
 
     if not payment_service.verify_webhook_signature(body_bytes, x_razorpay_signature):
         log.warning("Webhook HMAC mismatch — possible spoofed request")
@@ -1170,5 +1191,3 @@ payments_router = APIRouter(prefix="/v1/payments", tags=["Payments"])
 payments_router.add_api_route("/razorpay/checkout", razorpay_web_checkout, methods=["GET"], response_class=HTMLResponse)
 payments_router.add_api_route("/razorpay/verify-web", razorpay_web_verify, methods=["POST"])
 payments_router.add_api_route("/razorpay/webhook", razorpay_webhook, methods=["POST"])
-
-

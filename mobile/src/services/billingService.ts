@@ -12,6 +12,7 @@
 import { Platform, Linking } from "react-native";
 import * as SecureStore from "../utils/secureStorage";
 import { apiPost } from "../api/client";
+import { API_ORIGIN } from "../config/endpoints";
 import {
   createSubscriptionOrder,
   syncSubscriptionOrder,
@@ -289,9 +290,7 @@ export async function launchWebPayment(planId: string): Promise<void> {
     plan_id: planId,
     timestamp: Date.now(),
   });
-  const apiBase =
-    process.env.EXPO_PUBLIC_API_URL?.replace(/\/v1\/?$/, "") ||
-    "https://jainune-backend-api.onrender.com";
+  const apiBase = API_ORIGIN;
   const returnOrigin = typeof window !== "undefined" ? window.location.origin : "";
   const checkoutUrl = `${apiBase}/v1/payments/razorpay/checkout?order_id=${encodeURIComponent(order.order_id)}&return_origin=${encodeURIComponent(returnOrigin)}`;
 

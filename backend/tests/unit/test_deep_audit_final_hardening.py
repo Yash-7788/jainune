@@ -972,14 +972,20 @@ class TestDeepAuditFinalHardening(unittest.IsolatedAsyncioTestCase):
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
 
         # 1. order.paid event alias
-        req = AsyncMock()
-        req.body.return_value = json.dumps({
+        from starlette.requests import Request
+
+        body_bytes = json.dumps({
             "event": "order.paid",
             "payload": {
                 "order": {"entity": {"id": "order_test123", "amount": 49900, "status": "paid"}},
                 "payment": {"entity": {"id": "pay_test123", "order_id": "order_test123"}},
             }
         }).encode("utf-8")
+
+        async def receive():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        req = Request({"type": "http", "headers": []}, receive)
 
         mock_redis = AsyncMock()
         mock_redis.set.return_value = True
