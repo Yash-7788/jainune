@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE revoked_refresh_tokens ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_refresh_tokens(expires_at);
 
@@ -24,5 +25,6 @@ CREATE TABLE IF NOT EXISTS feed_queues (
     candidate_ids UUID[] NOT NULL,
     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE feed_queues ENABLE ROW LEVEL SECURITY;
 
 COMMIT;

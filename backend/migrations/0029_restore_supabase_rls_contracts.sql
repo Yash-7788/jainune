@@ -1,12 +1,23 @@
 -- Restore the JWT-backed Supabase auth.uid() contract. The migration runner
 -- previously replaced this function with a NULL-returning local placeholder.
-CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-LANGUAGE sql STABLE
-AS $$
-    SELECT COALESCE(
-        NULLIF(current_setting('request.jwt.claim.sub', true), ''),
-        NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
-    )::uuid
+DO $$
+BEGIN
+    -- Hosted Supabase owns auth.uid() as supabase_auth_admin and already
+    -- supplies the JWT-backed contract. Only repair an app-owned helper.
+    IF (SELECT pg_get_userbyid(proowner)
+        FROM pg_proc WHERE oid = to_regprocedure('auth.uid()')) = current_user THEN
+        EXECUTE $function$
+            CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
+            LANGUAGE sql STABLE
+            AS $body$
+                SELECT COALESCE(
+                    NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+                    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
+                )::uuid
+            $body$
+        $function$;
+    END IF;
+END
 $$;
 
 -- RLS controls rows, not columns. Keep the intended authenticated CDN/media

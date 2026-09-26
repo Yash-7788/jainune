@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_users_user_id ON admin_users(user_id);
+ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
 
 -- 2. User Blocks table (safety and harassment prevention)
 CREATE TABLE IF NOT EXISTS user_blocks (
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS user_blocks (
 
 CREATE INDEX IF NOT EXISTS idx_user_blocks_blocker ON user_blocks(blocker_id);
 CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id);
+ALTER TABLE user_blocks ENABLE ROW LEVEL SECURITY;
 
 -- 3. Reconcile user_media columns
 ALTER TABLE user_media ADD COLUMN IF NOT EXISTS is_processed BOOLEAN NOT NULL DEFAULT FALSE;
@@ -38,7 +40,18 @@ ALTER TABLE user_media ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 UPDATE user_media SET is_processed = TRUE WHERE status = 'approved' AND is_processed = FALSE;
 
 -- 4. Fail-safe compatibility VIEW for queries referencing "media"
-CREATE OR REPLACE VIEW media AS SELECT * FROM user_media;
+CREATE OR REPLACE VIEW media WITH (security_invoker = true) AS SELECT * FROM user_media;
+REVOKE ALL ON media FROM PUBLIC;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        EXECUTE 'REVOKE ALL ON media FROM anon';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        EXECUTE 'REVOKE ALL ON media FROM authenticated';
+    END IF;
+END
+$$;
 
 -- 5. Reconcile chats columns
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS is_ephemeral BOOLEAN NOT NULL DEFAULT FALSE;

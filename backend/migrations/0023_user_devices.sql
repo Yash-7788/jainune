@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS user_devices (
     PRIMARY KEY (user_id, token)
 );
 
+-- Push tokens are only managed by the backend.
+ALTER TABLE user_devices ENABLE ROW LEVEL SECURITY;
+
 CREATE INDEX IF NOT EXISTS idx_user_devices_token ON user_devices(token);
 CREATE INDEX IF NOT EXISTS idx_user_devices_user_id ON user_devices(user_id);
 

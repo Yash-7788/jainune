@@ -161,8 +161,6 @@ CREATE TRIGGER trg_ubv_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION fn_set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_matches_updated_at_pre ON matches;
-
 -- HNSW index for sub-15ms cosine ANN search across 128-d vectors
 -- ef_construction=128 and m=16 are production-calibrated for 200k profiles
 CREATE INDEX IF NOT EXISTS idx_ubv_hnsw_cosine

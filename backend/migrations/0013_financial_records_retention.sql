@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS financial_audit_logs (
     retention_until TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '7 years')
 );
 
+-- Financial identifiers are backend-only; deny Supabase Data API roles.
+ALTER TABLE financial_audit_logs ENABLE ROW LEVEL SECURITY;
+
 CREATE INDEX IF NOT EXISTS idx_financial_audit_user ON financial_audit_logs (original_user_id);
 CREATE INDEX IF NOT EXISTS idx_financial_audit_ref ON financial_audit_logs (reference_id);
 CREATE INDEX IF NOT EXISTS idx_financial_audit_retention ON financial_audit_logs (retention_until);

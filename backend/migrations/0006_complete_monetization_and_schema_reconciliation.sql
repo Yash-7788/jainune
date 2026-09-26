@@ -234,4 +234,17 @@ CREATE TABLE IF NOT EXISTS daily_proposals (
 
 CREATE INDEX IF NOT EXISTS idx_daily_proposals_pair ON daily_proposals (user_a_id, user_b_id);
 
+-- These financial, reporting, and telemetry tables are accessed by the API's
+-- database connection, not directly by Supabase Data API clients.
+ALTER TABLE payment_intents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_arcade_wallet ENABLE ROW LEVEL SECURITY;
+ALTER TABLE arcade_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dignity_badges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dilemmas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telemetry_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telemetry_hourly ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_proposals ENABLE ROW LEVEL SECURITY;
+
 COMMIT;

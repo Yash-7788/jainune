@@ -19,4 +19,7 @@ CREATE TABLE IF NOT EXISTS store_subscriptions (
     CONSTRAINT uq_store_sub_orig_txn UNIQUE (store, original_transaction_id)
 );
 
+-- Store transaction identifiers are accessed by the backend only.
+ALTER TABLE store_subscriptions ENABLE ROW LEVEL SECURITY;
+
 CREATE INDEX IF NOT EXISTS idx_store_sub_user ON store_subscriptions(user_id);

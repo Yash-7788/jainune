@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS banned_image_hashes (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Internal moderation fingerprints must not be readable through the Data API.
+ALTER TABLE banned_image_hashes ENABLE ROW LEVEL SECURITY;
+
 -- GIN index for bulk LIKE/contains if needed later (no-op for exact match, covered by PK)
 COMMENT ON TABLE banned_image_hashes IS
     'Perceptual hash fingerprints of AI-rejected photos. Checked in-memory (O(1)) pre-API.';

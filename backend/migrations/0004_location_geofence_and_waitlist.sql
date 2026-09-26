@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS location_waitlist (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- The backend alone reads and writes precise waitlist coordinates. With no
+-- client policy, RLS denies access through Supabase's Data API.
+ALTER TABLE location_waitlist ENABLE ROW LEVEL SECURITY;
+
 CREATE INDEX IF NOT EXISTS idx_location_waitlist_created
     ON location_waitlist (created_at DESC);
 
