@@ -115,9 +115,15 @@ async def _periodic_maintenance_loop() -> None:
                        AND created_at < NOW() - INTERVAL '24 hours'
                 """)
 
-                # 5. Off-peak daily heavy maintenance (at or after 3:30 AM IST = 22:00 UTC)
+                # 4b. Purge physically expired revoked_refresh_tokens rows (unbounded growth prevention)
+                # Rows are logically expired past expires_at but never deleted without this cleanup.
+                await conn.execute(
+                    "DELETE FROM revoked_refresh_tokens WHERE expires_at < NOW()"
+                )
+
+                # 5. Off-peak daily heavy maintenance (at or after 3:30 AM IST, i.e. >22:00 UTC previous day)
                 # Slashes maintenance DB IOPS on Supabase by running heavy table scans once daily.
-                # Uses postgres advisory lock + system_maintenance_runs table for multi-instance safety.
+                # Uses atomic DB lease (INSERT ON CONFLICT RETURNING) on system_maintenance_runs for multi-instance safety.
                 now_ist = datetime.now(_IST)
                 is_time_for_daily = (now_ist.hour > 3) or (now_ist.hour == 3 and now_ist.minute >= 30)
 
